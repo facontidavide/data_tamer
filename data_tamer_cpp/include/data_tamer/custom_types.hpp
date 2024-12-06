@@ -151,9 +151,6 @@ template <typename T>
 inline CustomSerializerT<T>::CustomSerializerT(std::string type_name)
   : _name(std::move(type_name))
 {
-  static_assert(!SerializeMe::container_info<T>().is_container, "Don't pass containers a "
-                                                                "template type");
-
   bool is_fixed_size = true;
   GetFixedSize<T>(is_fixed_size, _fixed_size);
   if(!is_fixed_size)
@@ -198,8 +195,6 @@ inline CustomSerializer::Ptr TypesRegistry::getSerializer()
 {
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
-  static_assert(!SerializeMe::container_info<T>().is_container, "Don't pass containers "
-                                                                "as template type");
 
   std::scoped_lock lk(_mutex);
   T dummy;
@@ -221,8 +216,6 @@ inline CustomSerializer::Ptr TypesRegistry::addType(const std::string& type_name
 {
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
-  static_assert(!SerializeMe::container_info<T>().is_container, "Don't pass containers "
-                                                                "as template type");
 
   std::scoped_lock lk(_mutex);
   if(skip_if_present && _types.count(type_name) != 0)

@@ -9,6 +9,7 @@
 
 namespace DataTamer
 {
+using SerializeMe::has_TypeDefinition;
 
 // Utility
 inline std::chrono::nanoseconds NsecSinceEpoch()
@@ -73,7 +74,7 @@ public:
    * @param value  pointer to the value
    * @return       the ID to be used to unregister or enable/disable this value.
    */
-  template <typename T>
+  template <typename T, bool = true>
   RegistrationID registerValue(const std::string& name, const T* value);
 
   /**
@@ -85,7 +86,8 @@ public:
    * @param value  pointer to the vectors of values.
    * @return       the ID to be used to unregister or enable/disable the values.
    */
-  template <template <class, class> class Container, class T, class... TArgs>
+  template <template <class, class> class Container, class T, class... TArgs,
+            std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
   RegistrationID registerValue(const std::string& name,
                                const Container<T, TArgs...>* value);
 
@@ -98,7 +100,8 @@ public:
    * @param value  pointer to the array of values.
    * @return       the ID to be used to unregister or enable/disable the values.
    */
-  template <typename T, size_t N>
+  template <typename T, size_t N,
+            std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool> = true>
   RegistrationID registerValue(const std::string& name, const std::array<T, N>* value);
 
   /**
@@ -259,7 +262,7 @@ inline void LogChannel::updateTypeRegistry()
   }
 }
 
-template <typename T>
+template <typename T, bool>
 inline RegistrationID LogChannel::registerValue(const std::string& name,
                                                 const T* value_ptr)
 {
@@ -288,7 +291,8 @@ inline RegistrationID LogChannel::registerCustomValue(const std::string& name,
   return registerValueImpl(name, ValuePtr(value_ptr, serializer), serializer);
 }
 
-template <template <class, class> class Container, class T, class... TArgs>
+template <template <class, class> class Container, class T, class... TArgs,
+          std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline RegistrationID LogChannel::registerValue(const std::string& prefix,
                                                 const Container<T, TArgs...>* vect)
 {
@@ -304,7 +308,8 @@ inline RegistrationID LogChannel::registerValue(const std::string& prefix,
   }
 }
 
-template <typename T, size_t N>
+template <typename T, size_t N,
+          std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline RegistrationID LogChannel::registerValue(const std::string& prefix,
                                                 const std::array<T, N>* vect)
 {

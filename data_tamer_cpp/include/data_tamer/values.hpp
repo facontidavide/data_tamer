@@ -9,6 +9,7 @@
 
 namespace DataTamer
 {
+using SerializeMe::has_TypeDefinition;
 
 /**
  * @brief The ValuePtr is a non-owning pointer to
@@ -19,19 +20,23 @@ class ValuePtr
 public:
   ValuePtr() = default;
 
-  template <typename T>
+  template <typename T, bool = true>
   ValuePtr(const T* pointer, CustomSerializer::Ptr type_info = {});
 
-  template <template <class, class> class Container, class T, class... TArgs>
+  template <template <class, class> class Container, class T, class... TArgs,
+            std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
   ValuePtr(const Container<T, TArgs...>* vect);
 
-  template <template <class, class> class Container, class T, class... TArgs>
+  template <template <class, class> class Container, class T, class... TArgs,
+            std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
   ValuePtr(const Container<T, TArgs...>* vect, CustomSerializer::Ptr type_info);
 
-  template <typename T, size_t N>
+  template <typename T, size_t N,
+            std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool> = true>
   ValuePtr(const std::array<T, N>* vect);
 
-  template <typename T, size_t N>
+  template <typename T, size_t N,
+            std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool> = true>
   ValuePtr(const std::array<T, N>* vect, CustomSerializer::Ptr type_info);
 
   ValuePtr(ValuePtr const& other) = delete;
@@ -70,7 +75,7 @@ private:
 //------------------------------------------------------------
 //------------------------------------------------------------
 
-template <typename T>
+template <typename T, bool>
 inline ValuePtr::ValuePtr(const T* pointer, CustomSerializer::Ptr type_info)
   : v_ptr_(pointer)
   , type_(GetBasicType<T>())
@@ -89,7 +94,8 @@ inline ValuePtr::ValuePtr(const T* pointer, CustomSerializer::Ptr type_info)
   }
 }
 
-template <template <class, class> class Container, class T, class... TArgs>
+template <template <class, class> class Container, class T, class... TArgs,
+          std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect)
   : v_ptr_(vect)
   , type_(GetBasicType<T>())
@@ -103,7 +109,8 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect)
   get_size_impl_ = [vect]() -> size_t { return SerializeMe::BufferSize(*vect); };
 }
 
-template <template <class, class> class Container, class T, class... TArgs>
+template <template <class, class> class Container, class T, class... TArgs,
+          std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect,
                           CustomSerializer::Ptr type_info)
   : v_ptr_(vect)
@@ -137,7 +144,7 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect,
   };
 }
 
-template <typename T, size_t N>
+template <typename T, size_t N, std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline ValuePtr::ValuePtr(const std::array<T, N>* array)
   : v_ptr_(array)
   , type_(GetBasicType<T>())
@@ -151,7 +158,7 @@ inline ValuePtr::ValuePtr(const std::array<T, N>* array)
   get_size_impl_ = [array]() { return SerializeMe::BufferSize(*array); };
 }
 
-template <typename T, size_t N>
+template <typename T, size_t N, std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline ValuePtr::ValuePtr(const std::array<T, N>* array, CustomSerializer::Ptr type_info)
   : v_ptr_(array)
   , type_(GetBasicType<T>())
