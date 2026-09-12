@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <future>
 #include <thread>
 
@@ -69,7 +70,14 @@ public:
   mutable Gate* gate = nullptr;
   bool throw_size = false;
   bool throw_serialize = false;
+  bool throw_schema = false;
   mutable size_t size_calls = 0;
+  std::optional<CustomSchema> typeSchema() const override
+  {
+    if(throw_schema)
+      throw std::runtime_error("schema");
+    return std::nullopt;
+  }
   const std::string& typeName() const override
   {
     static const std::string name = "CustomValue";
@@ -79,13 +87,16 @@ public:
   size_t serializedSize(const void*) const override
   {
     ++size_calls;
-    if(gate) gate->pause();
-    if(throw_size) throw std::runtime_error("size");
+    if(gate)
+      gate->pause();
+    if(throw_size)
+      throw std::runtime_error("size");
     return 8;
   }
   void serialize(const void* source, SerializeMe::SpanBytes& bytes) const override
   {
-    if(throw_serialize) throw std::runtime_error("serialize");
+    if(throw_serialize)
+      throw std::runtime_error("serialize");
     const auto value = static_cast<const CustomValue*>(source)->value;
     std::memcpy(bytes.data(), &value, 8);
     bytes.trimFront(8);
@@ -107,15 +118,18 @@ public:
   std::function<void()> on_store;
   void addChannel(const std::string&, const Schema& value) override
   {
-    if(add_gate) add_gate->pause();
-    if(reject_schema) throw std::runtime_error("schema");
+    if(add_gate)
+      add_gate->pause();
+    if(reject_schema)
+      throw std::runtime_error("schema");
     ++registrations;
     schema = value;
   }
   bool storeSnapshot(const Snapshot& value) override
   {
     snapshots.push_back(value);
-    if(on_store) on_store();
+    if(on_store)
+      on_store();
     return true;
   }
 };
@@ -229,8 +243,11 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
   serializer->gate = &gate;
   auto snapshot = std::async(std::launch::async, [&] { return channel->takeSnapshot(); });
   EXPECT_TRUE(gate.wait());
-  std::atomic<bool> returned{false};
-  auto removal = std::async(std::launch::async, [&] { channel->unregister(id); returned = true; });
+  std::atomic<bool> returned{ false };
+  auto removal = std::async(std::launch::async, [&] {
+    channel->unregister(id);
+    returned = true;
+  });
   // Observing cleared liveness establishes that removal reached its publication.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
   while(channel->sharedState()->isEnabled(id.first_index) &&
@@ -373,12 +390,12 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
   channel->addDataSink(stable);
   ASSERT_TRUE(channel->takeSnapshot());
   // Reuse the same registered type from two independent controller threads.
-  std::atomic<bool> done{false};
+  std::atomic<bool> done{ false };
   std::thread toggler([&] {
     while(!done)
     {
-      channel->setEnabled({0, 3}, false);
-      channel->setEnabled({0, 3}, true);
+      channel->setEnabled({ 0, 3 }, false);
+      channel->setEnabled({ 0, 3 }, true);
     }
   });
   std::thread second_control([&] {
@@ -418,7 +435,7 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
 
 TEST(ChannelControl, SerializerExceptionsLeaveEpochAndPoolReusable)
 {
-  for(bool size_pass : {false, true})
+  for(bool size_pass : { false, true })
   {
     auto channel = LogChannel::create("control");
     auto sink = std::make_shared<ControlSink>();
@@ -452,8 +469,25 @@ TEST(ChannelControl, ExhaustedPoolDoesNotCallSerializer)
   auto serializer = std::make_shared<PausedSerializer>();
   channel->registerCustomValue("value", &value, serializer);
   channel->addDataSink(sink);
-  for(size_t i = 0; i < SnapshotPool::kDefaultCapacity; ++i) ASSERT_TRUE(channel->takeSnapshot());
+  for(size_t i = 0; i < SnapshotPool::kDefaultCapacity; ++i)
+    ASSERT_TRUE(channel->takeSnapshot());
   const auto calls = serializer->size_calls;
   EXPECT_FALSE(channel->takeSnapshot());
   EXPECT_EQ(serializer->size_calls, calls);
+}
+
+TEST(ChannelControl, FailedRegistrationLeavesTheChannelUnchanged)
+{
+  auto channel = LogChannel::create("control");
+  CustomValue value;
+  auto serializer = std::make_shared<PausedSerializer>();
+  serializer->throw_schema = true;
+  EXPECT_THROW(channel->registerCustomValue("value", &value, serializer),
+               std::runtime_error);
+  EXPECT_TRUE(channel->getSchema().fields.empty());
+  serializer->throw_schema = false;
+  EXPECT_NO_THROW(channel->registerCustomValue("value", &value, serializer));
+  EXPECT_EQ(channel->getSchema().fields.size(), 1u);
+  EXPECT_THROW(channel->registerCustomValue("other", &value, CustomSerializer::Ptr{}),
+               std::invalid_argument);
 }

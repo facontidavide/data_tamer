@@ -136,7 +136,8 @@ decoders may ignore that.
 
 ### 3.1 Active mask
 
-`ceil(F / 8)` bytes for `F` top-level fields. Bit `i` of the mask is
+At least `ceil(F / 8)` bytes for `F` top-level fields; a shorter mask is a
+malformed snapshot and decoders must reject it. Bit `i` of the mask is
 `mask[i >> 3] & (1 << (i & 7))`: byte 0 holds fields 0 to 7, the least
 significant bit first. A set bit means the field is present in the payload.
 Bits beyond `F - 1` are unspecified (the writer currently sets them); ignore
@@ -164,7 +165,10 @@ decode_field(field):
 ```
 
 After the loop `pos` must equal the payload length; otherwise the schema and
-the payload do not belong together.
+the payload do not belong together. Decoders must check every read against the
+remaining payload before performing it, reject a dynamic count larger than the
+remaining bytes allow, and bound the nesting depth of custom types (the reference
+decoders use 64) so that a malformed or cyclic schema cannot recurse forever.
 
 Flattened series names, as produced by the reference decoders and PlotJuggler:
 nested fields join with `/`, container elements append `[i]`:
@@ -221,11 +225,13 @@ It is defined byte for byte so that any decoder can verify it:
 
 with the standard FNV-1a 64-bit parameters, offset basis `0xcbf29ce484222325`
 and prime `0x100000001b3`, applied to the UTF-8 bytes of the text exactly as
-written by the producer (section 2), minus the whole `### hash: ...` line and
-its terminating newline. Everything else contributes: version, channel name,
-top-level fields, custom type sections and opaque encodings. Two schemas that
-differ anywhere, including inside a custom type body, have different hashes,
-and the same schema hashes identically on every platform.
+written by the producer (section 2), minus the first line that starts with
+`### hash:` (the header line) and its terminating newline; a line inside an
+opaque schema body is not removed. Everything else contributes: version, channel
+name, top-level fields, custom type sections and opaque encodings. Any change
+to the schema, including inside a custom type body, changes the hash (up to the
+collision probability of a 64-bit hash), and the same schema hashes identically
+on every platform.
 
 Decoders match a snapshot to a schema by comparing the snapshot's hash with the
 `### hash:` line of the schema shipped next to it (MCAP: the schema record

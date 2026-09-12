@@ -65,7 +65,11 @@ def _parse_field_line(line: str) -> Field:
 
 def schema_hash(text: str) -> int:
     """FNV-1a 64 of the schema text with its '### hash:' line removed (spec section 5)."""
-    lines = [l for l in text.split("\n") if not l.startswith("### hash:")]
+    lines = text.split("\n")
+    for i, l in enumerate(lines):  # exactly the header line, as the C++ writer does
+        if l.startswith("### hash:"):
+            del lines[i]
+            break
     h = 0xCBF29CE484222325
     for byte in "\n".join(lines).encode("utf-8"):
         h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
@@ -108,7 +112,12 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     return schema
 
 
+MAX_SCHEMA_DEPTH = 64  # deeper nesting is treated as a malformed (cyclic) schema
+
+
 def get_bit(mask: bytes, index: int) -> bool:
+    if (index >> 3) >= len(mask):
+        raise ValueError("active mask shorter than the schema")
     return bool(mask[index >> 3] & (1 << (index & 7)))
 
 
@@ -116,6 +125,9 @@ class _Reader:
     def __init__(self, data: bytes):
         self.data = data
         self.pos = 0
+
+    def remaining(self) -> int:
+        return len(self.data) - self.pos
 
     def number(self, type_name: str):
         fmt = _STRUCT[type_name]
@@ -126,13 +138,18 @@ class _Reader:
         return value.decode("latin-1") if type_name == "char" else value
 
 
-def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict) -> None:
+def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
+                 depth: int = 0) -> None:
+    if depth > MAX_SCHEMA_DEPTH:
+        raise ValueError("custom types nested too deeply (cyclic schema?)")
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
     if f.is_vector:
         count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
-        names = [f"{name}[{i}]" for i in range(count)]
+        if f.is_basic and count * _STRUCT[f.type_name].size > reader.remaining():
+            raise ValueError("payload truncated")
+        names = (f"{name}[{i}]" for i in range(count))  # lazy: the count is untrusted
     else:
-        names = [name]
+        names = (name,)
     if f.is_basic:
         for n in names:
             out[n] = reader.number(f.type_name)
@@ -140,7 +157,7 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
         subs = schema.custom_types[f.type_name]
         for n in names:
             for sub in subs:
-                _parse_field(sub, schema, reader, n, out)
+                _parse_field(sub, schema, reader, n, out, depth + 1)
     else:
         raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
 

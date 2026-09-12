@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <locale>
 #include <sstream>
 #include <unordered_map>
 
@@ -193,6 +194,7 @@ bool TypeField::operator!=(const TypeField& other) const
 std::string ToStr(const Schema& schema)
 {
   std::ostringstream ss;
+  ss.imbue(std::locale::classic());  // the hash covers this text: never locale-dependent
   ss << schema;
   return ss.str();
 }

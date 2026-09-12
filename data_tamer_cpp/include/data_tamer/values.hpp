@@ -14,9 +14,13 @@ using SerializeMe::has_TypeDefinition;
 namespace details
 {
 template <typename T>
-struct is_std_atomic : std::false_type {};
+struct is_std_atomic : std::false_type
+{
+};
 template <typename T>
-struct is_std_atomic<std::atomic<T>> : std::true_type {};
+struct is_std_atomic<std::atomic<T>> : std::true_type
+{
+};
 }  // namespace details
 
 /**
@@ -44,12 +48,14 @@ public:
   template <typename T, std::enable_if_t<IsNumericType<T>(), bool> = true>
   ValuePtr(const std::atomic<T>* pointer);
 
-  template <template <class, class> class Container, class T, class... TArgs,
-            std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
+  template <
+      template <class, class> class Container, class T, class... TArgs,
+      std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
   ValuePtr(const Container<T, TArgs...>* vect);
 
-  template <template <class, class> class Container, class T, class... TArgs,
-            std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
+  template <
+      template <class, class> class Container, class T, class... TArgs,
+      std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool> = true>
   ValuePtr(const Container<T, TArgs...>* vect, CustomSerializer::Ptr type_info);
 
   template <typename T, size_t N,
@@ -97,11 +103,13 @@ private:
   uint16_t array_size_ = 0;
 
   // ---- the type-erased implementations ----
-  static void serializeNone(const void*, const CustomSerializer*, SerializeMe::SpanBytes&) {}
+  static void serializeNone(const void*, const CustomSerializer*, SerializeMe::SpanBytes&)
+  {}
   static size_t sizeNone(const void*, const CustomSerializer*) { return 0; }
 
   template <typename T>
-  static void serializeNumeric(const void* v, const CustomSerializer*, SerializeMe::SpanBytes& dst)
+  static void serializeNumeric(const void* v, const CustomSerializer*,
+                               SerializeMe::SpanBytes& dst)
   {
     std::memcpy(dst.data(), v, sizeof(T));
     dst.trimFront(sizeof(T));
@@ -113,14 +121,16 @@ private:
   }
 
   template <typename T>
-  static void serializeAtomic(const void* v, const CustomSerializer*, SerializeMe::SpanBytes& dst)
+  static void serializeAtomic(const void* v, const CustomSerializer*,
+                              SerializeMe::SpanBytes& dst)
   {
     const T tmp = static_cast<const std::atomic<T>*>(v)->load(std::memory_order_relaxed);
     std::memcpy(dst.data(), &tmp, sizeof(T));
     dst.trimFront(sizeof(T));
   }
 
-  static void serializeCustom(const void* v, const CustomSerializer* s, SerializeMe::SpanBytes& dst)
+  static void serializeCustom(const void* v, const CustomSerializer* s,
+                              SerializeMe::SpanBytes& dst)
   {
     s->serialize(v, dst);
   }
@@ -130,7 +140,8 @@ private:
   }
 
   template <typename C>
-  static void serializeContainer(const void* v, const CustomSerializer*, SerializeMe::SpanBytes& dst)
+  static void serializeContainer(const void* v, const CustomSerializer*,
+                                 SerializeMe::SpanBytes& dst)
   {
     SerializeMe::SerializeIntoBuffer(dst, *static_cast<const C*>(v));
   }
@@ -172,7 +183,8 @@ private:
   }
 
   template <typename A>
-  static void serializeArrayCustom(const void* v, const CustomSerializer* s, SerializeMe::SpanBytes& dst)
+  static void serializeArrayCustom(const void* v, const CustomSerializer* s,
+                                   SerializeMe::SpanBytes& dst)
   {
     for(const auto& value : *static_cast<const A*>(v))
     {
@@ -245,7 +257,8 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect)
 
 template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
-inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect, CustomSerializer::Ptr type_info)
+inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect,
+                          CustomSerializer::Ptr type_info)
   : v_ptr_(vect)
   , serialize_fn_(&ValuePtr::serializeContainerCustom<Container<T, TArgs...>>)
   , size_fn_(&ValuePtr::sizeContainerCustom<Container<T, TArgs...>>)
@@ -255,7 +268,8 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect, CustomSerializer::
   , is_vector_(true)
 {}
 
-template <typename T, size_t N, std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
+template <typename T, size_t N,
+          std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline ValuePtr::ValuePtr(const std::array<T, N>* array)
   : v_ptr_(array)
   , serialize_fn_(&ValuePtr::serializeContainer<std::array<T, N>>)
@@ -264,9 +278,13 @@ inline ValuePtr::ValuePtr(const std::array<T, N>* array)
   , type_(GetBasicType<T>())
   , is_vector_(true)
   , array_size_(N)
-{}
+{
+  static_assert(N >= 1 && N <= 65535, "fixed array extent must be in 1..65535 (wire "
+                                      "format)");
+}
 
-template <typename T, size_t N, std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
+template <typename T, size_t N,
+          std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline ValuePtr::ValuePtr(const std::array<T, N>* array, CustomSerializer::Ptr type_info)
   : v_ptr_(array)
   , serialize_fn_(&ValuePtr::serializeArrayCustom<std::array<T, N>>)
@@ -276,7 +294,10 @@ inline ValuePtr::ValuePtr(const std::array<T, N>* array, CustomSerializer::Ptr t
   , type_(GetBasicType<T>())
   , is_vector_(true)
   , array_size_(N)
-{}
+{
+  static_assert(N >= 1 && N <= 65535, "fixed array extent must be in 1..65535 (wire "
+                                      "format)");
+}
 
 inline bool ValuePtr::operator==(const ValuePtr& other) const
 {

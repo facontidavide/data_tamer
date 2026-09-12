@@ -296,22 +296,36 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
   using SerializeMe::container_info;
   TypeField field;
   field.field_name = field_name;
-  field.type = GetBasicType<T>();
 
-  if constexpr(GetBasicType<T>() == BasicType::OTHER)
+  if constexpr(container_info<T>::is_container)
   {
-    field.type_name = CustomTypeName<T>::get();
-
-    if constexpr(container_info<T>::is_container)
+    // A container member is described by its element type, like a top-level
+    // registerValue() of the same container: "float64[3] axis", "Pose[] poses".
+    using Type = typename container_info<T>::value_type;
+    field.is_vector = true;
+    field.array_size = container_info<T>::size;
+    field.type = GetBasicType<Type>();
+    if constexpr(GetBasicType<Type>() == BasicType::OTHER)
     {
-      field.is_vector = true;
-      field.array_size = container_info<T>::size;
-      using Type = typename container_info<T>::value_type;
+      field.type_name = CustomTypeName<Type>::get();
       updateTypeRegistry<Type>();
     }
     else
     {
+      field.type_name = ToStr(field.type);
+    }
+  }
+  else
+  {
+    field.type = GetBasicType<T>();
+    if constexpr(GetBasicType<T>() == BasicType::OTHER)
+    {
+      field.type_name = CustomTypeName<T>::get();
       updateTypeRegistry<T>();
+    }
+    else
+    {
+      field.type_name = ToStr(field.type);
     }
   }
   fields.push_back(field);
@@ -320,31 +334,31 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
 template <typename T>
 inline void LogChannel::updateTypeRegistry()
 {
-  if constexpr(IsNumericType<T>())
+  if constexpr(!IsNumericType<
+                   T>())  // everything below must not be instantiated for numbers
   {
-    return;
-  }
-  using namespace SerializeMe;
-  static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
+    using namespace SerializeMe;
+    static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
 
-  FieldsVector fields;
-  const std::string type_name(CustomTypeName<T>::get());
-  if(schemaFrozen())
-  {
-    if(!hasCustomType(type_name))
-      throw std::runtime_error("Can't add a custom type after recording started");
-    return;
-  }
-  if(auto added_serializer = _type_registry.addType<T>(type_name, true))
-  {
-    auto func = [this, &fields](const char* field_name, const auto* member) {
-      using MemberType =
-          typename std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
-      updateTypeRegistryImpl<MemberType>(fields, field_name);
-    };
-    T dummy;
-    TypeDefinition(dummy, func);
-    addCustomType(type_name, fields);
+    FieldsVector fields;
+    const std::string type_name(CustomTypeName<T>::get());
+    if(schemaFrozen())
+    {
+      if(!hasCustomType(type_name))
+        throw std::runtime_error("Can't add a custom type after recording started");
+      return;
+    }
+    if(auto added_serializer = _type_registry.addType<T>(type_name, true))
+    {
+      auto func = [this, &fields](const char* field_name, const auto* member) {
+        using MemberType =
+            typename std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
+        updateTypeRegistryImpl<MemberType>(fields, field_name);
+      };
+      T dummy;
+      TypeDefinition(dummy, func);
+      addCustomType(type_name, fields);
+    }
   }
 }
 
@@ -383,7 +397,10 @@ inline RegistrationID LogChannel::registerCustomValue(const std::string& name,
 {
   std::lock_guard const lock(controlMutex());
   static_assert(!IsNumericType<T>(), "This method should be used only for custom types");
-
+  if(!serializer)
+  {
+    throw std::invalid_argument("registerCustomValue: the serializer can not be null");
+  }
   return registerValueImpl(name, ValuePtr(value_ptr, serializer), serializer);
 }
 
