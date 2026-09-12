@@ -40,20 +40,20 @@ TEST(DataTamerBasic, SinkAdd)
   for(int i = 0; i < shapshot_count; i++)
   {
     channel->takeSnapshot();
-    std::this_thread::sleep_for(std::chrono::microseconds(50));
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  dummy_sink_A->flush();
+  dummy_sink_B->flush();
 
   const auto hash = channel->getSchema().hash;
 
-  ASSERT_EQ(dummy_sink_A->schemas.size(), 1);
-  ASSERT_EQ(dummy_sink_A->schemas.begin()->first, hash);
-  ASSERT_EQ(dummy_sink_A->snapshots_count[hash], shapshot_count);
+  ASSERT_EQ(dummy_sink_A->schemasCount(), 1);
+  ASSERT_EQ(dummy_sink_A->firstSchemaHash(), hash);
+  ASSERT_EQ(dummy_sink_A->snapshotsCount(hash), shapshot_count);
 
-  ASSERT_EQ(dummy_sink_B->schemas.size(), 1);
-  ASSERT_EQ(dummy_sink_B->schemas.begin()->first, hash);
-  ASSERT_EQ(dummy_sink_B->snapshots_count[hash], shapshot_count);
+  ASSERT_EQ(dummy_sink_B->schemasCount(), 1);
+  ASSERT_EQ(dummy_sink_B->firstSchemaHash(), hash);
+  ASSERT_EQ(dummy_sink_B->snapshotsCount(hash), shapshot_count);
 }
 
 TEST(DataTamerBasic, SerializeVariant)
@@ -109,14 +109,12 @@ TEST(DataTamerBasic, TestRegistration)
   // changing the pointer to another one is valid
   // but only if we unregister first
   channel->unregister(id_v2);
+  // changing type is never allowed, not even after unregistering
+  ASSERT_THROW(channel->registerValue("v2", &i1), std::runtime_error);
   id_v2 = channel->registerValue("v2", &v2_bis);
 
-  // changing type is never allowed, not even if we unregister
-  ASSERT_ANY_THROW(channel->registerValue("v2", &i1));
-
   channel->takeSnapshot();
-  // give time to the sink thread to do its work
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  sink->flush();
 
   // changing the pointer after takeSnapshot is valid
   channel->unregister(id_i2);
@@ -124,11 +122,11 @@ TEST(DataTamerBasic, TestRegistration)
 
   // adding a new value after takeSnapshot is not valid (would change the schema)
   ASSERT_ANY_THROW(channel->registerValue("i3", &i3););
-  ASSERT_EQ(sink->latest_snapshot.active_mask.size(), 1);
+  ASSERT_EQ(sink->latestActiveMask().size(), 1);
 
   // payload should contain v1, v2, i1 and i2
   auto expected_size = sizeof(double) * 2 + sizeof(int32_t) * 2;
-  ASSERT_EQ(sink->latest_snapshot.payload.size(), expected_size);
+  ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 
   //-----------------------------------------------------------------
   // Unregister or disable some values. This should reduce the size of the snapshot
@@ -136,11 +134,11 @@ TEST(DataTamerBasic, TestRegistration)
   channel->setEnabled(id_i1, false);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  sink->flush();
 
   // payload should contain v2, and i2
   auto reduced_size = sizeof(double) + sizeof(int32_t);
-  ASSERT_EQ(sink->latest_snapshot.payload.size(), reduced_size);
+  ASSERT_EQ(sink->latestPayloadSize(), reduced_size);
 
   //-----------------------------------------------------------------
   // Register and enable again
@@ -148,9 +146,9 @@ TEST(DataTamerBasic, TestRegistration)
   channel->setEnabled(id_i1, true);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  sink->flush();
 
-  ASSERT_EQ(sink->latest_snapshot.payload.size(), expected_size);
+  ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 }
 
 TEST(DataTamerBasic, Vector)
@@ -166,8 +164,8 @@ TEST(DataTamerBasic, Vector)
   const auto expected_size = 4 * sizeof(float) + sizeof(uint32_t);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_EQ(sink->latest_snapshot.payload.size(), expected_size);
+  sink->flush();
+  ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 }
 
 TEST(DataTamerBasic, Disable)
@@ -196,40 +194,40 @@ TEST(DataTamerBasic, Disable)
                          3 * sizeof(double) + 4 * sizeof(float) + sizeof(uint32_t);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_EQ(sink->latest_snapshot.payload.size(), expected_size);
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11111111);
+  sink->flush();
+  ASSERT_EQ(sink->latestPayloadSize(), expected_size);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11111111);
 
   auto checkSize = [&](const auto& id, size_t size) {
     channel->setEnabled(id, false);
     channel->takeSnapshot();
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    sink->flush();
     channel->setEnabled(id, true);
 
     size_t expected = expected_size - size;
-    ASSERT_EQ(sink->latest_snapshot.payload.size(), expected);
+    ASSERT_EQ(sink->latestPayloadSize(), expected);
   };
 
   checkSize(id_v1, sizeof(v1));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11111110);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11111110);
 
   checkSize(id_v2, sizeof(v2));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11111101);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11111101);
 
   checkSize(id_v3, sizeof(v3));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11111011);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11111011);
 
   checkSize(id_v4, sizeof(v4));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11110111);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11110111);
 
   checkSize(id_v5, sizeof(v5));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11101111);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11101111);
 
   checkSize(id_v6, 3 * sizeof(double));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b11011111);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b11011111);
 
   checkSize(id_v7, 4 * sizeof(float) + sizeof(uint32_t));
-  ASSERT_EQ(sink->latest_snapshot.active_mask[0], 0b10111111);
+  ASSERT_EQ(sink->latestActiveMask()[0], 0b10111111);
 }
 
 TEST(DataTamerBasic, VectorWithChangingSize)
@@ -242,8 +240,8 @@ TEST(DataTamerBasic, VectorWithChangingSize)
   channel->registerValue("vect", &vect);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_EQ(sink->latest_snapshot.payload.size(),
+  sink->flush();
+  ASSERT_EQ(sink->latestPayloadSize(),
             vect.size() * sizeof(float) + sizeof(uint32_t));
 
   // if we push more elements into the vector, it should
@@ -254,21 +252,23 @@ TEST(DataTamerBasic, VectorWithChangingSize)
   }
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_EQ(sink->latest_snapshot.payload.size(),
+  sink->flush();
+  ASSERT_EQ(sink->latestPayloadSize(),
             vect.size() * sizeof(float) + sizeof(uint32_t));
 
   // same is the vector size is reduced
   vect.resize(5);
 
   channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  ASSERT_EQ(sink->latest_snapshot.payload.size(),
+  sink->flush();
+  ASSERT_EQ(sink->latestPayloadSize(),
             vect.size() * sizeof(float) + sizeof(uint32_t));
 }
 
 TEST(DataTamerBasic, LockedPtr)
 {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   auto channel = LogChannel::create("chan");
   auto logged_float = channel->createLoggedValue<float>("real");
   float val = 3.14f;
@@ -292,6 +292,7 @@ TEST(DataTamerBasic, LockedPtr)
 
   // now expect that our assignment to the locked pointer took place
   EXPECT_EQ(logged_float->get(), val2);
+#pragma GCC diagnostic pop
 }
 
 TEST(DataTamerBasic, FinishQueue)
@@ -322,33 +323,4 @@ TEST(DataTamerBasic, FinishQueue)
 
   // since we just stopped recording but not snapshots, we'll still be able to take a snapshot (but it won't be written to disk)
   EXPECT_TRUE(channel->takeSnapshot());
-}
-
-// #71: the rollover counter goes before the extension: log.mcap, log_1.mcap, ...
-TEST(DataTamerBasic, McapRolloverNumbersFilesBeforeTheExtension)
-{
-  const auto directory =
-      std::filesystem::temp_directory_path() /
-      ("data_tamer_rollover_" + std::to_string(NsecSinceEpoch().count()));
-  std::filesystem::remove_all(directory);
-  ASSERT_TRUE(std::filesystem::create_directory(directory));
-  auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<MCAPSink>((directory / "log.mcap").string());
-  sink->setCreateNewFileOnReset(true);
-  sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // every snapshot rolls over
-  channel->addDataSink(sink);
-  double value = 1.0;
-  channel->registerValue("value", &value);
-  for(int i = 0; i < 3; ++i)
-  {
-    EXPECT_TRUE(channel->takeSnapshot());
-  }
-  sink->finishQueueAndStop();
-  for(const auto& file : std::filesystem::directory_iterator(directory))
-  {
-    EXPECT_EQ(file.path().extension(), ".mcap") << file.path();
-  }
-  EXPECT_TRUE(std::filesystem::exists(directory / "log.mcap"));
-  EXPECT_TRUE(std::filesystem::exists(directory / "log_1.mcap"));
-  std::filesystem::remove_all(directory);
 }

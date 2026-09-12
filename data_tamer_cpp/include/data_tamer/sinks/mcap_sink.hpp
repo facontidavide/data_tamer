@@ -2,14 +2,9 @@
 
 #include "data_tamer/data_sink.hpp"
 
-#include <mutex>
-#include <unordered_map>
-
-// Forward declaration
-namespace mcap
-{
-class McapWriter;
-}
+#include <chrono>
+#include <memory>
+#include <string>
 
 namespace DataTamer
 {
@@ -30,7 +25,8 @@ public:
    * @param filepath   path of the file to be saved. Should have extension ".mcap"
    * @param do_compression if true, compress the data on the fly.
    */
-  explicit MCAPSink(std::string const& filepath, bool do_compression = false);
+  explicit MCAPSink(std::string const& filepath, bool do_compression = false,
+                    size_t queue_capacity = kDefaultQueueCapacity);
 
   ~MCAPSink() override;
 
@@ -53,7 +49,7 @@ public:
   void stopRecording();
 
   /// Stop taking snapshots, finish the existing queue, then `stopRecording`
-  /// will block for at least 250 us to ensure the queue is empty
+  /// Waits for admitted publications and callbacks before closing the file.
   void finishQueueAndStop();
 
   /**
@@ -68,23 +64,8 @@ public:
   void restartRecording(std::string const& filepath, bool do_compression = false);
 
 private:
-  std::string filepath_;
-  bool compression_ = false;
-  std::unique_ptr<mcap::McapWriter> writer_;
-
-  std::unordered_map<uint64_t, uint16_t> hash_to_channel_id_;
-  std::unordered_map<std::string, Schema> schemas_;
-
-  // file reset variables
-  bool create_file_on_reset_ = false;
-  std::string original_filepath_;
-  size_t file_reset_counter_ = 1;
-
-  std::chrono::seconds reset_time_ = std::chrono::seconds(60 * 10);
-  std::chrono::system_clock::time_point start_time_;
-
-  bool forced_stop_recording_ = false;
-  std::recursive_mutex mutex_;
+  struct Pimpl;
+  std::unique_ptr<Pimpl> _p;
 
   void openFile(std::string const& filepath);
   void restartRecordingImpl(std::string const& filepath, bool do_compression,

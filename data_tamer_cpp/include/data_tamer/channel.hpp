@@ -3,9 +3,12 @@
 #include "data_tamer/values.hpp"
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/logged_value.hpp"
+#include "data_tamer/details/shared_state.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 
 namespace DataTamer
 {
@@ -76,6 +79,13 @@ public:
    */
   template <typename T, bool = true>
   RegistrationID registerValue(const std::string& name, const T* value);
+
+  /**
+   * @brief registerValue for an atomic scalar. The value is read with a
+   * relaxed load when the snapshot is taken; it serializes exactly like T.
+   */
+  template <typename T, std::enable_if_t<IsNumericType<T>(), bool> = true>
+  RegistrationID registerValue(const std::string& name, const std::atomic<T>* value);
 
   /**
    * @brief registerValue add a vectors of values.
@@ -151,6 +161,8 @@ public:
 
   /**
    * @brief addDataSink add a sink, i.e. a class collecting our snapshots.
+   * A channel holds at most eight sinks; adding a ninth throws. Adding the
+   * same sink twice is a no-op.
    */
   void addDataSink(std::shared_ptr<DataSinkBase> sink);
 
@@ -168,6 +180,9 @@ public:
    * @brief takeSnapshot copies the current value of all your registered values
    *  and send an instance of Snapshot to all your Sinks.
    *
+   * Call from one snapshot producer thread per channel. Control operations
+   * (registration, unregister, sink changes) must run outside writer guards
+   * and serializer callbacks; they may wait for an active snapshot to finish.
    * @param timestamp is the time since epoch, by default.
    *
    * @return true is succesfully pushed to all its sinks.
@@ -180,7 +195,8 @@ public:
    * Therefore the vector size will be ceiling(series_count/8).
    *
    * Even if technically we may use vector<bool>, this data structure
-   * is already serialized.
+   * is already serialized. This snapshot-thread-only view is the last rebuilt
+   * mask, valid until the next snapshot or channel destruction.
    */
   [[nodiscard]] const ActiveMask& getActiveFlags();
 
@@ -198,11 +214,64 @@ public:
   */
   Mutex& writeMutex();
 
+  /// Hold the channel write mutex so a group of writes appears in one
+  /// snapshot or in none. Nested transactions on this thread are safe.
+  [[nodiscard]] ChannelSharedState::Transaction scopedWrite();
+
+  /// Snapshots that blocked after exhausting the write-mutex spin budget.
+  [[nodiscard]] uint64_t writeLockContended() const;
+
+  /// Longest blocking mutex acquisition after spin exhaustion, in nanoseconds.
+  [[nodiscard]] uint64_t writeLockWaitMaxNs() const;
+
+  /// Snapshot attempts that could not acquire a free pool slot.
+  [[nodiscard]] uint64_t poolExhausted() const;
+
+  /// Configure before the first snapshot (even one without sinks).
+  /// Each slot reserves max(bytes, 2 * initial payload size, 256); zero is automatic.
+  void setPayloadCapacity(size_t bytes);
+
+  /// Number of retained/in-flight snapshots; default 64. Zero is invalid.
+  void setPoolCapacity(size_t count);
+
+  /// May change at runtime. Oversize snapshots return false instead of growing
+  /// the acquired slot. Existing per-slot capacity is preserved. Serializer and
+  /// allocator exceptions still propagate; strict mode is not a no-throw API.
+  void setStrictMode(bool strict);
+
+  /// Successful per-slot payload growth allocations after initial reservation.
+  [[nodiscard]] uint64_t payloadReallocations() const;
+
+  /// Snapshot attempts dropped because strict mode disallowed payload growth.
+  [[nodiscard]] uint64_t droppedOversize() const;
+
+  /// Failed publications to this attachment; zero if sink is not attached.
+  [[nodiscard]] uint64_t
+  droppedSnapshots(const std::shared_ptr<DataSinkBase>& sink) const;
+
+  struct Stats
+  {
+    uint64_t write_lock_contended = 0;
+    uint64_t write_lock_wait_max_ns = 0;
+    uint64_t pool_exhausted = 0;
+    uint64_t payload_reallocations = 0;
+    uint64_t dropped_oversize = 0;
+  };
+
+  [[nodiscard]] Stats stats() const;
+
+  /// State shared with this channel's LoggedValues (enable flags, write mutex).
+  [[nodiscard]] std::shared_ptr<ChannelSharedState> sharedState() const;
+
 private:
   struct Pimpl;
   std::unique_ptr<Pimpl> _p;
 
   TypesRegistry _type_registry;
+
+  std::mutex& controlMutex();
+  bool schemaFrozen() const;
+  bool hasCustomType(const std::string& type_name) const;
 
   template <typename T>
   void updateTypeRegistry();
@@ -260,6 +329,12 @@ inline void LogChannel::updateTypeRegistry()
 
   FieldsVector fields;
   const std::string type_name(CustomTypeName<T>::get());
+  if(schemaFrozen())
+  {
+    if(!hasCustomType(type_name))
+      throw std::runtime_error("Can't add a custom type after recording started");
+    return;
+  }
   if(auto added_serializer = _type_registry.addType<T>(type_name, true))
   {
     auto func = [this, &fields](const char* field_name, const auto* member) {
@@ -277,6 +352,7 @@ template <typename T, bool>
 inline RegistrationID LogChannel::registerValue(const std::string& name,
                                                 const T* value_ptr)
 {
+  std::lock_guard const lock(controlMutex());
   using namespace SerializeMe;
   static_assert(has_TypeDefinition<T>() || IsNumericType<T>(), "Missing TypeDefinition");
 
@@ -292,11 +368,20 @@ inline RegistrationID LogChannel::registerValue(const std::string& name,
   }
 }
 
+template <typename T, std::enable_if_t<IsNumericType<T>(), bool>>
+inline RegistrationID LogChannel::registerValue(const std::string& name,
+                                                const std::atomic<T>* value_ptr)
+{
+  std::lock_guard const lock(controlMutex());
+  return registerValueImpl(name, ValuePtr(value_ptr), {});
+}
+
 template <typename T>
 inline RegistrationID LogChannel::registerCustomValue(const std::string& name,
                                                       const T* value_ptr,
                                                       CustomSerializer::Ptr serializer)
 {
+  std::lock_guard const lock(controlMutex());
   static_assert(!IsNumericType<T>(), "This method should be used only for custom types");
 
   return registerValueImpl(name, ValuePtr(value_ptr, serializer), serializer);
@@ -307,6 +392,7 @@ template <template <class, class> class Container, class T, class... TArgs,
 inline RegistrationID LogChannel::registerValue(const std::string& prefix,
                                                 const Container<T, TArgs...>* vect)
 {
+  std::lock_guard const lock(controlMutex());
   if constexpr(IsNumericType<T>())
   {
     return registerValueImpl(prefix, ValuePtr(vect), {});
@@ -324,6 +410,7 @@ template <typename T, size_t N,
 inline RegistrationID LogChannel::registerValue(const std::string& prefix,
                                                 const std::array<T, N>* vect)
 {
+  std::lock_guard const lock(controlMutex());
   if constexpr(IsNumericType<T>())
   {
     return registerValueImpl(prefix, ValuePtr(vect), {});
@@ -347,7 +434,10 @@ LogChannel::createLoggedValue(std::string const& name, T initial_value)
 template <typename T>
 inline LoggedValue<T>::LoggedValue(const std::shared_ptr<LogChannel>& channel,
                                    const std::string& name, T initial_value)
-  : channel_(channel), value_(initial_value), id_(channel->registerValue(name, &value_))
+  : state_(channel->sharedState())
+  , channel_(channel)
+  , value_(initial_value)
+  , id_(channel->registerValue(name, &value_))
 {}
 
 template <typename T>
@@ -362,64 +452,73 @@ inline LoggedValue<T>::~LoggedValue()
 template <typename T>
 inline void LoggedValue<T>::setEnabled(bool enabled)
 {
-  // lock the shared mutex in "write" mode
-  std::lock_guard lk(rw_mutex_);
-  if(auto channel = channel_.lock())
-  {
-    channel->setEnabled(id_, enabled);
-  }
-  enabled_ = enabled;
+  state_->setEnabled(id_, enabled);
+}
+
+template <typename T>
+inline bool LoggedValue<T>::isEnabled() const
+{
+  return state_->isEnabled(id_.first_index);
 }
 
 template <typename T>
 inline void LoggedValue<T>::set(const T& val, bool auto_enable)
 {
-  // lock the shared mutex in "write" mode
-  std::lock_guard lk(rw_mutex_);
-  if(auto channel = channel_.lock())
+  if constexpr(kAtomic)
   {
-    value_ = val;
-    if(!enabled_ && auto_enable)
-    {
-      channel->setEnabled(id_, true);
-      enabled_ = true;
-    }
+    value_.store(val, std::memory_order_relaxed);
   }
   else
   {
+    ChannelSharedState::Transaction transaction(*state_);
     value_ = val;
-    enabled_ |= auto_enable;
+  }
+  if(auto_enable && !isEnabled())
+  {
+    setEnabled(true);
   }
 }
 
 template <typename T>
-inline T LoggedValue<T>::get()
+inline T LoggedValue<T>::get() const
 {
-  // lock the shared mutex in "read" mode
-  rw_mutex_.lock_shared();
-  T tmp = value_;
-  rw_mutex_.unlock_shared();
-  return tmp;
+  if constexpr(kAtomic)
+  {
+    return value_.load(std::memory_order_relaxed);
+  }
+  else
+  {
+    ChannelSharedState::Transaction transaction(*state_);
+    return value_;
+  }
 }
 
 template <typename T>
+template <typename U, std::enable_if_t<is_atomic_scalar_v<U>, bool>>
+inline AtomicProxy<T> LoggedValue<T>::getMutablePtr()
+{
+  return AtomicProxy<T>(&value_);
+}
+
+template <typename T>
+template <typename U, std::enable_if_t<!is_atomic_scalar_v<U>, bool>>
 inline MutablePtr<T> LoggedValue<T>::getMutablePtr()
 {
-  if(auto channel = channel_.lock())
-  {
-    return MutablePtr<T>(&value_, &channel->writeMutex());
-  }
-  return MutablePtr<T>(&value_, nullptr);
+  return MutablePtr<T>(&value_, &state_->write_mutex);
 }
 
 template <typename T>
+template <typename U, std::enable_if_t<is_atomic_scalar_v<U>, bool>>
+inline AtomicConstProxy<T> LoggedValue<T>::getConstPtr()
+{
+  return AtomicConstProxy<T>(&value_);
+}
+
+template <typename T>
+template <typename U, std::enable_if_t<!is_atomic_scalar_v<U>, bool>>
 inline ConstPtr<T> LoggedValue<T>::getConstPtr()
 {
-  if(auto channel = channel_.lock())
-  {
-    return ConstPtr<T>(&value_, &channel->writeMutex());
-  }
-  return ConstPtr<T>(&value_, nullptr);
+  return ConstPtr<T>(&value_, &state_->write_mutex);
 }
 
 }  // namespace DataTamer

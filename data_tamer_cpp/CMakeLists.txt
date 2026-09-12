@@ -67,6 +67,9 @@ add_library(data_tamer ${LIB_TYPE}
     include/data_tamer/values.hpp
     include/data_tamer/sinks/dummy_sink.hpp
     include/data_tamer/sinks/mcap_sink.hpp
+    include/data_tamer/details/write_mutex.hpp
+    include/data_tamer/details/shared_state.hpp
+    include/data_tamer/details/snapshot_pool.hpp
 
     src/channel.cpp
     src/data_tamer.cpp

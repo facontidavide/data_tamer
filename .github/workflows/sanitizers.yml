@@ -1,0 +1,28 @@
+name: sanitizers
+
+on: [push, pull_request]
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [asan, tsan]
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libgtest-dev libzstd-dev liblz4-dev
+
+    - name: Configure
+      working-directory: data_tamer_cpp
+      run: cmake --preset ${{ matrix.preset }}
+
+    - name: Build
+      working-directory: data_tamer_cpp
+      run: cmake --build --preset ${{ matrix.preset }}
+
+    - name: Test
+      working-directory: data_tamer_cpp
+      run: ctest --preset ${{ matrix.preset }}

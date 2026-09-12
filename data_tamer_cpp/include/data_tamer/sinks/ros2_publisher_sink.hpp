@@ -1,15 +1,16 @@
 #pragma once
 
 #include "data_tamer/data_sink.hpp"
-#include "data_tamer/details/locked_reference.hpp"
-#include "data_tamer_msgs/msg/schemas.hpp"
-#include "data_tamer_msgs/msg/snapshot.hpp"
-#include <unordered_map>
+
+#include <memory>
+#include <string>
 #include <type_traits>
+#include <utility>
+
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp_lifecycle/lifecycle_node.hpp>
 #include <rclcpp/node_interfaces/node_interfaces.hpp>
 #include <rclcpp/node_interfaces/node_topics_interface.hpp>
+#include <rclcpp_lifecycle/lifecycle_node.hpp>
 
 namespace DataTamer
 {
@@ -22,16 +23,27 @@ class ROS2PublisherSink : public DataSinkBase
 public:
   template <typename NodeT>
   ROS2PublisherSink(NodeT&& nodelike, const std::string& topic_prefix)
-    : node_interface_(normalize_node(nodelike))
-  {
-    create_publishers(topic_prefix);
-  }
+    : ROS2PublisherSink(normalize_node(std::forward<NodeT>(nodelike)), topic_prefix,
+                        ConstructorTag{})
+  {}
+
+  ~ROS2PublisherSink() override;
 
   void addChannel(const std::string& name, const Schema& schema) override;
 
   bool storeSnapshot(const Snapshot& snapshot) override;
 
 private:
+  struct Pimpl;
+  std::unique_ptr<Pimpl> _p;
+
+  struct ConstructorTag
+  {
+  };
+
+  ROS2PublisherSink(PublisherNodeInterfaces node_interface,
+                    const std::string& topic_prefix, ConstructorTag);
+
   template <typename NodeT>
   static PublisherNodeInterfaces normalize_node(NodeT&& nodelike)
   {
@@ -64,31 +76,7 @@ private:
     }
   }
 
-  void create_publishers(const std::string& topic_prefix)
-  {
-    rclcpp::QoS schemas_qos{ rclcpp::KeepAll() };
-    schemas_qos.reliable();
-    schemas_qos.transient_local();  // latch
-
-    const rclcpp::QoS data_qos{ rclcpp::KeepAll() };
-
-    schema_publisher_ = rclcpp::create_publisher<data_tamer_msgs::msg::Schemas>(
-        node_interface_, topic_prefix + "/schemas", schemas_qos);
-    data_publisher_ = rclcpp::create_publisher<data_tamer_msgs::msg::Snapshot>(
-        node_interface_, topic_prefix + "/data", data_qos);
-  }
-
-  std::unordered_map<std::string, Schema> schemas_;
-  Mutex schema_mutex_;
-
-  rclcpp::Publisher<data_tamer_msgs::msg::Schemas>::SharedPtr schema_publisher_;
-  rclcpp::Publisher<data_tamer_msgs::msg::Snapshot>::SharedPtr data_publisher_;
-
-  bool schema_changed_ = true;
-  data_tamer_msgs::msg::Snapshot data_msg_;
-
-  // ---- Stored node façade ----
-  PublisherNodeInterfaces node_interface_;
+  void create_publishers(const std::string& topic_prefix);
 };
 
 }  // namespace DataTamer

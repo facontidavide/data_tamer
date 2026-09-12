@@ -49,10 +49,39 @@ visualize your logs offline or in real-time.
 
 ## Limitations
 
-- Traced variables can not be added (registered) once the recording starts (first `takeSnapshot`).
+- New traced variables can not be added once the first `takeSnapshot()` attempt
+  freezes the schema. A previously removed name may be re-registered after that
+  point only with its compatible original type, reusing its schema slot.
 - Focused on periodic recording. Not the best option for sporadic, asynchronous events.
 - If you use `DataTamer::registerValue` you must be careful about the lifetime of the
 object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue` instead.
+
+## Real-time snapshot contract
+
+- One thread per channel calls `takeSnapshot()`. The first call freezes the schema and
+  pre-allocates a pool of 64 snapshots; after that, snapshots do not allocate as long as
+  payloads fit their slots. Tune beforehand with `setPoolCapacity()`, `setPayloadCapacity()`
+  and `setStrictMode()` (drop oversize snapshots instead of growing).
+- Scalar `LoggedValue::set()` / `get()` are wait-free atomics. To capture several values
+  together, group the writes:
+
+```cpp
+{
+  auto tx = channel->scopedWrite();
+  logged_real->set(3.2f);
+  value_int = 43;  // raw registered values share the same mutex
+}
+```
+
+- Non-scalar values lock automatically. Keep transactions and pointer guards short: the
+  snapshot thread waits on them.
+- Backpressure counters: `poolExhausted()`, `droppedSnapshots(sink)`, `payloadReallocations()`,
+  `droppedOversize()`, or all at once with `stats()`.
+- Registering, unregistering and changing sinks are safe while logging, but call them outside
+  `scopedWrite()` and sink callbacks.
+
+Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst); measurements in
+[docs/benchmarks](docs/benchmarks/2026-09-12-main-vs-lockfree-frontend.md).
 
 # Examples
 
@@ -94,6 +123,24 @@ int main()
   channel->takeSnapshot();
 }
 ```
+Scalar `LoggedValue::set()` and `get()` use relaxed atomics. Each value is
+read without tearing, but separate writes can appear in different snapshots.
+To capture several updates together, use one logged struct or a transaction:
+
+```cpp
+{
+  auto tx = channel->scopedWrite();
+  logged_real->set(3.2f);
+  value_int = 43;  // a raw registered value uses the same write mutex
+}
+channel->takeSnapshot();
+```
+
+Non-scalar `set()`/`get()` lock automatically and can be called inside
+`scopedWrite()`. Keep transactions short and take snapshots after releasing
+them. Non-scalar pointer proxies also hold the write mutex; release them before
+starting a transaction or taking a snapshot.
+
 ## How to register custom types
 
 Containers such as `std::vector` and `std::array` are supported out of the box.

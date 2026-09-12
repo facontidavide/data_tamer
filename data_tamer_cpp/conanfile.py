@@ -15,19 +15,22 @@ class DataTamerConan(ConanFile):
         "shared": [True, False],
         "fPIC": [True, False],
         "tests": [True, False],
-        "examples": [True, False]
+        "examples": [True, False],
+        "benchmarks": [True, False]
     }
     default_options = {
         "shared": False,
         "fPIC": True,
         "tests": True,
-        "examples": True
+        "examples": True,
+        "benchmarks": False
     }
     exports_sources = (
         "3rdparty/*",
         "include/*",
         "src/*",
         "examples/*",
+        "benchmarks/*",
         "tests/*",
         "CMakeLists.txt",
         "data_tamerConfig.cmake.in"
@@ -38,6 +41,8 @@ class DataTamerConan(ConanFile):
         self.requires("mcap/1.3.0")
         if self.options.tests:
             self.requires("gtest/1.14.0")
+        if self.options.benchmarks:
+            self.requires("benchmark/1.8.3")
 
     def build_requirements(self):
         self.tool_requires("cmake/3.26.4")
@@ -61,7 +66,8 @@ class DataTamerConan(ConanFile):
         cmake.configure(
             {
                 "DATA_TAMER_BUILD_TESTS": self.options.tests,
-                "DATA_TAMER_BUILD_EXAMPLES": self.options.examples
+                "DATA_TAMER_BUILD_EXAMPLES": self.options.examples,
+                "DATA_TAMER_BUILD_BENCHMARKS": self.options.benchmarks
             }
         )
         cmake.build()
