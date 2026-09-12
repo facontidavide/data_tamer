@@ -145,7 +145,7 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
     _p->shared->addSeries();
     const size_t index = _p->series.size() - 1;
     _p->registered_values.insert({ name, index });
-    _p->schema.hash = AddFieldToHash(field, _p->schema.hash);
+
     _p->schema.fields.emplace_back(std::move(field));
     if(type_info)
     {
@@ -153,6 +153,8 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
       if(custom_schema && _p->schema.custom_types.count(type_info->typeName()) == 0)
         _p->schema.custom_schemas.insert({ type_info->typeName(), *custom_schema });
     }
+
+    _p->schema.hash = ComputeSchemaHash(_p->schema);
     return { index, 1 };
   }
 
@@ -170,9 +172,9 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
 
 LogChannel::LogChannel(std::string name) : _p(new Pimpl)
 {
-  _p->schema.hash = std::hash<std::string>()(name);
   _p->schema.channel_name = name;
   _p->channel_name = std::move(name);
+  _p->schema.hash = ComputeSchemaHash(_p->schema);
 }
 
 std::shared_ptr<LogChannel> LogChannel::create(std::string name)
@@ -356,6 +358,7 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
                                const FieldsVector& fields)
 {
   _p->schema.custom_types[custom_type_name] = fields;
+  _p->schema.hash = ComputeSchemaHash(_p->schema);
 }
 
 std::mutex& LogChannel::controlMutex()

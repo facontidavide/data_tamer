@@ -1,4 +1,4 @@
-# Data Tamer wire format (schema version 4)
+# Data Tamer wire format (schema version 5)
 
 This document is the normative description of the bytes Data Tamer produces.
 Anyone can implement a decoder in any language from it without reading the C++
@@ -14,10 +14,17 @@ sources. Two artifacts keep it honest:
 
 A change to any byte described here is a format revision: bump `SCHEMA_VERSION`
 in `data_tamer/types.hpp`, `data_tamer_parser/data_tamer_parser.hpp` and
-`python/data_tamer_parser.py`, regenerate the vectors with
+`python/data_tamer_parser.py` (and the version history below), regenerate the vectors with
 `DATA_TAMER_UPDATE_GOLDEN=1 datatamer_test --gtest_filter='WireFormat.*'`,
 update `expected.json` by hand (it is the oracle, never generated), update the
 Python decoder, and describe the change in this file.
+
+### Version history
+
+| Version | Change |
+|---:|---|
+| 5 | Hash defined as FNV-1a 64 of the schema text; covers custom type bodies. |
+| 4 | Lower-case type names, `MSG:` sections. Hash was `std::hash` based. |
 
 ## 1. Data model
 
@@ -69,7 +76,7 @@ The schema is UTF-8 text, one item per line, `\n` terminated. Decoders must
 trim spaces and `\r` at both ends of a line and skip empty lines.
 
 ```
-### version: 4
+### version: 5
 ### hash: <uint64>
 ### channel_name: wire_test
 
@@ -89,12 +96,14 @@ Point3D position
 uint32 stamp
 ```
 
-(Abridged: the complete text, with the real hash, is
+(Abridged: the complete text, with its hash, is
 `docs/wire_format/vectors/schema.txt`.)
 
 Grammar, in the order lines appear:
 
-1. `### version: <int>` – must equal 4. Reject other values.
+1. `### version: <int>` – 5 for texts written by this version. Decoders must
+   also accept 4, which differs only in how the hash was computed (see section
+   5), and reject anything else.
 2. `### hash: <uint64>` – the schema hash, see section 5.
 3. `### channel_name: <text>` – everything after the first space following the
    colon, trimmed. May contain spaces.
@@ -204,24 +213,33 @@ Two topics under a user-chosen prefix:
 
 ## 5. Schema hash
 
-`schema_hash` identifies a schema within one recording or one ROS session. It
-is computed by the writer from the channel name and the top-level fields with
-`std::hash`, whose result is **implementation-defined**: the same schema hashes
-differently under libstdc++ and libc++, and may change between compiler
-releases. Decoders therefore match a snapshot to a schema by comparing the
-snapshot's hash with the `### hash:` line of the schema shipped next to it
-(MCAP: the schema record attached to the channel; ROS: the `Schemas` entry) and
-never recompute it. Custom type bodies do not contribute to the hash.
+`schema_hash` identifies a schema within one recording or one ROS session:
+`MCAPSink` maps it to a channel, the ROS subscriber maps it to a schema text.
+It is defined byte for byte so that any decoder can verify it:
 
-For reference, the writer's algorithm is `AddFieldToHash` in
-`data_tamer/types.hpp`: start from `std::hash<std::string>(channel_name)`, then
-for each top-level field fold in name, type id, type name (custom types only),
-`is_vector` and `array_size` with the boost `hash_combine` recipe. The bundled
-C++ parser takes `Schema::hash` from the `### hash:` line; its opt-in
-`check_hash` recomputes the value and is only valid when reader and writer share
-a standard library. The golden `schema.txt`
-carries the hash of the machine that generated it, and the C++ golden test
-ignores that line when comparing.
+    schema_hash = FNV-1a-64( schema text with the "### hash:" line removed )
+
+with the standard FNV-1a 64-bit parameters, offset basis `0xcbf29ce484222325`
+and prime `0x100000001b3`, applied to the UTF-8 bytes of the text exactly as
+written by the producer (section 2), minus the whole `### hash: ...` line and
+its terminating newline. Everything else contributes: version, channel name,
+top-level fields, custom type sections and opaque encodings. Two schemas that
+differ anywhere, including inside a custom type body, have different hashes,
+and the same schema hashes identically on every platform.
+
+Decoders match a snapshot to a schema by comparing the snapshot's hash with the
+`### hash:` line of the schema shipped next to it (MCAP: the schema record
+attached to the channel; ROS: the `Schemas` entry). Verification against the
+recomputed value is optional (`check_hash` in the C++ parser, `verify_hash` in
+the Python decoder) and only meaningful for version 5 texts.
+
+**Version 4 texts** carried a hash computed with `std::hash`, which is
+implementation-defined and did not cover custom type bodies. Readers match them
+by the declared value; the C++ parser still recomputes the version 4 recipe for
+`check_hash`, which only agrees on the writer's platform.
+Parsers older than version 5 recompute the version-4 hash themselves and
+therefore reject version 5 files with "Wrong SCHEMA_VERSION" instead of
+decoding them wrongly.
 
 ## 6. Worked example
 
@@ -266,7 +284,8 @@ same relative position.
 ## 7. Conformance
 
 A decoder conforms when it reproduces `expected.json` from the vectors
-directory the way `python/test_data_tamer_parser.py` does: parse `schema.txt`,
+directory the way `python/test_data_tamer_parser.py` does: parse `schema.txt`
+and recompute its hash,
 decode both snapshots from mask and payload (disabled fields absent, not zero;
 floats compared bit-exactly), split both `.mcap_message` bodies into the same
 mask and payload bytes, and reject a payload with trailing bytes or a schema

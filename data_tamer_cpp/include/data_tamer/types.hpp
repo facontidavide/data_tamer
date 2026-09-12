@@ -5,6 +5,7 @@
 
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -13,7 +14,7 @@
 namespace DataTamer
 {
 
-constexpr int SCHEMA_VERSION = 4;
+constexpr int SCHEMA_VERSION = 5;
 
 // clang-format off
 enum class BasicType: uint8_t
@@ -147,7 +148,16 @@ struct Schema
 
 std::string ToStr(const Schema& schema);
 
-[[nodiscard]] uint64_t AddFieldToHash(const TypeField& field, uint64_t hash);
+/**
+ * @brief Hash of a schema text (see docs/wire_format.md, section 5): FNV-1a 64 over
+ * the text with its "### hash:" line removed. Defined byte for byte, so any decoder
+ * can recompute it and two schemas that differ anywhere, including inside a custom
+ * type, get different hashes.
+ */
+[[nodiscard]] uint64_t SchemaTextHash(std::string_view schema_text);
+
+/// SchemaTextHash() of ToStr(schema); the value Schema::hash must hold.
+[[nodiscard]] uint64_t ComputeSchemaHash(const Schema& schema);
 
 }  // namespace DataTamer
 

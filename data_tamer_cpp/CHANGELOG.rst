@@ -4,6 +4,13 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* Schema version 5: the schema hash is FNV-1a 64 of the schema text (minus its
+  own hash line), so it is identical on every platform, verifiable by any
+  decoder and covers custom type bodies. Readers accept version 4 files through
+  their declared hash; parsers older than this release reject version 5 files
+  with "Wrong SCHEMA_VERSION". In the library ``AddFieldToHash`` is replaced by
+  ``SchemaTextHash``/``ComputeSchemaHash``; the header-only parser keeps it
+  for version 4 texts.
 * Real-time front end, steps 0–8: scalar ``LoggedValue`` values use lock-free
   atomics; ``set()``/``get()`` are wait-free. Non-scalar updates and snapshot
   serialization share a priority-inheriting mutex. ``LogChannel::scopedWrite()``

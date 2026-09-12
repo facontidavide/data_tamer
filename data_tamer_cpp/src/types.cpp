@@ -93,27 +93,34 @@ VarNumber DeserializeAsVarType(const BasicType& type, const void* data)
   return {};
 }
 
-uint64_t AddFieldToHash(const TypeField& field, uint64_t hash)
+uint64_t SchemaTextHash(std::string_view text)
 {
-  // https://stackoverflow.com/questions/2590677/how-do-i-combine-hash-values-in-c0x
-  const std::hash<std::string> str_hasher;
-  const std::hash<uint8_t> type_hasher;
-  const std::hash<bool> bool_hasher;
-  const std::hash<uint32_t> uint_hasher;
-
-  auto combine = [&hash](const auto& hasher, const auto& val) {
-    hash ^= hasher(val) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+  uint64_t hash = 0xcbf29ce484222325ULL;  // FNV-1a 64, see docs/wire_format.md
+  auto feed = [&hash](std::string_view bytes) {
+    for(const char c : bytes)
+    {
+      hash ^= static_cast<uint8_t>(c);
+      hash *= 0x100000001b3ULL;
+    }
   };
-
-  combine(str_hasher, field.field_name);
-  combine(type_hasher, static_cast<uint8_t>(field.type));
-  if(field.type == BasicType::OTHER)
+  const auto hash_line = text.find("### hash:");
+  if(hash_line == std::string_view::npos)
   {
-    combine(str_hasher, field.type_name);
+    feed(text);
+    return hash;
   }
-  combine(bool_hasher, field.is_vector);
-  combine(uint_hasher, field.array_size);
+  const auto line_end = text.find('\n', hash_line);
+  feed(text.substr(0, hash_line));
+  if(line_end != std::string_view::npos)
+  {
+    feed(text.substr(line_end + 1));
+  }
   return hash;
+}
+
+uint64_t ComputeSchemaHash(const Schema& schema)
+{
+  return SchemaTextHash(ToStr(schema));
 }
 
 std::ostream& operator<<(std::ostream& os, const TypeField& field)
