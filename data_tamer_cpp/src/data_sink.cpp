@@ -53,20 +53,19 @@ struct DataSinkBase::Pimpl
   SnapshotRef current_ref;
   std::atomic<uint64_t> admission{ 0 };
   std::atomic<uint64_t> store_errors{ 0 };
-  std::atomic_bool run{ true };
-  std::thread thread;
+  std::jthread thread;  // its stop token replaces a run flag
 };
 
 DataSinkBase::DataSinkBase(size_t queue_capacity) : _p(new Pimpl(queue_capacity))
 {
   // _p and all its members must exist before the worker can observe them.
-  _p->thread = std::thread([this] {
-    while(_p->run.load())
+  _p->thread = std::jthread([this](std::stop_token stop) {
+    while(!stop.stop_requested())
     {
       std::unique_lock handoff(_p->handoff_mutex);
       std::unique_lock lock(_p->store_mutex);
       handoff.unlock();
-      if(!_p->run.load())
+      if(stop.stop_requested())
         break;
       if(_p->queue.wait_dequeue_timed(_p->current_ref, std::chrono::milliseconds(50)))
       {
@@ -110,7 +109,11 @@ bool DataSinkBase::tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snaps
   struct AdmissionGuard
   {
     std::atomic<uint64_t>& admission;
-    ~AdmissionGuard() { admission.fetch_sub(1, std::memory_order_release); }
+    ~AdmissionGuard()
+    {
+      admission.fetch_sub(1, std::memory_order_release);
+      admission.notify_all();  // cheap when nobody waits; wakes stopAcceptingSnapshots()
+    }
   } guard{ _p->admission };
   if(_p->admission.fetch_add(1, std::memory_order_acq_rel) & kClosed)
     return false;
@@ -121,9 +124,12 @@ bool DataSinkBase::tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snaps
 void DataSinkBase::stopAcceptingSnapshots()
 {
   _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
-  while((_p->admission.load(std::memory_order_acquire) & ~kClosed) != 0)
+  // Wait until every admitted enqueue has finished: block on the counter instead
+  // of spinning; each release notifies.
+  for(auto state = _p->admission.load(std::memory_order_acquire); (state & ~kClosed) != 0;
+      state = _p->admission.load(std::memory_order_acquire))
   {
-    std::this_thread::yield();
+    _p->admission.wait(state, std::memory_order_acquire);
   }
 }
 
@@ -144,9 +150,11 @@ void DataSinkBase::processQueuedSnapshots()
 
 void DataSinkBase::stopThread()
 {
-  _p->run.store(false);
   if(_p->thread.joinable())
+  {
+    _p->thread.request_stop();
     _p->thread.join();
+  }
 }
 
 uint64_t DataSinkBase::storeErrors() const

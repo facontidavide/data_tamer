@@ -11,3 +11,4 @@ target_include_directories(mcap_lib
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
+target_compile_features(mcap_lib PUBLIC cxx_std_17)
