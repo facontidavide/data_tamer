@@ -76,14 +76,6 @@ void checkGolden(const std::string& name, const std::vector<uint8_t>& actual)
                               << " (see docs/wire_format.md)";
 }
 
-// The hash is std::hash based and therefore implementation-defined (spec section 5):
-// the fixture keeps the value of the machine that generated it, comparisons ignore it.
-std::string withoutHash(std::string text)
-{
-  const auto start = text.find("### hash: ") + 10;
-  text.replace(start, text.find('\n', start) - start, "0");
-  return text;
-}
 }  // namespace
 
 TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
@@ -142,16 +134,8 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   const Snapshot full = sink->latestSnapshot();
 
   const std::string schema_text = ToStr(channel->getSchema());
-  if(std::getenv("DATA_TAMER_UPDATE_GOLDEN"))
-  {
-    checkGolden("schema.txt", { schema_text.begin(), schema_text.end() });
-  }
-  else
-  {
-    const auto golden = readFile("schema.txt");
-    ASSERT_FALSE(golden.empty()) << "missing fixture schema.txt";
-    EXPECT_EQ(withoutHash(schema_text), withoutHash({ golden.begin(), golden.end() }));
-  }
+  checkGolden("schema.txt", { schema_text.begin(), schema_text.end() });
+  EXPECT_EQ(channel->getSchema().hash, SchemaTextHash(schema_text));
   checkGolden("snapshot_full.mask", full.active_mask);
   checkGolden("snapshot_full.payload", full.payload);
 

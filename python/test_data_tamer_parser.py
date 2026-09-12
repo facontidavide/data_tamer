@@ -15,12 +15,12 @@ def read(name: str) -> bytes:
 class GoldenVectors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.schema = dt.parse_schema(read("schema.txt").decode())
+        cls.schema = dt.parse_schema(read("schema.txt").decode(), verify_hash=True)
         cls.expected = json.loads(read("expected.json"))
 
     def test_schema(self):
         self.assertEqual(self.schema.channel_name, "wire_test")
-        self.assertGreater(self.schema.hash, 0)  # value is implementation-defined, see spec
+        self.assertEqual(self.schema.hash, dt.schema_hash(read("schema.txt").decode()))
         self.assertEqual([f.field_name for f in self.schema.fields], self.expected["fields"])
         self.assertEqual(sorted(self.schema.custom_types), ["Point3D", "Pose"])
 
@@ -43,6 +43,8 @@ class GoldenVectors(unittest.TestCase):
             dt.parse_snapshot(self.schema, read("snapshot_full.mask"), read("snapshot_full.payload") + b"\0")
         with self.assertRaises(ValueError):
             dt.parse_schema("### version: 3\n")
+        with self.assertRaises(ValueError):
+            dt.parse_schema("### version: 5\n### hash: 1\n### channel_name: x\n", verify_hash=True)
 
 
 if __name__ == "__main__":

@@ -305,3 +305,41 @@ TEST(DataTamerParser, VectorParsing)
   ASSERT_EQ(parsed_values.at("quats[1]/y"), 32);
   ASSERT_EQ(parsed_values.at("quats[1]/z"), 33);
 }
+
+// Version 4 texts (std::hash recipe) must still parse and verify exactly as before;
+// version 5 texts verify with the platform-independent recipe.
+TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
+{
+  auto channel = DataTamer::LogChannel::create("chan");
+  Pose pose;
+  int32_t count = 0;
+  channel->registerValue("pose", &pose);
+  channel->registerValue("count", &count);
+  const std::string v5_text = ToStr(channel->getSchema());
+
+  // version 5: declared hash equals the defined recomputation
+  const auto v5 = BuilSchemaFromText(v5_text, /*check_hash=*/true);
+  ASSERT_EQ(v5.hash, SchemaTextHash(v5_text));
+  ASSERT_EQ(v5.hash, channel->getSchema().hash);
+  auto broken = v5_text;
+  broken.replace(broken.find("### hash: ") + 10, 1, "9");
+  EXPECT_THROW(BuilSchemaFromText(broken, true), std::runtime_error);
+
+  // version 4: the same fields, hashed with the legacy recipe
+  uint64_t legacy = std::hash<std::string>()(v5.channel_name);
+  for(const auto& field : v5.fields)
+  {
+    legacy = AddFieldToHash(field, legacy);
+  }
+  std::string v4_text = v5_text;
+  v4_text.replace(v4_text.find("### version: 5"), 14, "### version: 4");
+  const auto hash_pos = v4_text.find("### hash: ") + 10;
+  v4_text.replace(hash_pos, v4_text.find('\n', hash_pos) - hash_pos,
+                  std::to_string(legacy));
+  const auto v4 = BuilSchemaFromText(v4_text, /*check_hash=*/true);
+  ASSERT_EQ(v4.hash, legacy);
+  ASSERT_EQ(v4.fields.size(), v5.fields.size());
+  ASSERT_EQ(v4.custom_types.size(), v5.custom_types.size());
+
+  EXPECT_THROW(BuilSchemaFromText("### version: 3\n"), std::runtime_error);
+}

@@ -14,7 +14,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+_READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
 
 # Basic type name -> little-endian struct; the order is the BasicType id order.
 _STRUCT = {
@@ -62,8 +63,21 @@ def _parse_field_line(line: str) -> Field:
     return Field(name, type_part[:bracket], True, int(inner) if inner else 0)
 
 
-def parse_schema(text: str) -> Schema:
-    """Parse the schema text stored in the MCAP schema record / Schema.msg."""
+def schema_hash(text: str) -> int:
+    """FNV-1a 64 of the schema text with its '### hash:' line removed (spec section 5)."""
+    lines = [l for l in text.split("\n") if not l.startswith("### hash:")]
+    h = 0xCBF29CE484222325
+    for byte in "\n".join(lines).encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def parse_schema(text: str, verify_hash: bool = False) -> Schema:
+    """Parse the schema text stored in the MCAP schema record / Schema.msg.
+
+    With verify_hash the declared hash must equal schema_hash(text); only version 5
+    texts can be verified.
+    """
     schema = Schema()
     lines = iter(text.splitlines())
     target = schema.fields
@@ -73,7 +87,7 @@ def parse_schema(text: str) -> Schema:
         if not line or line.startswith("====="):
             continue
         if line.startswith("### version:"):
-            if int(line.split(":", 1)[1]) != SCHEMA_VERSION:
+            if int(line.split(":", 1)[1]) not in _READABLE_VERSIONS:
                 raise ValueError(f"unsupported schema version in {line!r}")
         elif line.startswith("### hash:"):
             schema.hash = int(line.split(":", 1)[1])
@@ -89,6 +103,8 @@ def parse_schema(text: str) -> Schema:
             break
         else:
             target.append(_parse_field_line(line))
+    if verify_hash and schema.hash != schema_hash(text):
+        raise ValueError("schema hash does not match its text")
     return schema
 
 
