@@ -9,7 +9,6 @@
 #include <array>
 #include <limits>
 #include <optional>
-#include <thread>
 #include <unordered_map>
 
 namespace DataTamer
@@ -106,8 +105,8 @@ struct LogChannel::Pimpl
   void waitQuiescent()
   {
     const auto observed = epoch.load(std::memory_order_seq_cst);
-    while((observed & 1) && epoch.load(std::memory_order_seq_cst) == observed)
-      std::this_thread::yield();
+    if(observed & 1)
+      epoch.wait(observed, std::memory_order_seq_cst);  // returns once the value changed
   }
 
   // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress.
@@ -118,7 +117,11 @@ struct LogChannel::Pimpl
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
     }
-    ~EpochGuard() { epoch.fetch_add(1, std::memory_order_seq_cst); }
+    ~EpochGuard()
+    {
+      epoch.fetch_add(1, std::memory_order_seq_cst);
+      epoch.notify_all();  // a plain load when no controller is waiting
+    }
   };
 };
 
@@ -142,7 +145,7 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
     // User code (typeSchema) runs before anything is published, so a throw
     // leaves the channel exactly as it was.
     std::optional<CustomSchema> custom_schema;
-    if(type_info && _p->schema.custom_types.count(type_info->typeName()) == 0)
+    if(type_info && !_p->schema.custom_types.contains(type_info->typeName()))
       custom_schema = type_info->typeSchema();
     _p->series.reserve(_p->series.size() + 1);
     _p->schema.fields.reserve(_p->schema.fields.size() + 1);
@@ -374,7 +377,7 @@ bool LogChannel::schemaFrozen() const
 }
 bool LogChannel::hasCustomType(const std::string& type_name) const
 {
-  return _p->schema.custom_types.count(type_name) != 0;
+  return _p->schema.custom_types.contains(type_name);
 }
 
 const ActiveMask& LogChannel::getActiveFlags()

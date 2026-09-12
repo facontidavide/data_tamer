@@ -80,6 +80,7 @@ object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue`
 - Registering, unregistering and changing sinks are safe while logging, but call them outside
   `scopedWrite()` and sink callbacks.
 
+The library is built as C++20; its public headers need only C++17 from consumers.
 Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst); measurements in
 [docs/benchmarks](docs/benchmarks/2026-09-12-main-vs-lockfree-frontend.md).
 
