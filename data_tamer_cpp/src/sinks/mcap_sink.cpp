@@ -36,6 +36,22 @@ namespace DataTamer
 
 static constexpr char const* kDataTamer = "data_tamer";
 
+namespace
+{
+// "log.mcap" -> "log_3.mcap"; a path without an extension gets the suffix appended.
+std::string NumberedPath(const std::string& path, size_t number)
+{
+  const auto suffix = "_" + std::to_string(number);
+  const auto slash = path.find_last_of("/\\");
+  const auto dot = path.rfind('.');
+  if(dot == std::string::npos || (slash != std::string::npos && dot < slash))
+  {
+    return path + suffix;
+  }
+  return path.substr(0, dot) + suffix + path.substr(dot);
+}
+}  // namespace
+
 struct MCAPSink::Pimpl
 {
   std::string filepath;
@@ -153,7 +169,7 @@ bool MCAPSink::storeSnapshot(const Snapshot& snapshot)
     if(_p->create_file_on_reset)
     {
       // change the current filepath to the original with "_[# resets]"" appended
-      _p->filepath = _p->original_filepath + "_" + std::to_string(_p->file_reset_counter);
+      _p->filepath = NumberedPath(_p->original_filepath, _p->file_reset_counter);
       ++_p->file_reset_counter;
     }
     restartRecordingImpl(_p->filepath, _p->compression, false);
