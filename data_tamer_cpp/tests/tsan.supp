@@ -1,0 +1,5 @@
+# moodycamel::ConcurrentQueue orders block reuse with std::atomic_thread_fence,
+# which ThreadSanitizer does not model, so it reports the producer's write into
+# a recycled slot as racing with the consumer's earlier move-out. See the note
+# above MOODYCAMEL_NO_TSAN in 3rdparty/ConcurrentQueue/concurrentqueue.h.
+race:concurrentqueue.h

@@ -50,6 +50,6 @@ int main()
   channel->takeSnapshot();
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-  std::cout << "\nMessage size: " << dummy_sink->latest_snapshot.payload.size()
+  std::cout << "\nMessage size: " << dummy_sink->latestPayloadSize()
             << " expected: " << expected_size << std::endl;
 }

@@ -2,10 +2,10 @@
 #include "data_tamer/contrib/SerializeMe.hpp"
 
 #include <chrono>
-#include <sstream>
 #include <mutex>
+#include <sstream>
 #include <string>
-#include <thread>
+#include <unordered_map>
 
 #ifndef USING_ROS2
 #define MCAP_IMPLEMENTATION
@@ -36,56 +36,66 @@ namespace DataTamer
 
 static constexpr char const* kDataTamer = "data_tamer";
 
-namespace
+struct MCAPSink::Pimpl
 {
-// "log.mcap" -> "log_3.mcap"; a path without an extension gets the suffix appended.
-std::string NumberedPath(const std::string& path, size_t number)
-{
-  const auto suffix = "_" + std::to_string(number);
-  const auto slash = path.find_last_of("/\\");
-  const auto dot = path.rfind('.');
-  if(dot == std::string::npos || (slash != std::string::npos && dot < slash))
-  {
-    return path + suffix;
-  }
-  return path.substr(0, dot) + suffix + path.substr(dot);
-}
-}  // namespace
+  std::string filepath;
+  bool compression = false;
+  std::unique_ptr<mcap::McapWriter> writer;
 
-MCAPSink::MCAPSink(const std::string& filepath, bool do_compression)
-  : filepath_(filepath), compression_(do_compression), original_filepath_(filepath)
+  std::unordered_map<uint64_t, uint16_t> hash_to_channel_id;
+  std::unordered_map<std::string, Schema> schemas;
+
+  bool create_file_on_reset = false;
+  std::string original_filepath;
+  size_t file_reset_counter = 1;
+
+  std::chrono::seconds reset_time = std::chrono::seconds(60 * 10);
+  std::chrono::system_clock::time_point start_time;
+
+  std::vector<uint8_t> merged_payload;
+  bool forced_stop_recording = false;
+  std::recursive_mutex mutex;
+};
+
+MCAPSink::MCAPSink(const std::string& filepath, bool do_compression,
+                   size_t queue_capacity)
+  : DataSinkBase(queue_capacity), _p(std::make_unique<Pimpl>())
 {
-  openFile(filepath_);
+  _p->filepath = filepath;
+  _p->compression = do_compression;
+  _p->original_filepath = filepath;
+  openFile(_p->filepath);
 }
 
 void DataTamer::MCAPSink::openFile(std::string const& filepath)
 {
-  std::scoped_lock lk(mutex_);
-  writer_ = std::make_unique<mcap::McapWriter>();
+  std::scoped_lock lk(_p->mutex);
+  _p->writer = std::make_unique<mcap::McapWriter>();
   mcap::McapWriterOptions options(kDataTamer);
-  options.compression = compression_ ? mcap::Compression::Zstd : mcap::Compression::None;
-  auto status = writer_->open(filepath, options);
+  options.compression =
+      _p->compression ? mcap::Compression::Zstd : mcap::Compression::None;
+  auto status = _p->writer->open(filepath, options);
   if(!status.ok())
   {
     throw std::runtime_error("Failed to open MCAP file for writing");
   }
-  start_time_ = std::chrono::system_clock::now();
+  _p->start_time = std::chrono::system_clock::now();
   // clean up, in case this was opened a second time
-  hash_to_channel_id_.clear();
+  _p->hash_to_channel_id.clear();
 }
 
 MCAPSink::~MCAPSink()
 {
   stopThread();
-  std::scoped_lock lk(mutex_);
+  std::scoped_lock lk(_p->mutex);
 }
 
 void MCAPSink::addChannel(std::string const& channel_name, Schema const& schema)
 {
-  std::scoped_lock lk(mutex_);
-  schemas_[channel_name] = schema;
-  auto it = hash_to_channel_id_.find(schema.hash);
-  if(it != hash_to_channel_id_.end())
+  std::scoped_lock lk(_p->mutex);
+  _p->schemas[channel_name] = schema;
+  auto it = _p->hash_to_channel_id.find(schema.hash);
+  if(it != _p->hash_to_channel_id.end() || !_p->writer)  // stopped: re-added on restart
   {
     return;
   }
@@ -98,23 +108,23 @@ void MCAPSink::addChannel(std::string const& channel_name, Schema const& schema)
 
   // Register a Schema
   mcap::Schema mcap_schema(schema_name, kDataTamer, schema_str);
-  writer_->addSchema(mcap_schema);
+  _p->writer->addSchema(mcap_schema);
 
   // Register a Channel
   mcap::Channel publisher(channel_name, kDataTamer, mcap_schema.id);
-  writer_->addChannel(publisher);
-  hash_to_channel_id_[schema.hash] = publisher.id;
+  _p->writer->addChannel(publisher);
+  _p->hash_to_channel_id[schema.hash] = publisher.id;
 }
 
 bool MCAPSink::storeSnapshot(const Snapshot& snapshot)
 {
-  std::scoped_lock lk(mutex_);
-  if(forced_stop_recording_)
+  std::scoped_lock lk(_p->mutex);
+  if(_p->forced_stop_recording)
   {
     return false;
   }
   // the payload must contain both the ActiveMask and the other data
-  thread_local std::vector<uint8_t> merged_payload;
+  auto& merged_payload = _p->merged_payload;
   const auto size_mask = snapshot.active_mask.size();
   const auto size_data = snapshot.payload.size();
 
@@ -125,47 +135,50 @@ bool MCAPSink::storeSnapshot(const Snapshot& snapshot)
 
   // Write our message
   mcap::Message msg;
-  msg.channelId = hash_to_channel_id_.at(snapshot.schema_hash);
+  msg.channelId = _p->hash_to_channel_id.at(snapshot.schema_hash);
   msg.sequence = 1;  // Optional
   // Timestamp requires nanosecond
   msg.logTime = mcap::Timestamp(snapshot.timestamp.count());
   msg.publishTime = msg.logTime;
   msg.data = reinterpret_cast<std::byte const*>(merged_payload.data());  // NOLINT
   msg.dataSize = merged_payload.size();
-  auto status = writer_->write(msg);
+  auto status = _p->writer->write(msg);
 
-  // If reset_time_ is exceeded, we want to overwrite the current file.
+  // If reset_time is exceeded, we want to overwrite the current file.
   // Better than filling the disk, if you forgot to stop the application.
-  auto const now = std::chrono::system_clock::now();
-  if(reset_time_ != std::chrono::seconds(0) && now - start_time_ > reset_time_)
+  if(_p->reset_time != std::chrono::seconds(0) &&
+     std::chrono::system_clock::now() - _p->start_time > _p->reset_time)
   {
-    if(create_file_on_reset_)
+    if(_p->create_file_on_reset)
     {
       // change the current filepath to the original with "_[# resets]"" appended
-      filepath_ = NumberedPath(original_filepath_, file_reset_counter_);
-      ++file_reset_counter_;
+      _p->filepath = _p->original_filepath + "_" + std::to_string(_p->file_reset_counter);
+      ++_p->file_reset_counter;
     }
-    restartRecordingImpl(filepath_, compression_, false);
+    restartRecordingImpl(_p->filepath, _p->compression, false);
   }
   return true;
 }
 
 void MCAPSink::setMaxTimeBeforeReset(std::chrono::seconds reset_time)
 {
-  reset_time_ = reset_time;
+  _p->reset_time = reset_time;
 }
 
 void MCAPSink::setCreateNewFileOnReset(bool create_file_on_reset)
 {
-  create_file_on_reset_ = create_file_on_reset;
+  _p->create_file_on_reset = create_file_on_reset;
 }
 
 void MCAPSink::stopRecording()
 {
-  std::scoped_lock lk(mutex_);
-  forced_stop_recording_ = true;
-  writer_->close();
-  writer_.reset();
+  std::scoped_lock lk(_p->mutex);
+  _p->forced_stop_recording = true;
+  if(_p->writer)  // idempotent: finishQueueAndStop() may follow stopRecording()
+  {
+    _p->writer->close();
+    _p->writer.reset();
+  }
 }
 
 void MCAPSink::finishQueueAndStop()
@@ -174,10 +187,6 @@ void MCAPSink::finishQueueAndStop()
   stopAcceptingSnapshots();
 
   // finish any that are queued
-  processQueuedSnapshots();
-
-  // sleep and process any that were missed by previous processing
-  std::this_thread::sleep_for(std::chrono::microseconds(250));
   processQueuedSnapshots();
 
   // now stop the recording as normal
@@ -192,25 +201,28 @@ void MCAPSink::restartRecording(const std::string& filepath, bool do_compression
 void MCAPSink::restartRecordingImpl(const std::string& filepath, bool do_compression,
                                     bool new_file)
 {
-  std::scoped_lock lk(mutex_);
+  std::scoped_lock lk(_p->mutex);
   if(new_file)
   {
     // if this was called by a user, we need to change the filepath that we will increment when reset
-    file_reset_counter_ = 1;
-    original_filepath_ = filepath;
+    _p->file_reset_counter = 1;
+    _p->original_filepath = filepath;
   }
-  filepath_ = filepath;
-  compression_ = do_compression;
-  openFile(filepath_);
+  _p->filepath = filepath;
+  _p->compression = do_compression;
+  openFile(_p->filepath);
 
   // rebuild the channels
-  for(auto const& [name, schema] : schemas_)
+  for(auto const& [name, schema] : _p->schemas)
   {
     addChannel(name, schema);
   }
 
-  // start accepting snapshots again in case they were stopped
-  startAcceptingSnapshots();
+  if(new_file)
+  {
+    _p->forced_stop_recording = false;
+    startAcceptingSnapshots();
+  }
 }
 
 }  // namespace DataTamer

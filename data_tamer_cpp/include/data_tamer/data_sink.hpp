@@ -9,8 +9,15 @@
 #include <string_view>
 #include <vector>
 
+namespace moodycamel
+{
+struct ProducerToken;
+}
+
 namespace DataTamer
 {
+class SnapshotRef;
+class LogChannel;
 
 using ActiveMask = std::vector<uint8_t>;
 using PayloadVector = std::vector<uint8_t>;
@@ -55,7 +62,10 @@ using DataSnapshot = std::vector<uint8_t>;
 class DataSinkBase
 {
 public:
-  DataSinkBase();
+  static constexpr size_t kDefaultQueueCapacity = 1024;
+
+  /// Preallocated, block-rounded queue capacity, shared by all producers.
+  explicit DataSinkBase(size_t queue_capacity = kDefaultQueueCapacity);
 
   DataSinkBase(const DataSinkBase& other) = delete;
   DataSinkBase& operator=(const DataSinkBase& other) = delete;
@@ -74,15 +84,8 @@ public:
    */
   virtual void addChannel(const std::string& name, const Schema& schema) = 0;
 
-  /**
-   * @brief pushSnapshot will push the data into a concurrent queue,
-   * that a different thread will consume, using storeSnapshot()
-   *
-   * @param snapshot see type Snapshot for details
-   *
-   * @return false if the queue is full and snapshot was not pushed
-   */
-  virtual bool pushSnapshot(const Snapshot& snapshot);
+  /// Number of exceptions thrown by queue-dispatched storeSnapshot callbacks.
+  [[nodiscard]] uint64_t storeErrors() const;
 
 protected:
   /**
@@ -94,15 +97,30 @@ protected:
    */
   virtual bool storeSnapshot(const Snapshot& snapshot) = 0;
 
+  /// Derived destructors must stop the worker before destroying callback state.
+  /// Control methods must be externally serialized, never called in callbacks.
   void stopThread();
 
+  /// Close producer admission and wait for admitted enqueues to complete.
   void stopAcceptingSnapshots();
 
+  /// Serialize dequeue and callbacks with the worker; drain accepted work.
   void processQueuedSnapshots();
 
   void startAcceptingSnapshots();
 
+  /// Callback-only clone of the currently delivered pool reference. Include
+  /// details/snapshot_pool.hpp to use the returned handle. Direct calls to a
+  /// derived storeSnapshot method cannot retain queue ownership.
+  /// The handle reaches the callback through thread-local context rather than a
+  /// parameter so that the storeSnapshot(const Snapshot&) signature of existing
+  /// sinks stays source compatible.
+  [[nodiscard]] SnapshotRef retainSnapshot() const;
+
 private:
+  friend class LogChannel;
+  std::unique_ptr<moodycamel::ProducerToken> makeProducerToken();
+  bool tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snapshot);
   struct Pimpl;
   std::unique_ptr<Pimpl> _p;
 };
