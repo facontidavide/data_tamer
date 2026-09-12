@@ -389,6 +389,9 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
   size_t count = 0;
   for(const auto& file : std::filesystem::directory_iterator(directory))
   {
+    // rollover.mcap, rollover_1.mcap, ...: the counter goes before the extension (#71)
+    EXPECT_EQ(file.path().extension(), ".mcap") << file.path();
+    EXPECT_TRUE(file.path().stem().string().rfind("rollover", 0) == 0) << file.path();
     mcap::McapReader reader;
     ASSERT_TRUE(reader.open(file.path().string()).ok());
     for(const auto& message : reader.readMessages())
@@ -398,6 +401,7 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
     }
   }
   EXPECT_EQ(count, 8u);
+  EXPECT_TRUE(std::filesystem::exists(directory / "rollover_1.mcap"));
   std::filesystem::remove_all(directory);
 }
 
