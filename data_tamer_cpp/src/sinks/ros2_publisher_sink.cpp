@@ -67,7 +67,6 @@ bool ROS2PublisherSink::storeSnapshot(const Snapshot& snapshot)
     std::scoped_lock lk(_p->schema_mutex);
     if(_p->schema_changed)
     {
-      _p->schema_changed = false;
       data_tamer_msgs::msg::Schemas msg;
       msg.schemas.reserve(_p->schemas.size());
 
@@ -83,6 +82,7 @@ bool ROS2PublisherSink::storeSnapshot(const Snapshot& snapshot)
         msg.schemas.push_back(std::move(schema_msg));
       }
       _p->schema_publisher->publish(msg);
+      _p->schema_changed = false;  // only once published; a throw leaves it pending
     }
   }
   //----------------------------------------

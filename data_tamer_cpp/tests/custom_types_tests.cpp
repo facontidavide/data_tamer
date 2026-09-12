@@ -304,3 +304,43 @@ TEST(DataTamerCustom, RegisterConstMethods)
   ASSERT_TRUE(std::string::npos != posB);
   ASSERT_LT(posA, posB);
 }
+
+struct Wheel
+{
+  std::array<double, 3> axis = { 1, 2, 3 };
+  std::array<int32_t, 2> ticks = { 4, 5 };
+};
+template <class AddField>
+std::string_view TypeDefinition(Wheel& w, AddField& add)
+{
+  add("axis", &w.axis);
+  add("ticks", &w.ticks);
+  return "Wheel";
+}
+struct Chassis
+{
+  std::array<Wheel, 4> wheels;
+  double mass = 10;
+};
+template <class AddField>
+std::string_view TypeDefinition(Chassis& c, AddField& add)
+{
+  add("wheels", &c.wheels);
+  add("mass", &c.mass);
+  return "Chassis";
+}
+
+// The fixed-size accumulator for arrays was uninitialized; the cached size must
+// match the bytes actually written, including nested fixed arrays of structs.
+TEST(DataTamerCustom, FixedSizeOfNestedFixedArraysMatchesPayload)
+{
+  auto channel = LogChannel::create("chan");
+  auto sink = std::make_shared<DummySink>();
+  channel->addDataSink(sink);
+  Chassis chassis;
+  channel->registerValue("chassis", &chassis);
+  ASSERT_TRUE(channel->takeSnapshot());
+  sink->flush();
+  const size_t expected = 4 * (3 * sizeof(double) + 2 * sizeof(int32_t)) + sizeof(double);
+  EXPECT_EQ(sink->latestPayloadSize(), expected);
+}

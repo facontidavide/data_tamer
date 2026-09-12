@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 
@@ -138,6 +139,14 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
     TypeField field{ name, type, type_name, value_ptr.isVector(),
                      value_ptr.vectorSize() };
+    // User code (typeSchema) runs before anything is published, so a throw
+    // leaves the channel exactly as it was.
+    std::optional<CustomSchema> custom_schema;
+    if(type_info && _p->schema.custom_types.count(type_info->typeName()) == 0)
+      custom_schema = type_info->typeSchema();
+    _p->series.reserve(_p->series.size() + 1);
+    _p->schema.fields.reserve(_p->schema.fields.size() + 1);
+
     Pimpl::ValueHolder instance;
     instance.name = name;
     instance.holder = std::move(value_ptr);
@@ -145,15 +154,9 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
     _p->shared->addSeries();
     const size_t index = _p->series.size() - 1;
     _p->registered_values.insert({ name, index });
-
     _p->schema.fields.emplace_back(std::move(field));
-    if(type_info)
-    {
-      auto custom_schema = type_info->typeSchema();
-      if(custom_schema && _p->schema.custom_types.count(type_info->typeName()) == 0)
-        _p->schema.custom_schemas.insert({ type_info->typeName(), *custom_schema });
-    }
-
+    if(custom_schema)
+      _p->schema.custom_schemas.insert({ type_info->typeName(), *custom_schema });
     _p->schema.hash = ComputeSchemaHash(_p->schema);
     return { index, 1 };
   }
@@ -430,16 +433,17 @@ bool LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
   SnapshotRef parent(_p->pool, slot);
   auto& snapshot = slot->snapshot;
 
-  // A rebuilt active bit acquires registration's initialized holder through
-  // its SC flag load; see refreshMaskIfDirty() for the ordering argument.
-  _p->refreshMaskIfDirty();
-
   {
     auto& write_mutex = _p->shared->write_mutex;
     uint64_t blocked_wait_ns = 0;
     const bool blocked =
         write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
     std::lock_guard<WriteMutex> write_lock(write_mutex, std::adopt_lock);
+    // Under the write mutex, so enable changes made inside a scopedWrite()
+    // transaction are seen together with the values they belong to. A rebuilt
+    // active bit acquires registration's initialized holder through its SC flag
+    // load; see refreshMaskIfDirty() for the ordering argument.
+    _p->refreshMaskIfDirty();
     if(blocked)
     {
       _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <thread>
 #include <variant>
+#include <cstring>
 #include <string>
 
 using namespace DataTamerParser;
@@ -342,4 +343,96 @@ TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
   ASSERT_EQ(v4.custom_types.size(), v5.custom_types.size());
 
   EXPECT_THROW(BuilSchemaFromText("### version: 3\n"), std::runtime_error);
+}
+
+// Corrupt or hostile input must fail with an exception, never read out of bounds.
+TEST(DataTamerParser, RejectsMalformedInput)
+{
+  auto channel = DataTamer::LogChannel::create("chan");
+  Pose pose;
+  std::vector<double> samples = { 1.0, 2.0 };
+  channel->registerValue("pose", &pose);
+  channel->registerValue("samples", &samples);
+  auto sink = std::make_shared<DataTamer::DummySink>();
+  channel->addDataSink(sink);
+  ASSERT_TRUE(channel->takeSnapshot());
+  sink->flush();
+  const auto snapshot = sink->latestSnapshot();
+  const auto schema = BuilSchemaFromText(ToStr(channel->getSchema()));
+  auto count_values = [](const std::string&, const VarNumber&) {};
+
+  // intact
+  SnapshotView view{ snapshot.schema_hash,
+                     0,
+                     { snapshot.active_mask.data(), snapshot.active_mask.size() },
+                     { snapshot.payload.data(), snapshot.payload.size() } };
+  ASSERT_TRUE(ParseSnapshot(schema, view, count_values));
+
+  // truncated payload: the last double is cut in half; the checked read reports it
+  SnapshotView truncated = view;
+  truncated.payload.size -= 4;
+  try
+  {
+    ParseSnapshot(schema, truncated, count_values);
+    FAIL() << "truncated payload accepted";
+  }
+  catch(const std::runtime_error& e)
+  {
+    EXPECT_NE(std::string(e.what()).find("truncated"), std::string::npos) << e.what();
+  }
+  static_assert(sizeof(SnapshotView::schema_hash) == 8, "schema hash must be 64-bit "
+                                                        "everywhere");
+  static_assert(sizeof(DataTamer::Snapshot::schema_hash) == 8, "schema hash must be "
+                                                               "64-bit everywhere");
+  EXPECT_FALSE(schema.fields[0] !=
+               schema.fields[0]);  // operator!= must be defined (link check)
+  EXPECT_TRUE(schema.fields[0] != schema.fields[1]);
+
+  // mask too short for the schema
+  SnapshotView short_mask = view;
+  short_mask.active_mask.size = 0;
+  EXPECT_THROW(ParseSnapshot(schema, short_mask, count_values), std::runtime_error);
+
+  // dynamic vector whose count exceeds the payload
+  auto huge = snapshot.payload;
+  const size_t count_offset = huge.size() - 2 * sizeof(double) - sizeof(uint32_t);
+  const uint32_t bogus = 0xFFFFFFFFu;
+  std::memcpy(huge.data() + count_offset, &bogus, sizeof(bogus));
+  SnapshotView huge_view = view;
+  huge_view.payload = { huge.data(), huge.size() };
+  EXPECT_THROW(ParseSnapshot(schema, huge_view, count_values), std::runtime_error);
+
+  // a custom type name that merely starts with a primitive name is a custom type
+  const auto tricky = BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                         "c\n\n"
+                                         "float64Pose p\n"
+                                         "==============================================="
+                                         "============\n"
+                                         "MSG: float64Pose\nfloat64 x\n");
+  ASSERT_EQ(tricky.fields.size(), 1u);
+  EXPECT_EQ(tricky.fields[0].type, BasicType::OTHER);
+  EXPECT_EQ(tricky.fields[0].type_name, "float64Pose");
+
+  // a self-referencing custom type cannot be traversed forever
+  const auto cyclic = BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                         "c\n\n"
+                                         "Node root\n"
+                                         "==============================================="
+                                         "============\n"
+                                         "MSG: Node\nNode next\n");
+  const uint8_t one_bit = 1;
+  const uint8_t no_payload = 0;
+  SnapshotView cyclic_view{ 1, 0, { &one_bit, 1 }, { &no_payload, 0 } };
+  EXPECT_THROW(ParseSnapshot(cyclic, cyclic_view, count_values), std::runtime_error);
+
+  // malformed array extents
+  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                  "c\n\nint32[0] a\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                  "c\n\nint32[70000] a\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                  "c\n\nint32[3 a\n"),
+               std::runtime_error);
 }

@@ -52,6 +52,10 @@ struct BufferSpan
 
   void trimFront(size_t n)
   {
+    if(n > size)
+    {
+      throw std::runtime_error("DataTamerParser: payload truncated");
+    }
     data += n;
     size -= n;
   }
@@ -89,7 +93,7 @@ struct Schema
 struct SnapshotView
 {
   /// Unique identifier of the schema
-  size_t schema_hash;
+  uint64_t schema_hash;
 
   /// snapshot timestamp
   uint64_t timestamp;
@@ -128,12 +132,12 @@ inline T Deserialize(BufferSpan& buffer)
 {
   T var;
   const auto N = sizeof(T);
-  std::memcpy(&var, buffer.data, N);
-  buffer.data += N;
   if(N > buffer.size)
   {
-    throw std::runtime_error("Buffer overflow");
+    throw std::runtime_error("DataTamerParser: payload truncated");
   }
+  std::memcpy(&var, buffer.data, N);
+  buffer.data += N;
   buffer.size -= N;
   return var;
 }
@@ -180,6 +184,10 @@ inline VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer)
 
 inline bool GetBit(BufferSpan mask, size_t index)
 {
+  if((index >> 3) >= mask.size)
+  {
+    throw std::runtime_error("DataTamerParser: active mask shorter than the schema");
+  }
   const uint8_t& byte = mask.data[index >> 3];
   return 0 != (byte & uint8_t(1 << (index % 8)));
 }
@@ -242,6 +250,11 @@ inline bool TypeField::operator==(const TypeField& other) const
   return is_vector == other.is_vector && type == other.type &&
          array_size == other.array_size && field_name == other.field_name &&
          type_name == other.type_name;
+}
+
+inline bool TypeField::operator!=(const TypeField& other) const
+{
+  return !(*this == other);
 }
 
 inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false)
@@ -344,14 +357,19 @@ inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false
       "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
     };
 
+    // The type token is everything before an optional "[...]": compare it exactly,
+    // otherwise a custom type named e.g. "float64Pose" would parse as float64.
+    auto typeToken = [](const std::string& spec) {
+      return spec.substr(0, spec.find('['));
+    };
     for(size_t i = 0; i < TypesCount; i++)
     {
-      if(str_left.find(kNamesNew[i]) == 0)
+      if(typeToken(str_left) == kNamesNew[i])
       {
         field.type = static_cast<BasicType>(i);
         break;
       }
-      if(str_right.find(kNamesOld[i]) == 0)
+      if(typeToken(str_right) == kNamesOld[i])
       {
         field.type = static_cast<BasicType>(i);
         std::swap(str_type, str_name);
@@ -373,11 +391,24 @@ inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false
     {
       field.is_vector = true;
       auto pos = str_type->find(']', offset);
+      if(pos == std::string::npos)
+      {
+        throw std::runtime_error("Unterminated array size in: " + line);
+      }
       if(pos != offset + 1)
       {
-        // get number
-        std::string number_string = line.substr(offset + 1, pos - offset - 1);
-        field.array_size = static_cast<uint16_t>(std::stoi(number_string));
+        const std::string number_string = str_type->substr(offset + 1, pos - offset - 1);
+        if(number_string.empty() ||
+           number_string.find_first_not_of("0123456789") != std::string::npos)
+        {
+          throw std::runtime_error("Invalid array size in: " + line);
+        }
+        const unsigned long long extent = std::stoull(number_string);
+        if(extent == 0 || extent > 65535)
+        {
+          throw std::runtime_error("Array size out of range (1..65535) in: " + line);
+        }
+        field.array_size = static_cast<uint16_t>(extent);
       }
     }
 
@@ -402,17 +433,55 @@ inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false
   return schema;
 }
 
+/// Wire size in bytes of a basic type (0 for OTHER).
+inline size_t SizeOf(BasicType type)
+{
+  switch(type)
+  {
+    case BasicType::BOOL:
+    case BasicType::CHAR:
+    case BasicType::INT8:
+    case BasicType::UINT8:
+      return 1;
+    case BasicType::INT16:
+    case BasicType::UINT16:
+      return 2;
+    case BasicType::INT32:
+    case BasicType::UINT32:
+    case BasicType::FLOAT32:
+      return 4;
+    case BasicType::INT64:
+    case BasicType::UINT64:
+    case BasicType::FLOAT64:
+      return 8;
+    default:
+      return 0;
+  }
+}
+
+/// Nested custom types deeper than this are treated as a malformed (cyclic) schema.
+constexpr int kMaxSchemaDepth = 64;
+
 template <typename NumberCallback>
 bool ParseSnapshotRecursive(const TypeField& field,
                             const std::map<std::string, FieldsVector>& types_list,
                             BufferSpan& buffer, const NumberCallback& callback_number,
-                            const std::string& prefix)
+                            const std::string& prefix, int depth = 0)
 {
-  [[maybe_unused]] uint32_t vect_size = field.array_size;
+  if(depth > kMaxSchemaDepth)
+  {
+    throw std::runtime_error("DataTamerParser: custom types nested too deeply (cycle?)");
+  }
+  uint32_t vect_size = field.array_size;
   if(field.is_vector && field.array_size == 0)
   {
-    // dynamic vector
+    // dynamic vector: the count cannot exceed what the payload can hold
     vect_size = Deserialize<uint32_t>(buffer);
+    if(field.type != BasicType::OTHER &&
+       size_t(vect_size) * SizeOf(field.type) > buffer.size)
+    {
+      throw std::runtime_error("DataTamerParser: payload truncated");
+    }
   }
 
   auto new_prefix =
@@ -426,10 +495,15 @@ bool ParseSnapshotRecursive(const TypeField& field,
     }
     else
     {
-      const FieldsVector& fields = types_list.at(field.type_name);
-      for(const auto& sub_field : fields)
+      const auto type_it = types_list.find(field.type_name);
+      if(type_it == types_list.end())
       {
-        ParseSnapshotRecursive(sub_field, types_list, buffer, callback_number, var_name);
+        throw std::runtime_error("DataTamerParser: unknown type " + field.type_name);
+      }
+      for(const auto& sub_field : type_it->second)
+      {
+        ParseSnapshotRecursive(sub_field, types_list, buffer, callback_number, var_name,
+                               depth + 1);
       }
     }
   };
@@ -459,6 +533,10 @@ inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
     return false;
   }
   BufferSpan buffer = snapshot.payload;
+  if(snapshot.active_mask.size * 8 < schema.fields.size())
+  {
+    throw std::runtime_error("DataTamerParser: active mask shorter than the schema");
+  }
 
   for(size_t i = 0; i < schema.fields.size(); i++)
   {

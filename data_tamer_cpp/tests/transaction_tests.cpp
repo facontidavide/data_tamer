@@ -9,12 +9,17 @@
 #include <functional>
 #include <condition_variable>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 using namespace DataTamer;
 using DataTamerTest::AllocCounter;
@@ -443,4 +448,45 @@ TEST(Transaction, SerializationExceptionReleasesWriteMutex)
   ASSERT_THROW(channel->takeSnapshot(), std::runtime_error);
   ASSERT_TRUE(channel->writeMutex().try_lock());
   channel->writeMutex().unlock();
+}
+
+// Values enabled inside one transaction must appear together in the snapshot
+// that observes the transaction, never only the first of them.
+TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
+{
+#if defined(__linux__)
+  if(!std::ifstream("/proc/self/stat"))
+    GTEST_SKIP() << "needs readable procfs";
+  auto channel = LogChannel::create("chan");
+  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  channel->addDataSink(sink);
+  auto a = channel->createLoggedValue<double>("a", 1.0);
+  auto b = channel->createLoggedValue<double>("b", 1.0);
+  ASSERT_TRUE(channel->takeSnapshot());  // freeze; a valid pair
+  ASSERT_TRUE(sink->waitFor(1));
+  a->setEnabled(false);
+  b->setEnabled(false);
+
+  std::atomic<pid_t> tid{ 0 };
+  std::atomic<bool> finished{ false };
+  bool ok = false;
+  std::thread snapshotter;
+  {
+    auto tx = channel->scopedWrite();
+    a->set(2.0);  // enables a
+    snapshotter = std::thread([&] {
+      tid = static_cast<pid_t>(syscall(SYS_gettid));
+      ok = channel->takeSnapshot();  // blocks on the write mutex
+      finished = true;
+    });
+    ASSERT_TRUE(DataTamerTest::waitForSleepingThread(tid, finished));
+    b->set(2.0);  // enables b, still inside the transaction
+  }
+  snapshotter.join();
+  ASSERT_TRUE(ok);
+  ASSERT_TRUE(sink->waitFor(2));
+  EXPECT_EQ(sink->errors(), 0u);  // PAIR payload: both or neither, never one value
+#else
+  GTEST_SKIP() << "observing a blocked snapshot requires Linux procfs";
+#endif
 }

@@ -70,17 +70,18 @@ MCAPSink::MCAPSink(const std::string& filepath, bool do_compression,
 void DataTamer::MCAPSink::openFile(std::string const& filepath)
 {
   std::scoped_lock lk(_p->mutex);
-  _p->writer = std::make_unique<mcap::McapWriter>();
+  // Open the new file first: if that fails the current recording stays intact.
+  auto writer = std::make_unique<mcap::McapWriter>();
   mcap::McapWriterOptions options(kDataTamer);
   options.compression =
       _p->compression ? mcap::Compression::Zstd : mcap::Compression::None;
-  auto status = _p->writer->open(filepath, options);
+  const auto status = writer->open(filepath, options);
   if(!status.ok())
   {
-    throw std::runtime_error("Failed to open MCAP file for writing");
+    throw std::runtime_error("Failed to open MCAP file for writing: " + status.message);
   }
+  _p->writer = std::move(writer);  // closes the previous file
   _p->start_time = std::chrono::system_clock::now();
-  // clean up, in case this was opened a second time
   _p->hash_to_channel_id.clear();
 }
 
@@ -142,7 +143,7 @@ bool MCAPSink::storeSnapshot(const Snapshot& snapshot)
   msg.publishTime = msg.logTime;
   msg.data = reinterpret_cast<std::byte const*>(merged_payload.data());  // NOLINT
   msg.dataSize = merged_payload.size();
-  auto status = _p->writer->write(msg);
+  const bool written = _p->writer->write(msg).ok();
 
   // If reset_time is exceeded, we want to overwrite the current file.
   // Better than filling the disk, if you forgot to stop the application.
@@ -157,16 +158,18 @@ bool MCAPSink::storeSnapshot(const Snapshot& snapshot)
     }
     restartRecordingImpl(_p->filepath, _p->compression, false);
   }
-  return true;
+  return written;
 }
 
 void MCAPSink::setMaxTimeBeforeReset(std::chrono::seconds reset_time)
 {
+  std::scoped_lock lk(_p->mutex);  // read by the worker in storeSnapshot
   _p->reset_time = reset_time;
 }
 
 void MCAPSink::setCreateNewFileOnReset(bool create_file_on_reset)
 {
+  std::scoped_lock lk(_p->mutex);
   _p->create_file_on_reset = create_file_on_reset;
 }
 

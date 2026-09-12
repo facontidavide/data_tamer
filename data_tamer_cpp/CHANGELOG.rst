@@ -4,6 +4,21 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* Robustness fixes from the 2.0 review: the header-only parser and the Python
+  decoder check bounds before every read, reject masks shorter than the schema,
+  oversized dynamic counts and cyclic custom types, match type names exactly and
+  validate fixed-array extents; ``SchemaHash``/``schema_hash`` fields are
+  ``uint64_t`` end to end; ``TypeField::operator!=`` is defined. Library: the
+  fixed-size accumulator for arrays was uninitialized; custom types may now
+  contain numeric ``std::array``/``std::vector`` members; a failed registration
+  leaves the channel unchanged; null custom serializers are rejected; fixed
+  array extents outside 1..65535 fail to compile; the active mask is refreshed
+  under the write mutex so values enabled inside one transaction are captured
+  together; schema text is locale independent. ``MCAPSink`` reports write
+  failures from ``storeSnapshot()``, opens a new file before closing the old one
+  on restart, and synchronizes its setters with the worker. The ROS 2 sink
+  retries schema publication after a failure. ``ChannelsRegistry::clear()``
+  destroys channels outside its lock; ``addDefaultSink(nullptr)`` throws.
 * Schema version 5: the schema hash is FNV-1a 64 of the schema text (minus its
   own hash line), so it is identical on every platform, verifiable by any
   decoder and covers custom type bodies. Readers accept version 4 files through

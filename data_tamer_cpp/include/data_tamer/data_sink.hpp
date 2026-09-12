@@ -30,7 +30,7 @@ struct Snapshot
   std::string_view channel_name;
 
   /// Unique identifier of the schema
-  std::size_t schema_hash;
+  uint64_t schema_hash;
 
   /// snapshot timestamp
   std::chrono::nanoseconds timestamp;

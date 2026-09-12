@@ -1,6 +1,7 @@
 #include "data_tamer/data_tamer.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -26,8 +27,10 @@ ChannelsRegistry& ChannelsRegistry::Global()
 
 void ChannelsRegistry::addDefaultSink(std::shared_ptr<DataSinkBase> sink)
 {
+  if(!sink)
+    throw std::invalid_argument("addDefaultSink: null sink");
   std::scoped_lock lk(_p->mutex);
-  _p->default_sinks.insert(sink);
+  _p->default_sinks.insert(std::move(sink));
 }
 
 std::shared_ptr<LogChannel> ChannelsRegistry::getChannel(std::string const& channel_name)
@@ -49,9 +52,15 @@ std::shared_ptr<LogChannel> ChannelsRegistry::getChannel(std::string const& chan
 
 void ChannelsRegistry::clear()
 {
-  std::scoped_lock lk(_p->mutex);
-  _p->channels.clear();
-  _p->default_sinks.clear();
+  // Destroying channels and sinks can block (they drain and join): never do
+  // that while holding the registry lock.
+  decltype(_p->channels) channels;
+  decltype(_p->default_sinks) sinks;
+  {
+    std::scoped_lock lk(_p->mutex);
+    channels.swap(_p->channels);
+    sinks.swap(_p->default_sinks);
+  }
 }
 
 }  // namespace DataTamer

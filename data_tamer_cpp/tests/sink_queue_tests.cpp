@@ -433,3 +433,35 @@ TEST(SinkQueue, FastConsumerCannotReleaseParentBeforeSecondFanout)
   EXPECT_EQ(received[0].size(), accepted);
   EXPECT_EQ(received[0], received[1]);
 }
+
+// A restart whose file cannot be opened must throw and leave the current
+// recording running: the old writer is replaced only after the new one opened.
+TEST(SinkQueue, McapFailedRestartKeepsTheCurrentRecording)
+{
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("data_tamer_restart_" + std::to_string(NsecSinceEpoch().count()));
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  const auto path = (directory / "log.mcap").string();
+  uint64_t value = 3;
+  auto sink = std::make_shared<MCAPSink>(path, false);
+  auto channel = channelWith(sink, &value);
+  ASSERT_TRUE(channel->takeSnapshot());
+  EXPECT_THROW(
+      sink->restartRecording((directory / "missing" / "dir" / "x.mcap").string()),
+      std::runtime_error);
+  ASSERT_TRUE(channel->takeSnapshot());  // still recording into the first file
+  sink->finishQueueAndStop();
+  mcap::McapReader reader;
+  ASSERT_TRUE(reader.open(path).ok());
+  size_t count = 0;
+  for(const auto& message : reader.readMessages())
+  {
+    (void)message;
+    ++count;
+  }
+  EXPECT_EQ(count, 2u);
+  reader.close();
+  std::filesystem::remove_all(directory);
+}

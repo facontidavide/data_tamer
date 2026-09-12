@@ -123,7 +123,7 @@ inline void GetFixedSize(bool& is_fixed_size, size_t& fixed_size)
     else if constexpr(info.is_container && info.size >= 0)
     {
       // array
-      size_t obj_size;
+      size_t obj_size = 0;
       using Type = typename container_info<T>::value_type;
       GetFixedSize<Type>(is_fixed_size, obj_size);
       fixed_size += info.size * obj_size;
