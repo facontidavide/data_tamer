@@ -1,8 +1,10 @@
 #pragma once
 
+#include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
 
 #include <memory>
+#include <thread>
 #include <utility>
 
 namespace DataTamerTest
@@ -51,6 +53,18 @@ Attached<T> manual(Args&&... args)
       std::make_unique<T>(std::forward<Args>(args)...),
       DataTamer::SinkWorker::kDefaultQueueCapacity,
       DataTamer::SinkWorker::Delivery::Manual));
+}
+
+/// True while the calling thread (or any other) holds the channel's write mutex:
+/// a probe thread's tryTakeSnapshot() reports `blocked`. The channel must be
+/// prepared with a sink attached (the probe takes a snapshot when not blocked).
+inline bool writeMutexHeld(DataTamer::LogChannel& channel)
+{
+  bool held = false;
+  std::thread([&] {
+    held = channel.tryTakeSnapshot() == DataTamer::SnapshotResult::blocked;
+  }).join();
+  return held;
 }
 
 }  // namespace DataTamerTest

@@ -265,32 +265,22 @@ TEST(DataTamerBasic, VectorWithChangingSize)
 
 TEST(DataTamerBasic, LockedPtr)
 {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   auto channel = LogChannel::create("chan");
-  auto logged_float = channel->createLoggedValue<float>("real");
-  float val = 3.14f;
-  float val2 = 2.72f;
-  logged_float->set(val);
-  EXPECT_EQ(logged_float->get(), val);
-
+  auto logged = channel->createLoggedValue<std::vector<float>>("real");
+  const std::vector<float> val{ 3.14f };
+  const std::vector<float> val2{ 2.72f, 1.0f };
+  logged->set(val);
+  EXPECT_EQ(logged->get(), val);
   {
-    auto ptr = logged_float->getMutablePtr();
-
-    // expect that we can get the pointer
-    EXPECT_TRUE(ptr);
+    auto ptr = logged->getMutablePtr();
     EXPECT_EQ(*ptr, val);
-
-    // assign a new value to ptr
-    *ptr = val2;
+    *ptr = val2;  // visible once the guard is gone
   }
-
-  // we should be able to get it again now that ptr is out of scope
-  EXPECT_TRUE(logged_float->getMutablePtr());
-
-  // now expect that our assignment to the locked pointer took place
-  EXPECT_EQ(logged_float->get(), val2);
-#pragma GCC diagnostic pop
+  {
+    auto again = logged->getConstPtr();  // lock was released by the first guard
+    EXPECT_EQ(*again, val2);
+  }
+  EXPECT_EQ(logged->get(), val2);
 }
 
 TEST(DataTamerBasic, FinishQueue)

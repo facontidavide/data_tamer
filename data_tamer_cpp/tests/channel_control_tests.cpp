@@ -1,6 +1,7 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
 
+#include "alloc_counter.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -78,7 +79,9 @@ public:
   std::optional<CustomSchema> typeSchema() const override
   {
     if(throw_schema)
+    {
       throw std::runtime_error("schema");
+    }
     return std::nullopt;
   }
   const std::string& typeName() const override
@@ -91,15 +94,21 @@ public:
   {
     ++size_calls;
     if(gate)
+    {
       gate->pause();
+    }
     if(throw_size)
+    {
       throw std::runtime_error("size");
+    }
     return 8;
   }
   void serialize(const void* source, SerializeMe::SpanBytes& bytes) const override
   {
     if(throw_serialize)
+    {
       throw std::runtime_error("serialize");
+    }
     const auto value = static_cast<const CustomValue*>(source)->value;
     std::memcpy(bytes.data(), &value, 8);
     bytes.trimFront(8);
@@ -119,11 +128,17 @@ public:
   void onSchema(const Schema& value) override
   {
     if(add_gate)
+    {
       add_gate->pause();
+    }
     if(reject_schema)
+    {
       throw std::runtime_error("schema");
+    }
     if(on_schema)
+    {
       on_schema(value);
+    }
     ++registrations;
     schema = value;
   }
@@ -131,7 +146,9 @@ public:
   {
     snapshots.push_back(*value);
     if(on_store)
+    {
       on_store(value);
+    }
   }
 };
 
@@ -226,7 +243,7 @@ TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
   channel->unregister(id);
   // Keep storage alive until after this baseline regression assertion.
   channel->setEnabled(id, true);
-  EXPECT_FALSE(channel->sharedState()->isEnabled(id.first_index));
+  EXPECT_FALSE(channel->isEnabled(id));
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   EXPECT_FALSE(GetBit(sink->snapshots.back().active_mask, 0));
@@ -237,10 +254,31 @@ TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
   EXPECT_THROW(channel->registerValue("value", &changed), std::runtime_error);
   uint64_t replacement = 42;
   auto next = channel->registerValue("value", &replacement);
-  EXPECT_EQ(next.first_index, id.first_index);
+  EXPECT_NE(next, id);
+  EXPECT_TRUE(channel->isEnabled(next));
+  // The old handle is stale: it cannot touch the replacement in the same slot.
+  EXPECT_THROW(channel->setEnabled(id, false), std::invalid_argument);
+  EXPECT_THROW(channel->unregister(id), std::invalid_argument);
+  EXPECT_FALSE(channel->isEnabled(id));
+  EXPECT_TRUE(channel->isEnabled(next));
+  EXPECT_THROW(channel->setEnabled(RegistrationID{}, true), std::invalid_argument);
+  EXPECT_THROW(channel->unregister(RegistrationID{}), std::invalid_argument);
+  EXPECT_FALSE(channel->trySetEnabled(id, true));  // stale: no throw, no effect
+  EXPECT_TRUE(channel->isEnabled(next));
+  {
+    DataTamerTest::AllocCounter::Scope scope;
+    EXPECT_TRUE(channel->trySetEnabled(next, false));
+    EXPECT_FALSE(channel->trySetEnabled(id, true));
+    EXPECT_EQ(scope.allocations(), 0u);
+  }
+  EXPECT_FALSE(channel->isEnabled(next));
+  channel->setEnabled(next, true);
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   checkPayloads(*sink, 1);
+  channel->setEnabled(next, false);
+  EXPECT_FALSE(channel->isEnabled(next));
+  channel->unregister(next);
 }
 
 TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
@@ -264,10 +302,11 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
   });
   // Observing cleared liveness establishes that removal reached its publication.
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-  while(channel->sharedState()->isEnabled(id.first_index) &&
-        std::chrono::steady_clock::now() < deadline)
+  while(channel->isEnabled(id) && std::chrono::steady_clock::now() < deadline)
+  {
     std::this_thread::yield();
-  EXPECT_FALSE(channel->sharedState()->isEnabled(id.first_index));
+  }
+  EXPECT_FALSE(channel->isEnabled(id));
   EXPECT_FALSE(returned.load());
   gate.release();
   EXPECT_TRUE(snapshot.get());
@@ -481,6 +520,8 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
   auto custom_id = channel->registerValue("custom", &value);
   RegisteredCustom second_value;
   auto second_id = channel->registerValue("second_custom", &second_value);
+  uint64_t toggled = 42;  // checkPayloads expects every field to read 42
+  const auto toggled_id = channel->registerValue("toggled", &toggled);
   channel->addDataSink(stable);
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   // Reuse the same registered type from two independent controller threads.
@@ -488,8 +529,8 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
   std::thread toggler([&] {
     while(!done)
     {
-      channel->setEnabled({ 0, 3 }, false);
-      channel->setEnabled({ 0, 3 }, true);
+      channel->setEnabled(toggled_id, false);
+      channel->setEnabled(toggled_id, true);
     }
   });
   std::thread second_control([&] {
@@ -522,8 +563,8 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
   toggler.join();
   stable.drain();
   changing.drain();
-  checkPayloads(*stable, 3);
-  checkPayloads(*changing, 3);
+  checkPayloads(*stable, 4);
+  checkPayloads(*changing, 4);
   EXPECT_FALSE(stable->snapshots.empty());
 }
 
@@ -564,7 +605,9 @@ TEST(ChannelControl, ExhaustedPoolDoesNotCallSerializer)
   channel->registerCustomValue("value", &value, serializer);
   channel->addDataSink(sink);
   for(size_t i = 0; i < SnapshotPool::kDefaultCapacity; ++i)
+  {
     ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
   const auto calls = serializer->size_calls;
   EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(serializer->size_calls, calls);
