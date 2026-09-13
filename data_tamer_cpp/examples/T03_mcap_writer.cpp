@@ -47,10 +47,10 @@ int main()
 
   for(size_t i = 0; i < 1000; i++)
   {
-    channelA->takeSnapshot();
+    (void)channelA->takeSnapshot();  // see stats() for drops
     if(i % 2 == 0)
     {
-      channelB->takeSnapshot();
+      (void)channelB->takeSnapshot();
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }

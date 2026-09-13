@@ -19,13 +19,13 @@ using namespace DataTamer;
 /// on this thread; reports them as the "allocs/op" counter.
 static void measureSnapshots(benchmark::State& state, LogChannel& channel)
 {
-  channel.takeSnapshot();  // warm-up: buffers reach their steady-state capacity
-  channel.takeSnapshot();
+  (void)channel.takeSnapshot();  // warm-up: buffers reach their steady-state capacity
+  (void)channel.takeSnapshot();
 
   DataTamerTest::AllocCounter::Scope scope;  // outside the timed loop
   for(auto _ : state)
   {
-    channel.takeSnapshot();
+    (void)channel.takeSnapshot();
   }
   state.counters["allocs/op"] = double(scope.allocations()) / double(state.iterations());
 }

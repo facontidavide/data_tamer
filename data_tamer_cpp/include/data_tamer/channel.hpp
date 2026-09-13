@@ -44,6 +44,29 @@ class ChannelsRegistry;
  * All you values must be registered before calling takeSnapshot for the first time.
  *
  */
+/// Outcome of LogChannel::takeSnapshot() / tryTakeSnapshot().
+enum class SnapshotResult : uint8_t
+{
+  /// Captured and accepted by every attached sink.
+  ok,
+  /// Captured; some sinks accepted it, others refused (queue full or worker
+  /// stopped). droppedSnapshots(sink) tells which.
+  partial,
+  /// Captured, but every attached sink refused it.
+  rejected,
+  /// No sink is attached: nothing captured. Before prepare() this also leaves
+  /// the schema open.
+  no_sinks,
+  /// tryTakeSnapshot() before prepare(): nothing captured.
+  not_prepared,
+  /// Every pool slot is still referenced by a sink; see poolExhausted().
+  pool_exhausted,
+  /// tryTakeSnapshot(): the payload outgrew the slot; see droppedOversize().
+  oversize,
+  /// tryTakeSnapshot(): the write mutex was held past the spin budget.
+  blocked
+};
+
 class LogChannel : public std::enable_shared_from_this<LogChannel>
 {
 protected:
@@ -178,17 +201,47 @@ public:
   size_t getNumberOfSinks() const;
 
   /**
+   * @brief prepare freezes the schema, allocates the snapshot pool and announces
+   * the schema to every attached sink. Call it from a control thread once all
+   * values are registered; takeSnapshot() calls it implicitly otherwise.
+   *
+   * Throws if a sink rejects the schema or a size is impossible; the channel is
+   * then left exactly as before (schema still open, no pool), so fixing the
+   * cause and calling prepare() again is enough. Sinks that were announced
+   * successfully are not announced twice unless the schema changes.
+   * onSchema() runs without channel locks held (here and in addDataSink), so
+   * a sink may call the channel's const queries from it.
+   */
+  void prepare();
+
+  /// True once prepare() has completed (explicitly or through takeSnapshot()).
+  [[nodiscard]] bool isPrepared() const;
+
+  /**
    * @brief takeSnapshot copies the current value of all your registered values
-   *  and send an instance of Snapshot to all your Sinks.
+   *  and sends a Snapshot to all your sinks.
    *
    * Call from one snapshot producer thread per channel. Control operations
    * (registration, unregister, sink changes) must run outside writer guards
    * and serializer callbacks; they may wait for an active snapshot to finish.
+   * Without sinks nothing is captured and the schema stays open. The first
+   * call with sinks prepares the channel (allocations, sink callbacks).
    * @param timestamp is the time since epoch, by default.
-   *
-   * @return true is succesfully pushed to all its sinks.
    */
-  bool takeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
+  [[nodiscard]] SnapshotResult
+  takeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
+
+  /**
+   * @brief Real-time variant of takeSnapshot(). Requires prepare(). The
+   * library itself performs no allocation and no blocking acquisition on this
+   * path: it spins on the write mutex for its budget and returns `blocked`
+   * instead of waiting, sizes the payload against the slot and returns
+   * `oversize` instead of growing it, and publishes through lock-free queues.
+   * What custom serializers do inside serializedSize()/serialize() is up to
+   * them: on this path they must not throw, allocate or block.
+   */
+  [[nodiscard]] SnapshotResult
+  tryTakeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
 
   /**
    * @brief getActiveFlags returns a serialized buffer, where
@@ -219,7 +272,8 @@ public:
   /// snapshot or in none. Nested transactions on this thread are safe.
   [[nodiscard]] ChannelSharedState::Transaction scopedWrite();
 
-  /// Snapshots that blocked after exhausting the write-mutex spin budget.
+  /// Snapshots that exhausted the write-mutex spin budget: takeSnapshot() then
+  /// blocked, tryTakeSnapshot() returned `blocked`.
   [[nodiscard]] uint64_t writeLockContended() const;
 
   /// Longest blocking mutex acquisition after spin exhaustion, in nanoseconds.
@@ -228,22 +282,17 @@ public:
   /// Snapshot attempts that could not acquire a free pool slot.
   [[nodiscard]] uint64_t poolExhausted() const;
 
-  /// Configure before the first snapshot (even one without sinks).
-  /// Each slot reserves max(bytes, 2 * initial payload size, 256); zero is automatic.
+  /// Configure before prepare(). Each slot reserves
+  /// max(bytes, 2 * initial payload size, 256); zero is automatic.
   void setPayloadCapacity(size_t bytes);
 
   /// Number of retained/in-flight snapshots; default 64. Zero is invalid.
   void setPoolCapacity(size_t count);
 
-  /// May change at runtime. Oversize snapshots return false instead of growing
-  /// the acquired slot. Existing per-slot capacity is preserved. Serializer and
-  /// allocator exceptions still propagate; strict mode is not a no-throw API.
-  void setStrictMode(bool strict);
-
-  /// Successful per-slot payload growth allocations after initial reservation.
+  /// Successful per-slot payload growth allocations by takeSnapshot().
   [[nodiscard]] uint64_t payloadReallocations() const;
 
-  /// Snapshot attempts dropped because strict mode disallowed payload growth.
+  /// tryTakeSnapshot() attempts rejected because the payload outgrew the slot.
   [[nodiscard]] uint64_t droppedOversize() const;
 
   /// Failed publications to this attachment; zero if sink is not attached.
@@ -265,6 +314,7 @@ public:
 
 private:
   struct Pimpl;
+  SnapshotResult takeSnapshotImpl(std::chrono::nanoseconds timestamp, bool real_time);
   std::unique_ptr<Pimpl> _p;
 
   TypesRegistry _type_registry;

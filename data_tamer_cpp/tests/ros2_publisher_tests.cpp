@@ -19,7 +19,7 @@ TEST(DataTamerROS2Publisher, SharedPointer)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 }
 
 TEST(DataTamerROS2Publisher, SharedPointerLifeCycle)
@@ -41,7 +41,7 @@ TEST(DataTamerROS2Publisher, SharedPointerLifeCycle)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   lifecycle_node->shutdown();
 }
@@ -58,7 +58,7 @@ TEST(DataTamerROS2Publisher, Dereference)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 }
 
 TEST(DataTamerROS2Publisher, DereferenceLifeCycle)
@@ -78,7 +78,7 @@ TEST(DataTamerROS2Publisher, DereferenceLifeCycle)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   lifecycle_node->shutdown();
 }
@@ -97,7 +97,7 @@ TEST(DataTamerROS2Publisher, NodeInterfacesDirect)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 }
 
 TEST(DataTamerROS2Publisher, NodeInterfacesDirectLifeCycle)
@@ -119,7 +119,7 @@ TEST(DataTamerROS2Publisher, NodeInterfacesDirectLifeCycle)
   double const value = 1.;
   channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   lifecycle_node->shutdown();
 }

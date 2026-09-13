@@ -52,7 +52,7 @@ void WritingThread(const std::string& channel_name)
       std::flush(std::cout);
     }
     auto t1 = std::chrono::system_clock::now();
-    if(!channel->takeSnapshot())
+    if(channel->takeSnapshot() != SnapshotResult::ok)
     {
       std::cout << "pushing failed\n";
     }

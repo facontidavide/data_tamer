@@ -4,6 +4,20 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Breaking, snapshots**: ``takeSnapshot()`` returns a ``[[nodiscard]]``
+  ``SnapshotResult`` instead of ``bool`` (``ok``, ``partial``, ``rejected``,
+  ``no_sinks``, ``not_prepared``, ``pool_exhausted``, ``oversize``, ``blocked``). New
+  ``tryTakeSnapshot()`` for real-time producers: never blocks on the write mutex
+  and never grows a slot; it requires ``prepare()``. ``setStrictMode()`` is
+  removed (it was ``tryTakeSnapshot()``'s no-growth behaviour); the
+  ``droppedOversize()`` counter stays.
+* New ``LogChannel::prepare()`` / ``isPrepared()``: freeze the schema, allocate
+  the pool and announce the schema to the sinks explicitly. A failed
+  ``prepare()`` leaves the channel exactly as it was (schema open, settable
+  capacities) so it can be retried; if the schema changes afterwards, sinks that
+  already heard it are announced again. ``takeSnapshot()`` without sinks now
+  returns ``no_sinks`` without freezing anything. Sink ``onSchema`` callbacks run
+  with the channel control mutex released, so a sink may query the channel.
 * **Breaking, sinks**: ``DataSinkBase`` is replaced by composition. A sink
   implements ``DataSink`` (``onSchema(const Schema&)``, ``onSnapshot(const
   SnapshotRef&)``; throw to report a failure) and is owned by a ``SinkWorker``,

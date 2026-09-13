@@ -214,7 +214,7 @@ int main(int argc, char** argv)
   // warm-up
   for(int i = 0; i < 10; i++)
   {
-    channel->takeSnapshot();
+    (void)channel->takeSnapshot();
   }
 
   const long period_ns = 1000000000L / opt.rate_hz;
@@ -240,7 +240,7 @@ int main(int argc, char** argv)
     plain[i % plain_size] = double(i);
     DataTamerTest::AllocCounter::Scope scope;
     const auto t0 = std::chrono::steady_clock::now();
-    const bool ok = channel->takeSnapshot();
+    const bool ok = channel->takeSnapshot() == SnapshotResult::ok;
     const auto t1 = std::chrono::steady_clock::now();
     allocations += scope.allocations();
     if(!ok)
@@ -280,7 +280,7 @@ int main(int argc, char** argv)
   std::printf("allocations per call after warm-up: %.4f\n",
               double(allocations) / double(total));
   std::printf("allocations after warm-up: %zu\n", allocations);
-  std::printf("takeSnapshot returned false: %zu / %zu\n", failed, total);
+  std::printf("takeSnapshot not ok: %zu / %zu\n", failed, total);
   std::printf("fifo=%d\n", int(fifo_ok));
   return 0;
 }

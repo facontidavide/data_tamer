@@ -40,7 +40,7 @@ TEST(DataTamerBasic, SinkAdd)
   const int shapshot_count = 10;
   for(int i = 0; i < shapshot_count; i++)
   {
-    channel->takeSnapshot();
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   }
 
   dummy_sink_A.drain();
@@ -114,7 +114,7 @@ TEST(DataTamerBasic, TestRegistration)
   ASSERT_THROW(channel->registerValue("v2", &i1), std::runtime_error);
   id_v2 = channel->registerValue("v2", &v2_bis);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   // changing the pointer after takeSnapshot is valid
@@ -134,7 +134,7 @@ TEST(DataTamerBasic, TestRegistration)
   channel->unregister(id_v1);
   channel->setEnabled(id_i1, false);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   // payload should contain v2, and i2
@@ -146,7 +146,7 @@ TEST(DataTamerBasic, TestRegistration)
   channel->registerValue("v1", &v1);
   channel->setEnabled(id_i1, true);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
@@ -164,7 +164,7 @@ TEST(DataTamerBasic, Vector)
 
   const auto expected_size = 4 * sizeof(float) + sizeof(uint32_t);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 }
@@ -194,14 +194,14 @@ TEST(DataTamerBasic, Disable)
   size_t expected_size = sizeof(v1) + sizeof(v2) + sizeof(v3) + sizeof(v4) + sizeof(v5) +
                          3 * sizeof(double) + 4 * sizeof(float) + sizeof(uint32_t);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
   ASSERT_EQ(sink->latestActiveMask()[0], 0b11111111);
 
   auto checkSize = [&](const auto& id, size_t size) {
     channel->setEnabled(id, false);
-    channel->takeSnapshot();
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
     sink.drain();
     channel->setEnabled(id, true);
 
@@ -240,7 +240,7 @@ TEST(DataTamerBasic, VectorWithChangingSize)
   std::vector<float> vect = { 1, 2, 3, 4 };
   channel->registerValue("vect", &vect);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 
@@ -251,14 +251,14 @@ TEST(DataTamerBasic, VectorWithChangingSize)
     vect.push_back(float(i));
   }
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 
   // same is the vector size is reduced
   vect.resize(5);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 }
@@ -305,22 +305,22 @@ TEST(DataTamerBasic, FinishQueue)
   double const value = 1.;
   auto id_value = channel->registerValue("value", &value);
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   sink.worker->stop();
   sink->stopRecording();
 
   // now we shouldn't be able to take more snapshots
-  EXPECT_FALSE(channel->takeSnapshot());
+  EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
 
   // restart the recording
   sink->restartRecording(temp_path);
   sink.worker->start();
 
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   sink->stopRecording();
 
   // since we just stopped recording but not snapshots, we'll still be able to take a snapshot (but it won't be written to disk)
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 }

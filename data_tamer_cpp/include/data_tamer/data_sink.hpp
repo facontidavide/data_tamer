@@ -86,7 +86,9 @@ private:
  * - onSnapshot() runs on the worker thread, in queue order. Throw to report a
  *   failure: the worker counts it and keeps the message (see SinkWorker).
  *
- * Never call LogChannel control methods from a callback.
+ * A callback may use the channel's const queries (getSchema(), stats(), ...)
+ * but must never call anything that changes it (registration, sinks,
+ * prepare()): those wait for callbacks to finish and would deadlock.
  */
 class DataSink
 {

@@ -261,7 +261,7 @@ void raceWriterAgainstSnapshots(LogChannel& channel, CheckingSink& sink,
       i < 2000 || (iterations.load() == 0 && std::chrono::steady_clock::now() < deadline);
       ++i)
   {
-    accepted += channel.takeSnapshot();
+    accepted += channel.takeSnapshot() == SnapshotResult::ok;
   }
   stop = true;
   writer.join();
@@ -329,7 +329,7 @@ TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUnco
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   ASSERT_EQ(channel->writeLockContended(), 0u);
   ASSERT_EQ(channel->writeLockWaitMaxNs(), 0u);
 
@@ -341,7 +341,7 @@ TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUnco
     snapshot = std::thread([&] {
       started = true;
       const auto before = std::chrono::steady_clock::now();
-      EXPECT_TRUE(channel->takeSnapshot());
+      EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
       elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now() - before)
                     .count();
@@ -360,7 +360,8 @@ TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUnco
   if(stats.write_lock_contended == 0)
     EXPECT_EQ(stats.write_lock_wait_max_ns, 0u);
   EXPECT_LE(stats.write_lock_wait_max_ns, elapsed);
-  EXPECT_TRUE(channel->takeSnapshot());  // an uncontended snapshot moves neither counter
+  EXPECT_EQ(channel->takeSnapshot(),
+            SnapshotResult::ok);  // an uncontended snapshot moves neither counter
   EXPECT_EQ(channel->stats().write_lock_contended, stats.write_lock_contended);
   EXPECT_EQ(channel->stats().write_lock_wait_max_ns, stats.write_lock_wait_max_ns);
 }
@@ -375,7 +376,7 @@ TEST(Transaction, ObservedSleepingSnapshotAdvancesContentionCounters)
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   std::atomic<pid_t> tid{ 0 };
   std::atomic_bool finished{ false };
@@ -385,7 +386,7 @@ TEST(Transaction, ObservedSleepingSnapshotAdvancesContentionCounters)
     auto tx = channel->scopedWrite();
     snapshot = std::thread([&] {
       tid = static_cast<pid_t>(syscall(SYS_gettid));
-      accepted = channel->takeSnapshot();
+      accepted = channel->takeSnapshot() == SnapshotResult::ok;
       finished = true;
     });
     observed = DataTamerTest::waitForSleepingThread(tid, finished);
@@ -422,17 +423,17 @@ TEST(Transaction, DisabledAndDestroyedValuesAreNotSized)
   auto serializer = std::make_shared<ProbeSerializer>();
   const auto id = channel->registerCustomValue("value", &value, serializer);
   auto vec = channel->createLoggedValue<std::vector<double>>("vec");
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   ASSERT_GT(serializer->size_calls, 0u);
 
   channel->unregister(id);
   serializer->size_calls = 0;
   serializer->throw_on_size = true;
-  ASSERT_NO_THROW(channel->takeSnapshot());
+  ASSERT_NO_THROW((void)channel->takeSnapshot());
   ASSERT_EQ(serializer->size_calls, 0u);
 
   vec.reset();
-  ASSERT_NO_THROW(channel->takeSnapshot());
+  ASSERT_NO_THROW((void)channel->takeSnapshot());
 }
 
 TEST(Transaction, SerializationExceptionReleasesWriteMutex)
@@ -445,7 +446,7 @@ TEST(Transaction, SerializationExceptionReleasesWriteMutex)
   serializer->throw_on_serialize = true;
   channel->registerCustomValue("value", &value, serializer);
 
-  ASSERT_THROW(channel->takeSnapshot(), std::runtime_error);
+  ASSERT_THROW((void)channel->takeSnapshot(), std::runtime_error);
   ASSERT_TRUE(channel->writeMutex().try_lock());
   channel->writeMutex().unlock();
 }
@@ -462,7 +463,7 @@ TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
-  ASSERT_TRUE(channel->takeSnapshot());  // freeze; a valid pair
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);  // freeze; a valid pair
   ASSERT_TRUE(sink->waitFor(1));
   a->setEnabled(false);
   b->setEnabled(false);
@@ -476,7 +477,7 @@ TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
     a->set(2.0);  // enables a
     snapshotter = std::thread([&] {
       tid = static_cast<pid_t>(syscall(SYS_gettid));
-      ok = channel->takeSnapshot();  // blocks on the write mutex
+      ok = channel->takeSnapshot() == SnapshotResult::ok;  // blocks on the write mutex
       finished = true;
     });
     ASSERT_TRUE(DataTamerTest::waitForSleepingThread(tid, finished));

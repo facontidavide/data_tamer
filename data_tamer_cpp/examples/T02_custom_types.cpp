@@ -47,7 +47,7 @@ int main()
                          5 * (sizeof(double) * 3) +  // points_vect and its size
                          sizeof(int32_t) * 3;        // value_array
 
-  channel->takeSnapshot();
+  (void)channel->takeSnapshot();
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
   std::cout << "\nMessage size: " << dummy_sink->as<DummySink>().latestPayloadSize()

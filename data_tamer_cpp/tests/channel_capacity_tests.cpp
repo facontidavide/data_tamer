@@ -73,7 +73,7 @@ public:
 };
 }  // namespace
 
-TEST(ChannelCapacity, FreezeWithoutSinkReservesAndRejectsSetters)
+TEST(ChannelCapacity, PrepareWithoutSinkReservesAndRejectsSetters)
 {
   auto channel = LogChannel::create("capacity");
   auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
@@ -84,17 +84,81 @@ TEST(ChannelCapacity, FreezeWithoutSinkReservesAndRejectsSetters)
                std::length_error);
   channel->setPoolCapacity(2);
   channel->setPayloadCapacity(0);  // Automatic minimum remains valid.
-  channel->setStrictMode(true);
-  EXPECT_FALSE(channel->takeSnapshot());
+  // Without sinks nothing is captured and nothing is frozen.
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::no_sinks);
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::not_prepared);
+  EXPECT_FALSE(channel->isPrepared());
+  channel->setPoolCapacity(2);
+  channel->prepare();  // Explicit preparation freezes even without sinks.
+  EXPECT_TRUE(channel->isPrepared());
   EXPECT_TRUE(GetBit(channel->getActiveFlags(), 0));
   EXPECT_THROW(channel->setPoolCapacity(2), std::runtime_error);
   EXPECT_THROW(channel->setPayloadCapacity(256), std::runtime_error);
   value->set(std::vector<double>(1024, 3.0));
   CapacityWorker sink;
   channel->addDataSink(sink);
-  EXPECT_FALSE(channel->takeSnapshot());  // Must use the no-sink freeze's reservation.
+  // Must use the reservation made by prepare().
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
   EXPECT_EQ(channel->droppedOversize(), 1u);
   EXPECT_EQ(channel->payloadReallocations(), 0u);
+}
+
+TEST(ChannelCapacity, TryTakeSnapshotReportsBlockedInsteadOfWaiting)
+{
+  auto channel = LogChannel::create("capacity");
+  CapacityWorker sink;
+  auto value = channel->createLoggedValue<uint64_t>("value", 1);
+  channel->setPoolCapacity(1);  // a leaked slot would show as pool_exhausted
+  channel->addDataSink(sink);
+  channel->prepare();
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  {
+    auto tx = channel->scopedWrite();  // holds the write mutex
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::blocked);
+  }
+  EXPECT_EQ(channel->writeLockContended(), 1u);
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);  // slot was released
+  sink.drain();
+  EXPECT_EQ(channel->poolExhausted(), 0u);
+}
+
+// The RT path never throws for sizes it cannot store: an impossible
+// serializedSize() is reported as oversize, and the whole call stays free of
+// allocations on the calling thread, including its rejection paths.
+TEST(ChannelCapacity, TryTakeSnapshotDoesNotThrowOrAllocateOnRejection)
+{
+  auto channel = LogChannel::create("capacity");
+  CapacityWorker sink;
+  auto serializer = std::make_shared<SizedSerializer>();
+  SizedValue value;
+  channel->registerCustomValue("value", &value, serializer);
+  channel->registerCustomValue("second", &value, serializer);
+  channel->setPoolCapacity(1);
+  channel->addDataSink(sink);
+  channel->prepare();
+  size_t allocations = 0;
+  {
+    DataTamerTest::AllocCounter::Scope scope;
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::pool_exhausted);
+    sink.drain();
+    serializer->size = std::numeric_limits<size_t>::max();  // would overflow the sum
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
+    serializer->size = 1000;  // fits a vector, not the slot
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
+    serializer->size = 8;
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+    sink.drain();
+    allocations = scope.allocations();
+  }
+  EXPECT_EQ(allocations, 0u);
+  EXPECT_EQ(channel->droppedOversize(), 2u);
+  EXPECT_EQ(channel->poolExhausted(), 1u);
+  serializer->size = std::numeric_limits<size_t>::max();
+  EXPECT_THROW((void)channel->takeSnapshot(), std::length_error) << "the blocking path "
+                                                                    "keeps validating "
+                                                                    "sizes";
 }
 
 TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
@@ -106,18 +170,18 @@ TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
   channel->registerCustomValue("value", &value, serializer);
   channel->setPoolCapacity(2);
   channel->addDataSink(sink);
-  ASSERT_TRUE(channel->takeSnapshot());
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   const auto calls = serializer->calls;
-  EXPECT_FALSE(channel->takeSnapshot());
+  EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(serializer->calls, calls);
   EXPECT_EQ(channel->poolExhausted(), 1u);
   sink.drain();
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->droppedSnapshots(sink), 0u);
 }
 
-TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapacity)
+TEST(ChannelCapacity, TryRejectsOversizeWhileTakeGrowsEachSlot)
 {
   auto channel = LogChannel::create("capacity");
   CapacityWorker sink;
@@ -125,20 +189,18 @@ TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapaci
   channel->addDataSink(sink);
   channel->setPoolCapacity(2);
   channel->setPayloadCapacity(256);
-  channel->setStrictMode(true);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   value->set(std::vector<double>(1024, 3.0));
-  EXPECT_FALSE(channel->takeSnapshot());
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
   EXPECT_EQ(channel->droppedOversize(), 1u);
   EXPECT_EQ(channel->payloadReallocations(), 0u);
-  channel->setStrictMode(false);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->payloadReallocations(), 1u);
   sink.drain();
-  channel->setStrictMode(true);
-  EXPECT_FALSE(channel->takeSnapshot());  // Other slot is still small.
-  ASSERT_TRUE(channel->takeSnapshot());   // Grown slot remains usable in strict mode.
+  EXPECT_EQ(channel->tryTakeSnapshot(),
+            SnapshotResult::oversize);  // Other slot is still small.
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);  // Grown slot is usable.
   sink.deliver();
   ASSERT_TRUE(sink->last);
   EXPECT_EQ(sink->last->payload.size(), 8196u);
@@ -149,15 +211,13 @@ TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapaci
   EXPECT_EQ(count, 1024u);
   EXPECT_EQ(first, 3.0);
   sink->last.reset();
-  channel->setStrictMode(false);
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->payloadReallocations(), 2u);
   sink.drain();
   value->set(std::vector<double>(1500, 4.0));  // Doubled growth provides spare capacity.
-  channel->setStrictMode(true);
   for(int i = 0; i < 4; ++i)
   {
-    EXPECT_TRUE(channel->takeSnapshot());
+    EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
     sink.drain();
   }
   EXPECT_EQ(channel->stats().dropped_oversize, 2u);
@@ -174,14 +234,13 @@ TEST(ChannelCapacity, ReservationCoversHintDoubleInitialSizeAndMinimum)
         "value", std::vector<double>(100));
     channel->setPoolCapacity(2);
     channel->setPayloadCapacity(hint);
-    channel->setStrictMode(true);
     channel->addDataSink(sink);
-    ASSERT_TRUE(channel->takeSnapshot());
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
     sink.drain();
     value->set(std::vector<double>(hint ? 500 : 200));
     for(int i = 0; i < 4; ++i)
     {
-      EXPECT_TRUE(channel->takeSnapshot());
+      EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
       sink.drain();
     }
     EXPECT_EQ(channel->payloadReallocations(), 0u);
@@ -198,13 +257,12 @@ TEST(ChannelCapacity, DisabledOversizedAndDeadFieldsNeverSizeOrSerialize)
   auto id = channel->registerCustomValue("value", value.get(), serializer);
   serializer->throw_size = serializer->throw_serialize = true;
   channel->setEnabled(id, false);
-  channel->setStrictMode(true);
   channel->addDataSink(sink);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   channel->unregister(id);
   value.reset();
   channel->setEnabled(id, true);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   sink.deliver();
   ASSERT_TRUE(sink->last);
   EXPECT_FALSE(GetBit(sink->last->active_mask, 0));
@@ -213,33 +271,36 @@ TEST(ChannelCapacity, DisabledOversizedAndDeadFieldsNeverSizeOrSerialize)
   EXPECT_EQ(channel->droppedOversize(), 0u);
 }
 
-TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochEvenInStrictMode)
+TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochOnBothPaths)
 {
-  for(bool strict : { false, true })
+  for(bool real_time : { false, true })
     for(bool sizing : { false, true })
     {
       auto channel = LogChannel::create("capacity");
+      const auto take = [&] {
+        return real_time ? channel->tryTakeSnapshot() : channel->takeSnapshot();
+      };
       CapacityWorker sink;
       auto serializer = std::make_shared<SizedSerializer>();
       SizedValue value;
       auto id = channel->registerCustomValue("value", &value, serializer);
       channel->setPoolCapacity(1);
-      channel->setStrictMode(strict);
       channel->addDataSink(sink);
-      ASSERT_TRUE(channel->takeSnapshot());
+      channel->prepare();
+      ASSERT_EQ(take(), SnapshotResult::ok);
       sink.drain();
       serializer->throw_size = sizing;
       serializer->throw_serialize = !sizing;
-      EXPECT_THROW(channel->takeSnapshot(), std::runtime_error);
+      EXPECT_THROW(take(), std::runtime_error);
       serializer->throw_size = serializer->throw_serialize = false;
       channel->unregister(id);  // A leaked odd epoch would block here.
       channel->registerCustomValue("value", &value, serializer);
-      EXPECT_TRUE(channel->takeSnapshot());
+      EXPECT_EQ(take(), SnapshotResult::ok);
       EXPECT_EQ(channel->poolExhausted(), 0u);
     }
 }
 
-TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndFreezeCanRetry)
+TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndPrepareCanRetry)
 {
   auto channel = LogChannel::create("capacity");
   CapacityWorker sink;
@@ -250,19 +311,20 @@ TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndFreezeCanRetry)
   channel->setPoolCapacity(1);
   channel->addDataSink(sink);
   serializer->size = std::numeric_limits<size_t>::max();
-  EXPECT_THROW(channel->takeSnapshot(), std::length_error);
-  EXPECT_THROW(channel->setPayloadCapacity(256), std::runtime_error);
+  EXPECT_THROW((void)channel->takeSnapshot(), std::length_error);
+  EXPECT_FALSE(channel->isPrepared());  // a failed prepare leaves the channel open
+  channel->setPayloadCapacity(256);     // so sizes can still be tuned
   serializer->size = 8;
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   // Each size fits the byte vector, but their sum cannot be doubled.
   serializer->size = std::vector<uint8_t>().max_size() / 2;
-  EXPECT_THROW(channel->takeSnapshot(), std::length_error);
+  EXPECT_THROW((void)channel->takeSnapshot(), std::length_error);
   serializer->size = std::vector<uint8_t>().max_size();
-  EXPECT_THROW(channel->takeSnapshot(), std::length_error);  // Sum overflow/limit.
+  EXPECT_THROW((void)channel->takeSnapshot(), std::length_error);  // Sum overflow/limit.
   serializer->size = 8;
   channel->unregister(id);
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->payloadReallocations(), 0u);
   EXPECT_EQ(channel->poolExhausted(), 0u);
 }
@@ -278,8 +340,7 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
   auto logged = channel->createLoggedValue<uint64_t>("changing", 42);
   channel->addDataSink(first);
   channel->addDataSink(second);
-  channel->setStrictMode(true);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   first.drain();
   second.drain();
   std::atomic<bool> start{ false }, done{ false };
@@ -307,7 +368,7 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
       channel->setEnabled(id, (batch * 1000 + i) % 2 == 0);
       {
         DataTamerTest::AllocCounter::Scope scope;
-        successes += channel->takeSnapshot();
+        successes += channel->takeSnapshot() == SnapshotResult::ok;
         allocations += scope.allocations();
         deallocations += scope.deallocations();
       }
@@ -333,23 +394,22 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
   EXPECT_EQ(channel->payloadReallocations(), 0u);
 }
 
-TEST(ChannelCapacity, AutomaticMinimumAndStrictDropRecoverAfterShrink)
+TEST(ChannelCapacity, AutomaticMinimumAndTryDropRecoverAfterShrink)
 {
   auto channel = LogChannel::create("capacity");
   CapacityWorker sink;
   auto value = channel->createLoggedValue<std::vector<double>>("value");
   channel->setPoolCapacity(2);
-  channel->setStrictMode(true);
   channel->addDataSink(sink);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   value->set(std::vector<double>(31));  // 4-byte length + 248 bytes fits the minimum.
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   sink.drain();
   value->set(std::vector<double>(32));  // 260 bytes exceeds both initial slots.
-  EXPECT_FALSE(channel->takeSnapshot());
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
   value->set(std::vector<double>(1));
-  EXPECT_TRUE(channel->takeSnapshot());
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->droppedOversize(), 1u);
   EXPECT_EQ(channel->payloadReallocations(), 0u);
 }

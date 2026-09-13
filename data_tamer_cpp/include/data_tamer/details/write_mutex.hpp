@@ -92,21 +92,13 @@ public:
   bool try_lock() { return mutex_.try_lock(); }
   void unlock() { mutex_.unlock(); }
 
-  /**
-   * @brief Spin on try_lock() for a nominal spin_ns budget, then call lock().
-   * @return true when the blocking acquisition path was used. This does not
-   *         guarantee that the kernel put the caller to sleep.
-   */
-  bool lockWithSpin(std::int64_t spin_ns = kLockSpinNs,
-                    std::uint64_t* blocked_wait_ns = nullptr)
+  /// Spin on try_lock() for a nominal spin_ns budget without ever blocking.
+  /// @return true when the lock was acquired.
+  bool tryLockWithSpin(std::int64_t spin_ns = kLockSpinNs)
   {
-    if(blocked_wait_ns)
-    {
-      *blocked_wait_ns = 0;
-    }
     if(try_lock())
     {
-      return false;
+      return true;
     }
     // The clock is read once per kTriesPerClockCheck attempts: a try_lock is a
     // few ns, a clock read tens of ns, so checking every iteration would spend
@@ -122,11 +114,30 @@ public:
       {
         if(try_lock())
         {
-          return false;
+          return true;
         }
         spinPause();
       }
     } while(std::chrono::steady_clock::now() < deadline);
+    return false;
+  }
+
+  /**
+   * @brief Spin on try_lock() for a nominal spin_ns budget, then call lock().
+   * @return true when the blocking acquisition path was used. This does not
+   *         guarantee that the kernel put the caller to sleep.
+   */
+  bool lockWithSpin(std::int64_t spin_ns = kLockSpinNs,
+                    std::uint64_t* blocked_wait_ns = nullptr)
+  {
+    if(blocked_wait_ns)
+    {
+      *blocked_wait_ns = 0;
+    }
+    if(tryLockWithSpin(spin_ns))
+    {
+      return false;
+    }
     const auto wait_start = std::chrono::steady_clock::now();
     lock();
     if(blocked_wait_ns)
