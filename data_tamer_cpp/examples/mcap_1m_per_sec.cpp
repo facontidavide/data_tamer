@@ -72,7 +72,7 @@ int main()
 {
   // Start defining one or more Sinks that must be added by default.
   // Do this BEFORE creating a channel.
-  auto mcap_sink = std::make_shared<MCAPSink>("test_1M.mcap");
+  auto mcap_sink = MCAPSink::create("test_1M.mcap");
   ChannelsRegistry::Global().addDefaultSink(mcap_sink);
 
   // Create (or get) a channel using the global registry (singleton)

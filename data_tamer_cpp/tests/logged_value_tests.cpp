@@ -1,5 +1,6 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
+#include "test_sinks.hpp"
 #include "alloc_counter.hpp"
 
 #include <gtest/gtest.h>
@@ -55,11 +56,11 @@ TEST(LoggedValue, ScalarTraitSelectsAtomics)
 TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<double>("v", 1.0);
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   {
     AllocCounter::Scope scope;
@@ -72,7 +73,7 @@ TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
   ASSERT_EQ(v->get(), 999.0);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   const auto snap = sink->latestSnapshot();
   ASSERT_EQ(snap.payload.size(), sizeof(double));
   double stored = 0;
@@ -115,17 +116,17 @@ TEST(LoggedValue, SetEnabledFromWriterThreadNeedsNoChannel)
 TEST(LoggedValue, AutoEnableOnSetDirtiesMask)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<double>("v", 1.0);
   v->setEnabled(false);
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), 0u);
 
   v->set(2.0);  // auto_enable defaults to true
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(double));
 }
 
@@ -135,31 +136,28 @@ TEST(LoggedValue, AutoEnableOnSetDirtiesMask)
 namespace
 {
 // Every delivered 8-byte payload must have all bytes equal (see the writer below).
-class TearingSink : public DataSinkBase
+class TearingSink : public DataSink
 {
 public:
-  ~TearingSink() override { stopThread(); }
-  using DataSinkBase::processQueuedSnapshots;
   std::atomic<size_t> checked{ 0 };
   std::atomic<size_t> torn{ 0 };
-  void addChannel(const std::string&, const Schema&) override {}
-  bool storeSnapshot(const Snapshot& snapshot) override
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef& snapshot) override
   {
     uint64_t seen = 0;
-    if(snapshot.payload.size() != sizeof(seen))
+    if(snapshot->payload.size() != sizeof(seen))
     {
       torn++;
-      return false;
+      return;
     }
-    std::memcpy(&seen, snapshot.payload.data(), sizeof(seen));
+    std::memcpy(&seen, snapshot->payload.data(), sizeof(seen));
     for(int b = 1; b < 8; b++)
       if(((seen >> (8 * b)) & 0xFF) != (seen & 0xFF))
       {
         torn++;
-        return false;
+        return;
       }
     checked++;
-    return true;
   }
 };
 }  // namespace
@@ -167,7 +165,7 @@ public:
 TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<TearingSink>();
+  DataTamerTest::Attached<TearingSink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<uint64_t>("v", 0);
   channel->takeSnapshot();
@@ -193,7 +191,7 @@ TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
   }
   stop = true;
   writer.join();
-  sink->processQueuedSnapshots();
+  sink.worker->stop();
   ASSERT_EQ(sink->torn.load(), 0u);
   ASSERT_GT(sink->checked.load(), 0u);  // a full queue may have dropped some
 }
@@ -201,7 +199,7 @@ TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
 TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<std::vector<double>>("vec", { 1.0, 2.0 });
   {
@@ -213,7 +211,7 @@ TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
   }
   ASSERT_EQ(v->get().size(), 3u);
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(uint32_t) + 3 * sizeof(double));
 }
 
@@ -223,7 +221,7 @@ TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
 TEST(LoggedValue, NonScalarProxyExcludesSnapshot)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<std::vector<double>>("vec");
   channel->takeSnapshot();

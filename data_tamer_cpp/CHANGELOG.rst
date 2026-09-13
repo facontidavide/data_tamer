@@ -4,6 +4,30 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Breaking, sinks**: ``DataSinkBase`` is replaced by composition. A sink
+  implements ``DataSink`` (``onSchema(const Schema&)``, ``onSnapshot(const
+  SnapshotRef&)``; throw to report a failure) and is owned by a ``SinkWorker``,
+  which holds the queue and the delivery thread and is what
+  ``LogChannel::addDataSink`` takes. The worker is always stopped before the
+  sink is destroyed, and its destructor delivers what is still queued, so the
+  old ``stopThread()``-in-every-destructor rule and the four lifecycle calls
+  (``stopThread``, ``stopAcceptingSnapshots``, ``processQueuedSnapshots``,
+  ``startAcceptingSnapshots``) are gone; use ``SinkWorker::stop()``,
+  ``start()`` and ``drain()``. ``SinkWorker::Delivery::Manual`` runs without a
+  thread for applications that deliver from their own loop.
+  ``MCAPSink::create(path)``, ``ROS2PublisherSink::create(node, prefix)`` and
+  ``SinkWorker::create<T>(...)`` return a ready-to-attach worker;
+  ``worker->as<MCAPSink>()`` reaches the sink's own methods.
+  ``MCAPSink::finishQueueAndStop()`` is ``worker->stop()`` followed by
+  ``stopRecording()``; ``restartRecording()`` no longer reopens admission, call
+  ``worker->start()`` after a stop. A failed MCAP write now throws from the
+  callback and is reported by ``SinkWorker::errors()`` / ``lastError()``.
+* **Breaking, snapshots**: ``Snapshot`` no longer carries ``channel_name`` (the
+  schema hash identifies the channel; ``Schema::channel_name`` has the name), so
+  it is fully owning. ``SnapshotRef`` is now declared in ``data_sink.hpp`` as an
+  opaque move-only handle: keep a snapshot past the callback with
+  ``ref.clone()``; ``DataSinkBase::retainSnapshot()`` and its thread-local
+  context are gone.
 * Build: the library, tests and benchmarks compile as C++20; the installed
   headers remain C++17 (consumers need ``cxx_std_17``), enforced by a test
   target that compiles every core public header as strict C++17 and by building

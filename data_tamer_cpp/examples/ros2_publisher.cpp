@@ -10,7 +10,7 @@ int main(int argc, char* argv[])
   rclcpp::init(argc, argv);
   auto node = std::make_shared<rclcpp::Node>("test_datatamer");
 
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(node, "test");
+  auto ros2_sink = ROS2PublisherSink::create(node, "test");
   ChannelsRegistry::Global().addDefaultSink(ros2_sink);
 
   // Create (or get) a channel using the global registry (singleton)

@@ -7,12 +7,12 @@ namespace DataTamer
 
 /// Sink that accepts every snapshot and does nothing with it. Used by the
 /// benchmarks to measure the front end without any backend cost.
-class NullSink : public DataSinkBase
+class NullSink : public DataSink
 {
 public:
-  ~NullSink() override { stopThread(); }
-  void addChannel(std::string const&, Schema const&) override {}
-  bool storeSnapshot(const Snapshot&) override { return true; }
+  static std::shared_ptr<SinkWorker> create() { return SinkWorker::create<NullSink>(); }
+  void onSchema(Schema const&) override {}
+  void onSnapshot(const SnapshotRef&) override {}
 };
 
 }  // namespace DataTamer

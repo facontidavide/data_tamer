@@ -8,7 +8,7 @@ using namespace DataTamer;
 
 int main()
 {
-  auto mcap_sink = std::make_shared<MCAPSink>("test_sample.mcap");
+  auto mcap_sink = MCAPSink::create("test_sample.mcap");
   ChannelsRegistry::Global().addDefaultSink(mcap_sink);
 
   // Create (or get) a channel using the global registry (singleton)

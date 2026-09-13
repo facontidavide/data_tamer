@@ -2,6 +2,7 @@
 #include "data_tamer/details/snapshot_pool.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "alloc_counter.hpp"
+#include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 #include <mcap/reader.hpp>
@@ -14,33 +15,33 @@
 #include <thread>
 
 using namespace DataTamer;
+using DataTamerTest::attach;
+using DataTamerTest::Attached;
+using DataTamerTest::manual;
+using Delivery = SinkWorker::Delivery;
 
 namespace
 {
-class QueueSink : public DataSinkBase
+class QueueSink : public DataSink
 {
 public:
-  explicit QueueSink(size_t capacity = 1024, bool worker = false) : DataSinkBase(capacity)
+  void onSchema(const Schema&) override { ++registrations; }
+  void onSnapshot(const SnapshotRef& snapshot) override
   {
-    if(!worker)
-      stopThread();
+    if(callback)
+      callback(snapshot);
   }
-  ~QueueSink() override { stopThread(); }
-  using DataSinkBase::processQueuedSnapshots;
-  using DataSinkBase::retainSnapshot;
-  using DataSinkBase::startAcceptingSnapshots;
-  using DataSinkBase::stopAcceptingSnapshots;
-  using DataSinkBase::stopThread;
-  void addChannel(const std::string&, const Schema&) override { ++registrations; }
-  bool storeSnapshot(const Snapshot& snapshot) override
-  {
-    return callback ? callback(snapshot) : true;
-  }
-  std::function<bool(const Snapshot&)> callback;
+  std::function<void(const SnapshotRef&)> callback;
   std::atomic<int> registrations{ 0 };
 };
 
-std::shared_ptr<LogChannel> channelWith(const std::shared_ptr<DataSinkBase>& sink,
+Attached<QueueSink> queueSink(size_t capacity = 1024,
+                              Delivery delivery = Delivery::Manual)
+{
+  return attach<QueueSink>(delivery, capacity);
+}
+
+std::shared_ptr<LogChannel> channelWith(const std::shared_ptr<SinkWorker>& sink,
                                         const uint64_t* value,
                                         const std::string& name = "queue_test")
 {
@@ -56,18 +57,16 @@ TEST(SinkQueue, RetainedSnapshotOutlivesChannelAndQueue)
   SnapshotRef retained;
   uint64_t value = 42;
   {
-    auto sink = std::make_shared<QueueSink>();
-    sink->callback = [&](const Snapshot&) {
-      retained = sink->retainSnapshot();
-      return true;
-    };
+    auto sink = queueSink();
+    sink->callback = [&](const SnapshotRef& ref) { retained = ref.clone(); };
     auto channel = channelWith(sink, &value, std::string(128, 'n'));
+    const auto hash = channel->getSchema().hash;
     ASSERT_TRUE(channel->takeSnapshot(std::chrono::nanoseconds(123)));
-    channel.reset();  // Even queued references must own the name.
-    sink->processQueuedSnapshots();
+    channel.reset();  // Queued references must not depend on the channel.
+    sink.drain();
+    EXPECT_EQ(retained->schema_hash, hash);
   }
   ASSERT_TRUE(retained);
-  EXPECT_EQ(retained->channel_name, std::string(128, 'n'));
   EXPECT_EQ(retained->timestamp.count(), 123);
   ASSERT_EQ(retained->payload.size(), sizeof(value));
   uint64_t decoded = 0;
@@ -79,47 +78,44 @@ TEST(SinkQueue, RetainedSnapshotOutlivesChannelAndQueue)
 TEST(SinkQueue, QueueOverflowReleasesFailedFanoutWithoutExhaustingPool)
 {
   uint64_t value = 1;
-  auto small = std::make_shared<QueueSink>(1);
-  auto large = std::make_shared<QueueSink>();
+  auto small = queueSink(1);
+  auto large = queueSink();
   auto channel = channelWith(small, &value);
   channel->addDataSink(small);  // Must keep the existing producer token.
   channel->addDataSink(large);
   int received = 0;
-  large->callback = [&](const Snapshot&) {
-    ++received;
-    return true;
-  };
+  large->callback = [&](const SnapshotRef&) { ++received; };
   for(int i = 0; i < 32; ++i)
     ASSERT_TRUE(channel->takeSnapshot());
   EXPECT_EQ(small->registrations.load(), 1);
-  large->processQueuedSnapshots();
+  large.drain();
   for(int i = 0; i < 160; ++i)
   {
     EXPECT_FALSE(channel->takeSnapshot());
-    large->processQueuedSnapshots();
+    large.drain();
   }
   EXPECT_EQ(received, 192);
   EXPECT_EQ(channel->droppedSnapshots(small), 160u);
   EXPECT_EQ(channel->droppedSnapshots(large), 0u);
   EXPECT_EQ(channel->poolExhausted(), 0u);
-  small->processQueuedSnapshots();
+  small.drain();
   EXPECT_TRUE(channel->takeSnapshot());
+  // Callbacks capture locals declared after the workers: stop before they die.
+  small.worker->stop();
+  large.worker->stop();
 }
 
 TEST(SinkQueue, PoolExhaustionIsSeparateAndRetainedSlotsAreReusable)
 {
   uint64_t value = 1;
-  auto sink = std::make_shared<QueueSink>();
+  auto sink = queueSink();
   auto channel = channelWith(sink, &value);
   std::vector<SnapshotRef> retained;
-  sink->callback = [&](const Snapshot&) {
-    retained.push_back(sink->retainSnapshot());
-    return true;
-  };
+  sink->callback = [&](const SnapshotRef& ref) { retained.push_back(ref.clone()); };
   for(int i = 0; i < 64; ++i)
   {
     ASSERT_TRUE(channel->takeSnapshot());
-    sink->processQueuedSnapshots();
+    sink.drain();
   }
   EXPECT_FALSE(channel->takeSnapshot());
   EXPECT_EQ(channel->poolExhausted(), 1u);
@@ -129,13 +125,14 @@ TEST(SinkQueue, PoolExhaustionIsSeparateAndRetainedSlotsAreReusable)
   EXPECT_TRUE(channel->takeSnapshot());
   channel->removeDataSink(sink);
   EXPECT_FALSE(channel->takeSnapshot());
+  sink.worker->stop();  // delivers the last one while `retained` is still alive
 }
 
 TEST(SinkQueue, FixedPayloadFanoutAndOverflowDoNotAllocate)
 {
   uint64_t value = 1;
-  auto small = std::make_shared<QueueSink>(1);
-  auto large = std::make_shared<QueueSink>();
+  auto small = queueSink(1);
+  auto large = queueSink();
   auto channel = channelWith(small, &value);
   channel->addDataSink(large);
   ASSERT_TRUE(channel->takeSnapshot());  // Creates the pool and registers schemas.
@@ -149,15 +146,15 @@ TEST(SinkQueue, FixedPayloadFanoutAndOverflowDoNotAllocate)
         ++successes;
       else
         ++failures;
-      large->processQueuedSnapshots();
+      large.drain();
     }
-    small->processQueuedSnapshots();
+    small.drain();
     for(int i = 0; i < 100; ++i)
     {
       if(channel->takeSnapshot())
         ++successes;
-      small->processQueuedSnapshots();
-      large->processQueuedSnapshots();
+      small.drain();
+      large.drain();
     }
     allocations = scope.allocations();
     deallocations = scope.deallocations();
@@ -174,18 +171,17 @@ TEST(SinkQueue, ExceptionsReleaseReferencesAndDoNotStopDelivery)
   for(bool worker : { false, true })
   {
     uint64_t value = 1;
-    auto sink = std::make_shared<QueueSink>(1024, worker);
+    auto sink = queueSink(1024, worker ? Delivery::Threaded : Delivery::Manual);
     auto channel = channelWith(sink, &value);
     std::mutex mutex;
     std::condition_variable delivered;
     int calls = 0;
-    sink->callback = [&](const Snapshot&) {
+    sink->callback = [&](const SnapshotRef&) {
       std::lock_guard lock(mutex);
       ++calls;
       delivered.notify_all();
       if(calls % 2)
         throw std::runtime_error("callback failed");
-      return false;  // A false result is not an exception.
     };
     for(int i = 0; i < 160; ++i)
     {
@@ -197,37 +193,37 @@ TEST(SinkQueue, ExceptionsReleaseReferencesAndDoNotStopDelivery)
             delivered.wait_for(lock, std::chrono::seconds(5), [&] { return calls > i; }));
       }
       else
-        sink->processQueuedSnapshots();
+        sink.drain();
     }
-    sink->stopThread();
-    sink->processQueuedSnapshots();
+    sink.worker->stop();
     EXPECT_EQ(calls, 160);
-    EXPECT_EQ(sink->storeErrors(), 80u);
+    EXPECT_EQ(sink.worker->errors(), 80u);
+    EXPECT_EQ(sink.worker->lastError(), "callback failed");
     EXPECT_EQ(channel->poolExhausted(), 0u);
   }
 }
 
 TEST(SinkQueue, WorkerAndManualDrainerSerializeCallbacksAndPreserveProducerOrder)
 {
-  auto sink = std::make_shared<QueueSink>(1024, true);
+  auto sink = queueSink(1024, Delivery::Threaded);
   uint64_t a = 0, b = 0;
   auto first = channelWith(sink, &a, "first");
   auto second = channelWith(sink, &b, "second");
+  const auto first_hash = first->getSchema().hash;
   std::atomic<int> active{ 0 }, overlap{ 0 };
   std::vector<uint64_t> values[2];
-  sink->callback = [&](const Snapshot& snapshot) {
+  sink->callback = [&](const SnapshotRef& snapshot) {
     if(active.fetch_add(1) != 0)
       ++overlap;
     uint64_t value = 0;
-    std::memcpy(&value, snapshot.payload.data(), sizeof(value));
-    values[snapshot.channel_name == "first" ? 0 : 1].push_back(value);
+    std::memcpy(&value, snapshot->payload.data(), sizeof(value));
+    values[snapshot->schema_hash == first_hash ? 0 : 1].push_back(value);
     active.fetch_sub(1);
-    return true;
   };
   std::atomic<bool> done{ false };
   std::thread drainer([&] {
     while(!done)
-      sink->processQueuedSnapshots();
+      sink.drain();
   });
   std::vector<uint64_t> accepted[2];
   std::thread producer([&] {
@@ -241,23 +237,22 @@ TEST(SinkQueue, WorkerAndManualDrainerSerializeCallbacksAndPreserveProducerOrder
   producer.join();
   done = true;
   drainer.join();
-  sink->stopThread();
-  sink->processQueuedSnapshots();
+  sink.worker->stop();
   EXPECT_EQ(overlap.load(), 0);
   EXPECT_EQ(values[0], accepted[0]);
   EXPECT_EQ(values[1], accepted[1]);
 }
 
-TEST(SinkQueue, CloseDuringPublicationDrainsEveryAcceptedSnapshot)
+TEST(SinkQueue, StopDuringPublicationDrainsEveryAcceptedSnapshot)
 {
-  auto sink = std::make_shared<QueueSink>(1024, true);
+  auto sink = queueSink(1024, Delivery::Threaded);
   uint64_t value = 0;
   auto channel = channelWith(sink, &value);
   std::mutex mutex;
   std::condition_variable ready;
   bool entered = false, release = false;
   int stored = 0;
-  sink->callback = [&](const Snapshot&) {
+  sink->callback = [&](const SnapshotRef&) {
     std::unique_lock lock(mutex);
     ++stored;
     if(stored == 1)
@@ -266,7 +261,6 @@ TEST(SinkQueue, CloseDuringPublicationDrainsEveryAcceptedSnapshot)
       ready.notify_all();
       ready.wait(lock, [&] { return release; });
     }
-    return true;
   };
   ASSERT_TRUE(channel->takeSnapshot());
   {
@@ -286,42 +280,62 @@ TEST(SinkQueue, CloseDuringPublicationDrainsEveryAcceptedSnapshot)
   });
   while(!attempted)
     std::this_thread::yield();
-  sink->stopAcceptingSnapshots();  // Must return even though callback is blocked.
+  // stop() closes admission at once, then waits for the blocked callback.
+  std::thread stopper([&] { sink.worker->stop(); });
   publish = false;
   producer.join();
-  EXPECT_FALSE(channel->takeSnapshot());
+  while(channel->takeSnapshot())  // admitted until the close is observed
+    ++accepted;
   {
     std::lock_guard lock(mutex);
     release = true;
   }
   ready.notify_all();
-  sink->stopThread();
-  sink->processQueuedSnapshots();
+  stopper.join();
   EXPECT_EQ(stored, accepted);
-  sink->startAcceptingSnapshots();
+  sink.worker->start();
   EXPECT_TRUE(channel->takeSnapshot());
-  sink->processQueuedSnapshots();
+  sink.drain();
   EXPECT_EQ(stored, accepted + 1);
+  sink.worker->stop();
 }
 
-#ifndef NDEBUG
-TEST(SinkQueueDeathTest, DerivedDestructorMustStopWorker)
+TEST(SinkQueue, WorkerDestructionDeliversQueuedSnapshotsBeforeTheSink)
 {
-  EXPECT_DEATH(
-      {
-        class BrokenSink : public DataSinkBase
-        {
-          void addChannel(const std::string&, const Schema&) override {}
-          bool storeSnapshot(const Snapshot&) override { return true; }
-        } sink;
-      },
-      "stopThread");
+  uint64_t value = 7;
+  int delivered = 0;
+  bool destroyed = false;
+  struct Observer : DataSink
+  {
+    int& delivered;
+    bool& destroyed;
+    Observer(int& d, bool& x) : delivered(d), destroyed(x) {}
+    ~Observer() override { destroyed = true; }
+    void onSchema(const Schema&) override {}
+    void onSnapshot(const SnapshotRef&) override
+    {
+      EXPECT_FALSE(destroyed);
+      ++delivered;
+    }
+  };
+  auto channel = LogChannel::create("observer");
+  channel->registerValue("value", &value);
+  {
+    auto sink = manual<Observer>(delivered, destroyed);
+    channel->addDataSink(sink);
+    for(int i = 0; i < 5; ++i)
+      ASSERT_TRUE(channel->takeSnapshot());
+    channel->removeDataSink(sink);
+  }
+  EXPECT_TRUE(destroyed);
+  EXPECT_EQ(delivered, 5);
 }
-#endif
 
 TEST(SinkQueue, ConstructorExceptionPropagates)
 {
-  EXPECT_THROW(MCAPSink("/nonexistent/data_tamer_parent/file.mcap"), std::runtime_error);
+  EXPECT_THROW(MCAPSink::create("/nonexistent/data_tamer_parent/file.mcap"),
+               std::runtime_error);
+  EXPECT_THROW(SinkWorker(nullptr), std::invalid_argument);
 }
 
 TEST(SinkQueue, McapFinalizationWritesEveryAcceptedSnapshotAfterRestart)
@@ -334,18 +348,24 @@ TEST(SinkQueue, McapFinalizationWritesEveryAcceptedSnapshotAfterRestart)
   const auto first = (directory / "first.mcap").string();
   const auto second = (directory / "second.mcap").string();
   uint64_t value = 9;
-  auto sink = std::make_shared<MCAPSink>(first, true, 1);
+  auto sink = attach<MCAPSink>(Delivery::Threaded, 1, first, true);
   auto channel = channelWith(sink, &value);
   for(const auto& path : { first, second })
   {
     if(path == second)
+    {
       sink->restartRecording(path, true);
+      sink.worker->start();
+    }
     size_t accepted = 0;
     for(int i = 0; i < 1000; ++i)
       if(channel->takeSnapshot())
         ++accepted;
-    sink->finishQueueAndStop();
-    sink->finishQueueAndStop();  // stopping twice must be harmless
+    for(int repeat = 0; repeat < 2; ++repeat)  // stopping twice must be harmless
+    {
+      sink.worker->stop();
+      sink->stopRecording();
+    }
     EXPECT_FALSE(channel->takeSnapshot());
     mcap::McapReader reader;
     ASSERT_TRUE(reader.open(path).ok());
@@ -363,29 +383,21 @@ TEST(SinkQueue, McapFinalizationWritesEveryAcceptedSnapshotAfterRestart)
 
 TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
 {
-  class ControlledMcap : public MCAPSink
-  {
-  public:
-    explicit ControlledMcap(const std::string& path) : MCAPSink(path) { stopThread(); }
-    using DataSinkBase::processQueuedSnapshots;
-    using DataSinkBase::stopAcceptingSnapshots;
-  };
   const auto directory =
       std::filesystem::temp_directory_path() /
       ("data_tamer_rollover_" + std::to_string(NsecSinceEpoch().count()));
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
-  auto sink = std::make_shared<ControlledMcap>((directory / "rollover.mcap").string());
+  auto sink = manual<MCAPSink>((directory / "rollover.mcap").string());
   sink->setCreateNewFileOnReset(true);
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // Every callback rolls over.
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 8; ++i)
     ASSERT_TRUE(channel->takeSnapshot());
-  sink->stopAcceptingSnapshots();
-  sink->processQueuedSnapshots();
+  sink.worker->stop();  // delivers the 8, each one rolling the file over
   EXPECT_FALSE(channel->takeSnapshot());
-  sink->finishQueueAndStop();
+  sink->stopRecording();
   size_t count = 0;
   for(const auto& file : std::filesystem::directory_iterator(directory))
   {
@@ -408,29 +420,26 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
 TEST(SinkQueue, FastConsumerCannotReleaseParentBeforeSecondFanout)
 {
   uint64_t value = 0;
-  auto first = std::make_shared<QueueSink>(1024, true);
-  auto second = std::make_shared<QueueSink>(1024, true);
+  auto first = queueSink(1024, Delivery::Threaded);
+  auto second = queueSink(1024, Delivery::Threaded);
   auto channel = channelWith(first, &value);
   channel->addDataSink(second);
   channel->setPoolCapacity(2);
   std::vector<uint64_t> received[2];
   for(int i = 0; i < 2; ++i)
   {
-    auto sink = i == 0 ? first : second;
-    sink->callback = [&, i](const Snapshot& snapshot) {
+    auto& sink = i == 0 ? first : second;
+    sink->callback = [&, i](const SnapshotRef& snapshot) {
       uint64_t decoded = 0;
-      std::memcpy(&decoded, snapshot.payload.data(), sizeof(decoded));
+      std::memcpy(&decoded, snapshot->payload.data(), sizeof(decoded));
       received[i].push_back(decoded);
-      return true;
     };
   }
   size_t accepted = 0;
   for(value = 0; value < 10000; ++value)
     accepted += channel->takeSnapshot();
-  first->stopThread();
-  second->stopThread();
-  first->processQueuedSnapshots();
-  second->processQueuedSnapshots();
+  first.worker->stop();
+  second.worker->stop();
   EXPECT_GT(accepted, 0u);
   EXPECT_EQ(channel->droppedSnapshots(first), 0u);
   EXPECT_EQ(channel->droppedSnapshots(second), 0u);
@@ -449,14 +458,15 @@ TEST(SinkQueue, McapFailedRestartKeepsTheCurrentRecording)
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   const auto path = (directory / "log.mcap").string();
   uint64_t value = 3;
-  auto sink = std::make_shared<MCAPSink>(path, false);
+  Attached<MCAPSink> sink(path, false);
   auto channel = channelWith(sink, &value);
   ASSERT_TRUE(channel->takeSnapshot());
   EXPECT_THROW(
       sink->restartRecording((directory / "missing" / "dir" / "x.mcap").string()),
       std::runtime_error);
   ASSERT_TRUE(channel->takeSnapshot());  // still recording into the first file
-  sink->finishQueueAndStop();
+  sink.worker->stop();
+  sink->stopRecording();
   mcap::McapReader reader;
   ASSERT_TRUE(reader.open(path).ok());
   size_t count = 0;

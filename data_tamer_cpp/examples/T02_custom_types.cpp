@@ -21,7 +21,7 @@ int main()
   using namespace TestTypes;
   using namespace DataTamer;
 
-  auto dummy_sink = std::make_shared<DummySink>();
+  auto dummy_sink = DummySink::create();
   ChannelsRegistry::Global().addDefaultSink(dummy_sink);
   auto channel = ChannelsRegistry::Global().getChannel("my_channel");
 
@@ -50,6 +50,6 @@ int main()
   channel->takeSnapshot();
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-  std::cout << "\nMessage size: " << dummy_sink->latestPayloadSize()
+  std::cout << "\nMessage size: " << dummy_sink->as<DummySink>().latestPayloadSize()
             << " expected: " << expected_size << std::endl;
 }

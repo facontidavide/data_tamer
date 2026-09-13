@@ -1,5 +1,6 @@
 #include "data_tamer/data_tamer.hpp"
 #include "alloc_counter.hpp"
+#include "test_sinks.hpp"
 #include "wait_for_sleeping_thread.hpp"
 
 #include <gtest/gtest.h>
@@ -26,7 +27,7 @@ using DataTamerTest::AllocCounter;
 
 namespace
 {
-class CheckingSink : public DataSinkBase
+class CheckingSink : public DataSink
 {
 public:
   enum class Payload
@@ -36,9 +37,8 @@ public:
   };
 
   explicit CheckingSink(Payload payload) : payload_(payload) {}
-  ~CheckingSink() override { stopThread(); }
 
-  void addChannel(const std::string&, const Schema&) override {}
+  void onSchema(const Schema&) override {}
 
   bool waitFor(size_t count)
   {
@@ -60,8 +60,9 @@ public:
   }
 
 protected:
-  bool storeSnapshot(const Snapshot& snapshot) override
+  void onSnapshot(const SnapshotRef& ref) override
   {
+    const Snapshot& snapshot = *ref;
     bool valid = false;
     if(payload_ == Payload::PAIR && snapshot.payload.size() == 2 * sizeof(double))
     {
@@ -91,7 +92,6 @@ protected:
       errors_ += !valid;
     }
     delivered_.notify_all();
-    return true;
   }
 
 private:
@@ -275,7 +275,7 @@ void raceWriterAgainstSnapshots(LogChannel& channel, CheckingSink& sink,
 TEST(Transaction, ValuesWrittenTogetherAppearTogetherInDeliveredSnapshots)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
@@ -293,7 +293,7 @@ TEST(Transaction, ValuesWrittenTogetherAppearTogetherInDeliveredSnapshots)
 TEST(Transaction, RawPointerWritesAppearTogetherInDeliveredSnapshots)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
   Pair pair{ 1.0, 1.0 };
   channel->registerValue("pair", &pair);
@@ -311,7 +311,7 @@ TEST(Transaction, RawPointerWritesAppearTogetherInDeliveredSnapshots)
 TEST(Transaction, VectorSetAndSnapshotRaceDeliversValidPayloads)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::VECTOR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::VECTOR);
   channel->addDataSink(sink);
   auto vec = channel->createLoggedValue<std::vector<double>>("vec");
 
@@ -325,7 +325,7 @@ TEST(Transaction, VectorSetAndSnapshotRaceDeliversValidPayloads)
 TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUncontended)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
@@ -371,7 +371,7 @@ TEST(Transaction, ObservedSleepingSnapshotAdvancesContentionCounters)
   if(!std::ifstream("/proc/self/stat"))
     GTEST_SKIP() << "needs readable procfs";
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);
@@ -416,7 +416,7 @@ TEST(Transaction, LoneScalarSetDoesNotTakeWriteMutex)
 TEST(Transaction, DisabledAndDestroyedValuesAreNotSized)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::VECTOR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::VECTOR);
   channel->addDataSink(sink);
   CustomValue value;
   auto serializer = std::make_shared<ProbeSerializer>();
@@ -438,7 +438,7 @@ TEST(Transaction, DisabledAndDestroyedValuesAreNotSized)
 TEST(Transaction, SerializationExceptionReleasesWriteMutex)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::VECTOR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::VECTOR);
   channel->addDataSink(sink);
   CustomValue value;
   auto serializer = std::make_shared<ProbeSerializer>();
@@ -458,7 +458,7 @@ TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
   if(!std::ifstream("/proc/self/stat"))
     GTEST_SKIP() << "needs readable procfs";
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<CheckingSink>(CheckingSink::Payload::PAIR);
+  DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
   auto a = channel->createLoggedValue<double>("a", 1.0);
   auto b = channel->createLoggedValue<double>("b", 1.0);

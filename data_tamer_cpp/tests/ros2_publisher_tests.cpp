@@ -10,7 +10,7 @@ using namespace DataTamer;
 TEST(DataTamerROS2Publisher, SharedPointer)
 {
   auto node = std::make_shared<rclcpp::Node>("test_datatamer_shared_pointer");
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(node, "test_shared_pointer");
+  auto ros2_sink = ROS2PublisherSink::create(node, "test_shared_pointer");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_shared_pointer");
 
@@ -29,9 +29,9 @@ TEST(DataTamerROS2Publisher, SharedPointerLifeCycle)
                                                                           "shared_"
                                                                           "pointer_"
                                                                           "lifecycle");
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(lifecycle_node, "test_shared_"
-                                                                       "pointer_"
-                                                                       "lifecycle");
+  auto ros2_sink = ROS2PublisherSink::create(lifecycle_node, "test_shared_"
+                                                             "pointer_"
+                                                             "lifecycle");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_shared_pointer_"
                                                        "lifecycle");
@@ -49,7 +49,7 @@ TEST(DataTamerROS2Publisher, SharedPointerLifeCycle)
 TEST(DataTamerROS2Publisher, Dereference)
 {
   auto node = std::make_shared<rclcpp::Node>("test_datatamer_dereference");
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(*node, "test_dereference");
+  auto ros2_sink = ROS2PublisherSink::create(*node, "test_dereference");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_dereference");
 
@@ -67,9 +67,9 @@ TEST(DataTamerROS2Publisher, DereferenceLifeCycle)
                                                                           "datatamer_"
                                                                           "dereference_"
                                                                           "lifecycle");
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(*lifecycle_node, "test_"
-                                                                        "dereference_"
-                                                                        "lifecycle");
+  auto ros2_sink = ROS2PublisherSink::create(*lifecycle_node, "test_"
+                                                              "dereference_"
+                                                              "lifecycle");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_dereference_lifecycle");
 
@@ -87,8 +87,8 @@ TEST(DataTamerROS2Publisher, NodeInterfacesDirect)
 {
   auto node = std::make_shared<rclcpp::Node>("test_datatamer_node_interfaces");
   PublisherNodeInterfaces interfaces(*node);
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(interfaces, "test_node_"
-                                                                   "interfaces");
+  auto ros2_sink = ROS2PublisherSink::create(interfaces, "test_node_"
+                                                         "interfaces");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_node_interfaces");
 
@@ -108,8 +108,8 @@ TEST(DataTamerROS2Publisher, NodeInterfacesDirectLifeCycle)
                                                                           "interfaces_"
                                                                           "lifecycle");
   PublisherNodeInterfaces interfaces(*lifecycle_node);
-  auto ros2_sink = std::make_shared<ROS2PublisherSink>(interfaces, "test_node_interfaces_"
-                                                                   "lifecycle");
+  auto ros2_sink = ROS2PublisherSink::create(interfaces, "test_node_interfaces_"
+                                                         "lifecycle");
 
   auto channel = ChannelsRegistry::Global().getChannel("channel_node_interfaces_"
                                                        "lifecycle");

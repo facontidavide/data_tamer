@@ -18,7 +18,10 @@ namespace DataTamer
 using PublisherNodeInterfaces =
     rclcpp::node_interfaces::NodeInterfaces<rclcpp::node_interfaces::NodeTopicsInterface>;
 
-class ROS2PublisherSink : public DataSinkBase
+/// Publishes schemas and snapshots on `<topic_prefix>/schemas` and
+/// `<topic_prefix>/data`. Create it with ROS2PublisherSink::create() and pass
+/// the returned worker to LogChannel::addDataSink().
+class ROS2PublisherSink : public DataSink
 {
 public:
   template <typename NodeT>
@@ -27,11 +30,19 @@ public:
                         ConstructorTag{})
   {}
 
+  template <typename NodeT>
+  static std::shared_ptr<SinkWorker> create(NodeT&& nodelike,
+                                            const std::string& topic_prefix)
+  {
+    return SinkWorker::create<ROS2PublisherSink>(std::forward<NodeT>(nodelike),
+                                                 topic_prefix);
+  }
+
   ~ROS2PublisherSink() override;
 
-  void addChannel(const std::string& name, const Schema& schema) override;
-
-  bool storeSnapshot(const Snapshot& snapshot) override;
+protected:
+  void onSchema(const Schema& schema) override;
+  void onSnapshot(const SnapshotRef& snapshot) override;
 
 private:
   struct Pimpl;

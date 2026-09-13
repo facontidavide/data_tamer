@@ -61,20 +61,29 @@ static Options parse(int argc, char** argv)
       const auto result = std::from_chars(value, end, dst);
       if(result.ec != std::errc{} || result.ptr != end)
       {
-        std::fprintf(stderr, "invalid option %s: expected an integer, got %s\n", argv[i - 1],
-                     value);
+        std::fprintf(stderr, "invalid option %s: expected an integer, got %s\n",
+                     argv[i - 1], value);
         std::exit(1);
       }
     };
-    if(!std::strcmp(argv[i], "--values")) nextInteger(o.values);
-    else if(!std::strcmp(argv[i], "--sinks")) nextInteger(o.sinks);
-    else if(!std::strcmp(argv[i], "--writers")) nextInteger(o.writers);
-    else if(!std::strcmp(argv[i], "--seconds")) nextInteger(o.seconds);
-    else if(!std::strcmp(argv[i], "--rate")) nextInteger(o.rate_hz);
-    else if(!std::strcmp(argv[i], "--mcap")) o.mcap = nextArgument();
-    else if(!std::strcmp(argv[i], "--fifo")) o.fifo = true;
-    else if(!std::strcmp(argv[i], "--transactions")) o.transactions = true;
-    else if(!std::strcmp(argv[i], "--vector-writer")) o.vector_writer = true;
+    if(!std::strcmp(argv[i], "--values"))
+      nextInteger(o.values);
+    else if(!std::strcmp(argv[i], "--sinks"))
+      nextInteger(o.sinks);
+    else if(!std::strcmp(argv[i], "--writers"))
+      nextInteger(o.writers);
+    else if(!std::strcmp(argv[i], "--seconds"))
+      nextInteger(o.seconds);
+    else if(!std::strcmp(argv[i], "--rate"))
+      nextInteger(o.rate_hz);
+    else if(!std::strcmp(argv[i], "--mcap"))
+      o.mcap = nextArgument();
+    else if(!std::strcmp(argv[i], "--fifo"))
+      o.fifo = true;
+    else if(!std::strcmp(argv[i], "--transactions"))
+      o.transactions = true;
+    else if(!std::strcmp(argv[i], "--vector-writer"))
+      o.vector_writer = true;
     else
     {
       std::fprintf(stderr, "unknown option %s\n", argv[i]);
@@ -83,8 +92,8 @@ static Options parse(int argc, char** argv)
   }
   if(o.values < 0 || o.sinks < 0 || o.writers < 0 || o.seconds <= 0 || o.rate_hz <= 0)
   {
-    std::fprintf(stderr,
-                 "invalid option values: counts must be nonnegative; seconds and rate must be positive\n");
+    std::fprintf(stderr, "invalid option values: counts must be nonnegative; seconds and "
+                         "rate must be positive\n");
     std::exit(1);
   }
   if(o.sinks > 8)
@@ -117,24 +126,26 @@ static void printPercentiles(std::vector<long>& ns)
 int main(int argc, char** argv)
 {
   const Options opt = parse(argc, argv);
-  std::printf("rt_latency values=%d sinks=%d writers=%d seconds=%d rate=%dHz mcap=%s fifo=%d transactions=%d vector_writer=%d\n",
+  std::printf("rt_latency values=%d sinks=%d writers=%d seconds=%d rate=%dHz mcap=%s "
+              "fifo=%d transactions=%d vector_writer=%d\n",
               opt.values, opt.sinks, opt.writers, opt.seconds, opt.rate_hz,
               opt.mcap.empty() ? "-" : opt.mcap.c_str(), int(opt.fifo),
               int(opt.transactions), int(opt.vector_writer));
 
   auto channel = LogChannel::create("rt");
-  std::vector<std::shared_ptr<DataSinkBase>> sinks;
+  std::vector<std::shared_ptr<SinkWorker>> sinks;
+  std::shared_ptr<SinkWorker> mcap;
   for(int i = 0; i < opt.sinks; i++)
   {
     if(!opt.mcap.empty() && i == 0)
     {
-      auto mcap = std::make_shared<MCAPSink>(opt.mcap, /*compression*/ true);
-      mcap->setMaxTimeBeforeReset(std::chrono::seconds(0));
+      mcap = MCAPSink::create(opt.mcap, /*compression*/ true);
+      mcap->as<MCAPSink>().setMaxTimeBeforeReset(std::chrono::seconds(0));
       sinks.push_back(mcap);
     }
     else
     {
-      sinks.push_back(std::make_shared<NullSink>());
+      sinks.push_back(NullSink::create());
     }
     channel->addDataSink(sinks.back());
   }
@@ -236,7 +247,8 @@ int main(int argc, char** argv)
     {
       failed++;
     }
-    durations.push_back(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    durations.push_back(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
   }
 
   run = false;
@@ -245,9 +257,11 @@ int main(int argc, char** argv)
     t.join();
   }
 
-  for(const auto& sink : sinks)
-    if(auto mcap = std::dynamic_pointer_cast<MCAPSink>(sink))
-      mcap->finishQueueAndStop();
+  if(mcap)
+  {
+    mcap->stop();
+    mcap->as<MCAPSink>().stopRecording();
+  }
 
   printPercentiles(durations);
   const auto stats = channel->stats();
@@ -255,13 +269,16 @@ int main(int argc, char** argv)
               (unsigned long long)stats.write_lock_contended,
               (unsigned long long)stats.write_lock_wait_max_ns);
   uint64_t attachment_drops = 0;
-  for(const auto& sink : sinks) attachment_drops += channel->droppedSnapshots(sink);
-  std::printf("pool_exhausted=%llu payload_reallocations=%llu dropped_oversize=%llu attachment_drops=%llu\n",
+  for(const auto& sink : sinks)
+    attachment_drops += channel->droppedSnapshots(sink);
+  std::printf("pool_exhausted=%llu payload_reallocations=%llu dropped_oversize=%llu "
+              "attachment_drops=%llu\n",
               (unsigned long long)stats.pool_exhausted,
               (unsigned long long)stats.payload_reallocations,
               (unsigned long long)stats.dropped_oversize,
               (unsigned long long)attachment_drops);
-  std::printf("allocations per call after warm-up: %.4f\n", double(allocations) / double(total));
+  std::printf("allocations per call after warm-up: %.4f\n",
+              double(allocations) / double(total));
   std::printf("allocations after warm-up: %zu\n", allocations);
   std::printf("takeSnapshot returned false: %zu / %zu\n", failed, total);
   std::printf("fifo=%d\n", int(fifo_ok));

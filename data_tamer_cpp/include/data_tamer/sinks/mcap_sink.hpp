@@ -10,10 +10,12 @@ namespace DataTamer
 {
 
 /**
- * @brief The MCAPSink is an implementation of DataSinkBase that
- * will save the data as MCAP file (https://mcap.dev/)
+ * @brief The MCAPSink is a DataSink that saves the data as an MCAP file
+ * (https://mcap.dev/). Create it with MCAPSink::create() and pass the returned
+ * worker to LogChannel::addDataSink(); reach the methods below through
+ * worker->as<MCAPSink>().
  */
-class MCAPSink : public DataSinkBase
+class MCAPSink : public DataSink
 {
 public:
   /**
@@ -25,14 +27,16 @@ public:
    * @param filepath   path of the file to be saved. Should have extension ".mcap"
    * @param do_compression if true, compress the data on the fly.
    */
-  explicit MCAPSink(std::string const& filepath, bool do_compression = false,
-                    size_t queue_capacity = kDefaultQueueCapacity);
+  explicit MCAPSink(std::string const& filepath, bool do_compression = false);
+
+  /// Ready-to-attach sink: SinkWorker::create<MCAPSink>(filepath, do_compression).
+  static std::shared_ptr<SinkWorker> create(std::string const& filepath,
+                                            bool do_compression = false)
+  {
+    return SinkWorker::create<MCAPSink>(filepath, do_compression);
+  }
 
   ~MCAPSink() override;
-
-  void addChannel(std::string const& channel_name, Schema const& schema) override;
-
-  bool storeSnapshot(const Snapshot& snapshot) override;
 
   /// After a certain amount of time, the MCAP file will be reset
   /// and overwritten. Default value is 600 seconds (10 minutes)
@@ -45,12 +49,10 @@ public:
   /// and then saved instead of overwriting the previous file.
   void setCreateNewFileOnReset(bool create_new_file);
 
-  /// Stop recording and save the file
+  /// Stop recording and save the file. Snapshots delivered afterwards are
+  /// dropped until restartRecording(). To also deliver what is still queued,
+  /// call SinkWorker::stop() (or drain()) first.
   void stopRecording();
-
-  /// Stop taking snapshots, finish the existing queue, then `stopRecording`
-  /// Waits for admitted publications and callbacks before closing the file.
-  void finishQueueAndStop();
 
   /**
    * @brief restartRecording saves the current file (unless we did it already,
@@ -62,6 +64,10 @@ public:
    * WARNING: if this is called with the same filename as previously, the file counter will be reset, too.
    */
   void restartRecording(std::string const& filepath, bool do_compression = false);
+
+protected:
+  void onSchema(Schema const& schema) override;
+  void onSnapshot(const SnapshotRef& snapshot) override;
 
 private:
   struct Pimpl;

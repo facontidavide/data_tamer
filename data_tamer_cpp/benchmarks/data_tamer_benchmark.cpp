@@ -35,7 +35,7 @@ static void DT_Doubles(benchmark::State& state)
   std::vector<double> values(size_t(state.range(0)));
   auto registry = ChannelsRegistry();
   auto channel = registry.getChannel("channel");
-  channel->addDataSink(std::make_shared<NullSink>());
+  channel->addDataSink(NullSink::create());
   channel->registerValue("values", &values);
   measureSnapshots(state, *channel);
 }
@@ -45,7 +45,7 @@ static void DT_PoseType(benchmark::State& state)
   std::vector<TestTypes::Pose> poses(size_t(state.range(0)));
   auto registry = ChannelsRegistry();
   auto channel = registry.getChannel("channel");
-  channel->addDataSink(std::make_shared<NullSink>());
+  channel->addDataSink(NullSink::create());
   channel->registerValue("values", &poses);
   measureSnapshots(state, *channel);
 }
@@ -58,7 +58,7 @@ static void DT_MultiSink(benchmark::State& state)
   auto channel = registry.getChannel("channel");
   for(int i = 0; i < state.range(0); i++)
   {
-    channel->addDataSink(std::make_shared<NullSink>());
+    channel->addDataSink(NullSink::create());
   }
   channel->registerValue("values", &values);
   measureSnapshots(state, *channel);
@@ -69,7 +69,7 @@ static void DT_LoggedValueSet(benchmark::State& state)
 {
   auto registry = ChannelsRegistry();
   auto channel = registry.getChannel("channel");
-  channel->addDataSink(std::make_shared<NullSink>());
+  channel->addDataSink(NullSink::create());
   std::vector<std::shared_ptr<LoggedValue<double>>> values;
   for(int i = 0; i < state.range(0); i++)
   {
@@ -92,7 +92,7 @@ static void snapshotWithWriter(benchmark::State& state, bool transactions)
 {
   auto registry = ChannelsRegistry();
   auto channel = registry.getChannel("channel");
-  channel->addDataSink(std::make_shared<NullSink>());
+  channel->addDataSink(NullSink::create());
   std::vector<std::shared_ptr<LoggedValue<double>>> values;
   for(int i = 0; i < 100; i++)
   {
