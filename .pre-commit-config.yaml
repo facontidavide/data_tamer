@@ -38,7 +38,7 @@ repos:
 
   # CPP hooks
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v18.1.2
+    rev: v23.1.1
     hooks:
       - id: clang-format
         args: ['-fallback-style=none', '-i']

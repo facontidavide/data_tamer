@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include <ostream>
@@ -98,13 +99,42 @@ inline constexpr bool IsNumericType()
          std::is_enum_v<T>;
 }
 
-struct RegistrationID
-{
-  size_t first_index = 0;
-  size_t fields_count = 0;
+class LogChannel;
+class ChannelSharedState;
+template <typename T>
+class LoggedValue;
 
-  // syntactic sugar to be used to concatenate contiguous RegistrationID.
-  void operator+=(const RegistrationID& other) { fields_count += other.fields_count; }
+/**
+ * @brief Opaque handle returned by LogChannel::registerValue and friends.
+ * It denotes one registration: after unregister() and a new registration of
+ * the same name, the old handle is stale and LogChannel::setEnabled/unregister
+ * reject it instead of acting on the replacement. A default-constructed handle
+ * is never valid. Handles from another channel are not detected.
+ */
+class RegistrationID
+{
+public:
+  RegistrationID() = default;
+
+  bool operator==(const RegistrationID& other) const
+  {
+    return index_ == other.index_ && generation_ == other.generation_;
+  }
+  bool operator!=(const RegistrationID& other) const { return !(*this == other); }
+
+private:
+  friend class LogChannel;
+  friend class ChannelSharedState;
+  template <typename T>
+  friend class LoggedValue;
+  friend struct std::hash<RegistrationID>;
+
+  RegistrationID(uint32_t index, uint32_t generation)
+    : index_(index), generation_(generation)
+  {}
+
+  uint32_t index_ = 0;
+  uint32_t generation_ = 0;  // 0: never valid; slots start at 1
 };
 
 //---------------------------------------------------------
@@ -169,8 +199,8 @@ struct std::hash<DataTamer::RegistrationID>
     // Compute individual hash values for first, second and third
     // http://stackoverflow.com/a/1646913/126995
     std::size_t res = 17;
-    res = res * 31 + hash<size_t>()(id.first_index);
-    res = res * 31 + hash<size_t>()(id.fields_count);
+    res = res * 31 + hash<uint32_t>()(id.index_);
+    res = res * 31 + hash<uint32_t>()(id.generation_);
     return res;
   }
 };

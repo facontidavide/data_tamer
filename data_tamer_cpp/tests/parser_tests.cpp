@@ -25,7 +25,7 @@ char[256] blob
 uint16  my/short
   )";
 
-  const auto schema = BuilSchemaFromText(text);
+  const auto schema = BuildSchemaFromText(text);
 
   ASSERT_EQ(schema.fields.size(), 7);
 
@@ -78,7 +78,7 @@ TEST(DataTamerParser, SchemaHash)
   std::ostringstream ss;
   ss << schema_in;
 
-  const auto& schema_out = BuilSchemaFromText(ss.str());
+  const auto& schema_out = BuildSchemaFromText(ss.str());
 
   ASSERT_EQ(schema_out.fields[0].field_name, "vector_10");
   ASSERT_EQ(schema_out.fields[1].field_name, "array_4");
@@ -92,12 +92,12 @@ TEST(DataTamerParser, SchemaHash)
 
 TEST(DataTamerParser, DeclaredSchemaHashUsesFullUint64Range)
 {
-  const auto schema = BuilSchemaFromText("### hash: 18446744073709551615\nfloat64 "
+  const auto schema = BuildSchemaFromText("### hash: 18446744073709551615\nfloat64 "
                                          "value\n");
   EXPECT_EQ(schema.hash, std::numeric_limits<uint64_t>::max());
   ASSERT_EQ(schema.fields.size(), 1U);
   EXPECT_EQ(schema.fields.front().field_name, "value");
-  EXPECT_THROW(BuilSchemaFromText("### hash: 18446744073709551616\nfloat64 value\n"),
+  EXPECT_THROW(BuildSchemaFromText("### hash: 18446744073709551616\nfloat64 value\n"),
                std::out_of_range);
 }
 
@@ -110,7 +110,7 @@ TEST(DataTamerParser, CustomTypes)
 
   const auto& schema_in = channel->getSchema();
   const std::string schema_txt = ToStr(schema_in);
-  const auto& schema_out = DataTamerParser::BuilSchemaFromText(schema_txt);
+  const auto& schema_out = DataTamerParser::BuildSchemaFromText(schema_txt);
 
   std::cout << schema_txt << std::endl;
 
@@ -165,7 +165,7 @@ TEST(DataTamerParser, PlainParsing)
   dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
-  const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
+  const auto& schema_out = DataTamerParser::BuildSchemaFromText(ToStr(schema_in));
   const auto snapshot = dummy_sink->latestSnapshot();
   const auto snapshot_view = ConvertSnapshot(snapshot);
 
@@ -205,7 +205,7 @@ TEST(DataTamerParser, CustomParsing)
   dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
-  const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
+  const auto& schema_out = DataTamerParser::BuildSchemaFromText(ToStr(schema_in));
   const auto snapshot = dummy_sink->latestSnapshot();
   const auto snapshot_view = ConvertSnapshot(snapshot);
 
@@ -260,7 +260,7 @@ TEST(DataTamerParser, VectorParsing)
   dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
-  const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
+  const auto& schema_out = DataTamerParser::BuildSchemaFromText(ToStr(schema_in));
   const auto snapshot = dummy_sink->latestSnapshot();
   const auto snapshot_view = ConvertSnapshot(snapshot);
 
@@ -320,12 +320,12 @@ TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
   const std::string v5_text = ToStr(channel->getSchema());
 
   // version 5: declared hash equals the defined recomputation
-  const auto v5 = BuilSchemaFromText(v5_text, /*check_hash=*/true);
+  const auto v5 = BuildSchemaFromText(v5_text, /*check_hash=*/true);
   ASSERT_EQ(v5.hash, SchemaTextHash(v5_text));
   ASSERT_EQ(v5.hash, channel->getSchema().hash);
   auto broken = v5_text;
   broken.replace(broken.find("### hash: ") + 10, 1, "9");
-  EXPECT_THROW(BuilSchemaFromText(broken, true), std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText(broken, true), std::runtime_error);
 
   // version 4: the same fields, hashed with the legacy recipe
   uint64_t legacy = std::hash<std::string>()(v5.channel_name);
@@ -338,12 +338,12 @@ TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
   const auto hash_pos = v4_text.find("### hash: ") + 10;
   v4_text.replace(hash_pos, v4_text.find('\n', hash_pos) - hash_pos,
                   std::to_string(legacy));
-  const auto v4 = BuilSchemaFromText(v4_text, /*check_hash=*/true);
+  const auto v4 = BuildSchemaFromText(v4_text, /*check_hash=*/true);
   ASSERT_EQ(v4.hash, legacy);
   ASSERT_EQ(v4.fields.size(), v5.fields.size());
   ASSERT_EQ(v4.custom_types.size(), v5.custom_types.size());
 
-  EXPECT_THROW(BuilSchemaFromText("### version: 3\n"), std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText("### version: 3\n"), std::runtime_error);
 }
 
 // Corrupt or hostile input must fail with an exception, never read out of bounds.
@@ -359,7 +359,7 @@ TEST(DataTamerParser, RejectsMalformedInput)
   ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
   sink.drain();
   const auto snapshot = sink->latestSnapshot();
-  const auto schema = BuilSchemaFromText(ToStr(channel->getSchema()));
+  const auto schema = BuildSchemaFromText(ToStr(channel->getSchema()));
   auto count_values = [](const std::string&, const VarNumber&) {};
 
   // intact
@@ -404,36 +404,40 @@ TEST(DataTamerParser, RejectsMalformedInput)
   EXPECT_THROW(ParseSnapshot(schema, huge_view, count_values), std::runtime_error);
 
   // a custom type name that merely starts with a primitive name is a custom type
-  const auto tricky = BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
-                                         "c\n\n"
-                                         "float64Pose p\n"
-                                         "==============================================="
-                                         "============\n"
-                                         "MSG: float64Pose\nfloat64 x\n");
+  const auto tricky = BuildSchemaFromText("### version: 5\n### hash: 1\n### "
+                                          "channel_name: "
+                                          "c\n\n"
+                                          "float64Pose p\n"
+                                          "=============================================="
+                                          "="
+                                          "============\n"
+                                          "MSG: float64Pose\nfloat64 x\n");
   ASSERT_EQ(tricky.fields.size(), 1u);
   EXPECT_EQ(tricky.fields[0].type, BasicType::OTHER);
   EXPECT_EQ(tricky.fields[0].type_name, "float64Pose");
 
   // a self-referencing custom type cannot be traversed forever
-  const auto cyclic = BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
-                                         "c\n\n"
-                                         "Node root\n"
-                                         "==============================================="
-                                         "============\n"
-                                         "MSG: Node\nNode next\n");
+  const auto cyclic = BuildSchemaFromText("### version: 5\n### hash: 1\n### "
+                                          "channel_name: "
+                                          "c\n\n"
+                                          "Node root\n"
+                                          "=============================================="
+                                          "="
+                                          "============\n"
+                                          "MSG: Node\nNode next\n");
   const uint8_t one_bit = 1;
   const uint8_t no_payload = 0;
   SnapshotView cyclic_view{ 1, 0, { &one_bit, 1 }, { &no_payload, 0 } };
   EXPECT_THROW(ParseSnapshot(cyclic, cyclic_view, count_values), std::runtime_error);
 
   // malformed array extents
-  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
-                                  "c\n\nint32[0] a\n"),
+  EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                   "c\n\nint32[0] a\n"),
                std::runtime_error);
-  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
-                                  "c\n\nint32[70000] a\n"),
+  EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                   "c\n\nint32[70000] a\n"),
                std::runtime_error);
-  EXPECT_THROW(BuilSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
-                                  "c\n\nint32[3 a\n"),
+  EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
+                                   "c\n\nint32[3 a\n"),
                std::runtime_error);
 }

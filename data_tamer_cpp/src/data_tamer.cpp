@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
+#include <mutex>
 #include <unordered_set>
 
 namespace DataTamer
@@ -12,7 +13,7 @@ struct ChannelsRegistry::Pimpl
 {
   std::unordered_map<std::string, std::shared_ptr<LogChannel>> channels;
   std::unordered_set<std::shared_ptr<SinkWorker>> default_sinks;
-  Mutex mutex;
+  std::mutex mutex;
 };
 
 ChannelsRegistry::ChannelsRegistry() : _p(new Pimpl) {}
@@ -28,7 +29,9 @@ ChannelsRegistry& ChannelsRegistry::Global()
 void ChannelsRegistry::addDefaultSink(std::shared_ptr<SinkWorker> sink)
 {
   if(!sink)
+  {
     throw std::invalid_argument("addDefaultSink: null sink");
+  }
   std::scoped_lock lk(_p->mutex);
   _p->default_sinks.insert(std::move(sink));
 }

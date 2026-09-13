@@ -21,8 +21,8 @@ namespace details
 // that would rule T out are done first, as a non-type template parameter
 // selecting between two definitions, and std::atomic<T> is only named in the
 // branch where T already qualifies.
-template <typename T, bool = std::is_trivially_copyable_v<T> && IsNumericType<T>() &&
-                                  sizeof(T) <= 8>
+template <typename T,
+          bool = std::is_trivially_copyable_v<T> && IsNumericType<T>() && sizeof(T) <= 8>
 struct is_atomic_scalar : std::false_type
 {
 };
@@ -44,12 +44,19 @@ inline constexpr bool is_atomic_scalar_v = details::is_atomic_scalar<T>::value;
  *
  * Scalars (arithmetic types, bool, char, small enums) are stored in a
  * std::atomic: set() and get() are wait-free and never take a lock. Other
- * types are written under the channel's transaction mutex (see
- * LogChannel::scopedWrite()).
+ * types are written under the channel's write transaction (see
+ * LogChannel::scopedWrite()), which blocks while a snapshot is serializing.
  *
  * Consistency between several values is opt-in: a lone set() promises only
  * that the value itself is never torn. Values that must be captured together
  * belong in one struct, or inside a LogChannel::scopedWrite() transaction.
+ *
+ * set() only stores: a value disabled with setEnabled(false) stays disabled
+ * until setEnabled(true).
+ *
+ * Lifetime: the destructor unregisters from the channel, which takes the
+ * channel's control mutex and waits for a snapshot in progress. Never release
+ * the last shared_ptr on a real-time thread or inside a scopedWrite().
  */
 template <typename T>
 class LoggedValue
@@ -63,10 +70,6 @@ protected:
 public:
   static constexpr bool kAtomic = is_atomic_scalar_v<T>;
   using Storage = std::conditional_t<kAtomic, std::atomic<T>, T>;
-  /// Return type of the (deprecated) getLockedPtr(); getMutablePtr() itself
-  /// returns the concrete AtomicProxy<T>/MutablePtr<T> directly, so this
-  /// alias only still exists for that one caller.
-  using MutableProxy = std::conditional_t<kAtomic, AtomicProxy<T>, MutablePtr<T>>;
 
   ~LoggedValue();
 
@@ -79,43 +82,23 @@ public:
 
   /**
    * @brief set the value of the variable. Wait-free for scalars; takes the
-   * channel's transaction mutex for other types (unless the calling thread
-   * already holds it through scopedWrite()).
-   *
-   * @param value        new value
-   * @param auto_enable  if true and the value is disabled, enable it
+   * channel's write transaction for other types (unless the calling thread
+   * already holds it through scopedWrite()). Only stores: see setEnabled().
    */
-  void set(const T& value, bool auto_enable = true);
+  void set(const T& value);
 
   /// @brief get the stored value (a copy).
   [[nodiscard]] T get() const;
 
-  [[deprecated("use getMutablePtr() instead")]] [[nodiscard]] MutableProxy getLockedPtr()
-  {
-    return getMutablePtr();
-  }
-
   /**
-   * Read/write access. For scalars this is a write-back proxy: edits become
-   * visible when the proxy is destroyed, and two overlapping proxies are
-   * last-writer-wins — prefer set(). For other types the proxy holds the
-   * transaction mutex for its lifetime, blocking the snapshot thread: keep it
-   * short and allocation-free.
+   * Read/write access for non-scalar values (scalars: use set()/get()). The
+   * guard holds the channel's write transaction for its lifetime and nests
+   * inside scopedWrite(); the snapshot thread waits while it lives, so keep
+   * the scope short and allocation-free.
    */
-  template <typename U = T, std::enable_if_t<is_atomic_scalar_v<U>, bool> = true>
-  [[deprecated("for scalar values use set()/get(); the returned proxy writes back on destruction")]]
-  [[nodiscard]] AtomicProxy<T> getMutablePtr();
-
-  template <typename U = T, std::enable_if_t<!is_atomic_scalar_v<U>, bool> = true>
   [[nodiscard]] MutablePtr<T> getMutablePtr();
 
-  /// Read-only access. For scalars: a copy taken now. For other types: the
-  /// transaction mutex is held for the proxy's lifetime.
-  template <typename U = T, std::enable_if_t<is_atomic_scalar_v<U>, bool> = true>
-  [[deprecated("for scalar values use get(); the returned proxy holds a copy")]]
-  [[nodiscard]] AtomicConstProxy<T> getConstPtr();
-
-  template <typename U = T, std::enable_if_t<!is_atomic_scalar_v<U>, bool> = true>
+  /// Read-only counterpart of getMutablePtr(), for non-scalar values.
   [[nodiscard]] ConstPtr<T> getConstPtr();
 
   /// @brief Disabling a LoggedValue means that we will not record it in the snapshot.

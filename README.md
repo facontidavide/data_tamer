@@ -56,7 +56,17 @@ visualize your logs offline or in real-time.
   point only with its compatible original type, reusing its schema slot.
 - Focused on periodic recording. Not the best option for sporadic, asynchronous events.
 - If you use `DataTamer::registerValue` you must be careful about the lifetime of the
-object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue` instead.
+object: the channel borrows the pointer until `unregister()` has returned. If you prefer a
+safer RAII interface, use `DataTamer::createLoggedValue` instead; note that its destructor
+unregisters, which waits for a snapshot in progress, so do not drop the last `shared_ptr`
+on a real-time thread.
+- `registerValue()` returns an opaque `RegistrationID` for `setEnabled()` / `isEnabled()` /
+  `unregister()`. After a value is unregistered and registered again under the same name, the
+  old id is stale: `setEnabled()` and `unregister()` throw `std::invalid_argument` instead of
+  touching the replacement, `isEnabled()` returns false, and `trySetEnabled()` returns false
+  without throwing (use it on real-time threads).
+- `LoggedValue::set()` only stores; a value disabled with `setEnabled(false)` stays disabled
+  until `setEnabled(true)`.
 
 ## Real-time snapshot contract
 
@@ -69,8 +79,11 @@ object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue`
   payload no longer fits. `tryTakeSnapshot()` is the real-time variant: the library does no
   blocking acquisition (`blocked`) and no allocation (`oversize`) on that path, and it requires
   `prepare()` (`not_prepared`). Custom serializers must follow the same rules there.
-- Scalar `LoggedValue::set()` / `get()` are wait-free atomics. To capture several values
-  together, group the writes:
+- Scalar `LoggedValue::set()` / `get()` are wait-free atomics: each value is captured
+  untorn, but two separate writes may land in different snapshots. When the values are
+  written by a thread other than the one calling `takeSnapshot()` and several of them must be
+  consistent with each other in the recording (a position and its velocity, for instance),
+  group the writes in a transaction; the snapshot thread then sees all of them or none:
 
 ```cpp
 {
@@ -80,8 +93,9 @@ object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue`
 }
 ```
 
-- Non-scalar values lock automatically. Keep transactions and pointer guards short: the
-  snapshot thread waits on them.
+- Non-scalar values lock automatically. `getMutablePtr()` / `getConstPtr()` guards join a
+  `scopedWrite()` on the same thread instead of deadlocking. Keep transactions and guards
+  short: the snapshot thread waits on them.
 - Backpressure counters: `poolExhausted()`, `droppedSnapshots(sink)`, `payloadReallocations()`,
   `droppedOversize()`, or all at once with `stats()`.
 - Registering, unregistering and changing sinks are safe while logging, but call them outside

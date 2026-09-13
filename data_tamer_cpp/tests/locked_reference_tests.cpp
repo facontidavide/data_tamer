@@ -2,8 +2,7 @@
 
 #include <gtest/gtest.h>
 
-#include <atomic>
-#include <mutex>
+#include <memory>
 #include <thread>
 #include <type_traits>
 
@@ -26,114 +25,86 @@ bool canLockFromAnotherThread(WriteMutex& mutex)
 }
 }  // namespace
 
-TEST(LockedReference, MutexAliasIsTheWriteMutex)
+TEST(LockedReference, GuardsAreNotMovable)
 {
-  static_assert(std::is_same_v<Mutex, WriteMutex>);
-  Mutex m;
-  std::lock_guard<Mutex> lk(m);  // BasicLockable still satisfied
+  static_assert(!std::is_move_constructible_v<MutablePtr<int>>);
+  static_assert(!std::is_move_constructible_v<ConstPtr<int>>);
+  static_assert(!std::is_copy_constructible_v<MutablePtr<int>>);
 }
 
 TEST(LockedReference, MutablePtrLocksExclusivelyForItsLifetime)
 {
-  WriteMutex m;
+  ChannelSharedState state;
   int value = 1;
   {
-    MutablePtr<int> p(&value, &m);
-    ASSERT_TRUE(p);
-    ASSERT_FALSE(canLockFromAnotherThread(m));  // held by p
+    MutablePtr<int> p(&value, state);
+    ASSERT_FALSE(canLockFromAnotherThread(state.write_mutex));  // held by p
     *p = 2;
   }
-  ASSERT_TRUE(m.try_lock());
-  m.unlock();
+  ASSERT_TRUE(canLockFromAnotherThread(state.write_mutex));
   ASSERT_EQ(value, 2);
 }
 
 TEST(LockedReference, ConstPtrAlsoLocksExclusively)
 {
-  WriteMutex m;
+  ChannelSharedState state;
   const int value = 7;
   {
-    ConstPtr<int> p(&value, &m);
+    ConstPtr<int> p(&value, state);
     ASSERT_EQ(*p, 7);
-    ASSERT_FALSE(canLockFromAnotherThread(m));
+    ASSERT_FALSE(canLockFromAnotherThread(state.write_mutex));
   }
-  ASSERT_TRUE(m.try_lock());
-  m.unlock();
+  ASSERT_TRUE(canLockFromAnotherThread(state.write_mutex));
 }
 
-TEST(LockedReference, AtomicProxyWritesBackOnDestruction)
+// Guards may outlive the transaction they were created in (a helper returning
+// one, a guard stored in a container): the node is unlinked and the mutex is
+// held until the last guard on that state is gone.
+TEST(LockedReference, OutOfOrderDestructionKeepsTheMutexUntilTheLastGuard)
 {
-  std::atomic<double> target{ 1.5 };
-  {
-    AtomicProxy<double> p(&target);
-    ASSERT_TRUE(p);
-    ASSERT_EQ(*p, 1.5);
-    *p += 1.0;
-    ASSERT_EQ(target.load(), 1.5);  // not yet visible
-  }
-  ASSERT_EQ(target.load(), 2.5);
-}
-
-TEST(LockedReference, AtomicConstProxyHoldsACopy)
-{
-  std::atomic<int> target{ 3 };
-  AtomicConstProxy<int> p(&target);
-  target.store(4);
-  ASSERT_EQ(*p, 3);
-  ASSERT_TRUE(p);
-}
-
-TEST(LockedReference, MovedLockingPtrsUnlockOnlyThroughTheirFinalOwner)
-{
-  WriteMutex m;
+  ChannelSharedState state;
   int value = 1;
   {
-    MutablePtr<int> a(&value, &m);
-    MutablePtr<int> b(std::move(a));
-    ASSERT_FALSE(a);
-    ASSERT_TRUE(b);
-    MutablePtr<int> c(nullptr, nullptr);
-    c = std::move(b);
-    ASSERT_FALSE(b);
-    ASSERT_FALSE(canLockFromAnotherThread(m));  // still held, by c
+    auto outer = std::make_unique<ChannelSharedState::Transaction>(state);
+    MutablePtr<int> guard(&value, state);                       // younger, non-owning
+    outer.reset();                                              // older owner dies first
+    ASSERT_FALSE(canLockFromAnotherThread(state.write_mutex));  // guard inherited it
+    *guard = 2;
   }
-  ASSERT_TRUE(canLockFromAnotherThread(m));
+  ASSERT_TRUE(canLockFromAnotherThread(state.write_mutex));
+  ASSERT_EQ(value, 2);
+
+  // Two states, guards destroyed in creation order (not LIFO).
+  ChannelSharedState other;
+  auto first = std::make_unique<ChannelSharedState::Transaction>(state);
+  auto second = std::make_unique<ChannelSharedState::Transaction>(other);
+  first.reset();
+  ASSERT_TRUE(canLockFromAnotherThread(state.write_mutex));
+  ASSERT_FALSE(canLockFromAnotherThread(other.write_mutex));
   {
-    ConstPtr<int> a(&value, &m);
-    ConstPtr<int> b(std::move(a));
-    ASSERT_FALSE(a);
-    ASSERT_FALSE(canLockFromAnotherThread(m));
+    ChannelSharedState::Transaction nested(other);  // chain still intact
   }
-  ASSERT_TRUE(canLockFromAnotherThread(m));
+  second.reset();
+  ASSERT_TRUE(canLockFromAnotherThread(other.write_mutex));
 }
 
-TEST(LockedReference, MovedAtomicProxyCommitsExactlyOnce)
+// A guard taken inside a transaction on the same state joins it instead of
+// deadlocking, and does not release the mutex when it goes away.
+TEST(LockedReference, GuardsNestInsideAnOuterTransaction)
 {
-  std::atomic<int> first{ 1 };
-  std::atomic<int> second{ 10 };
+  ChannelSharedState state;
+  int value = 1;
   {
-    AtomicProxy<int> a(&first);
-    *a = 2;
-    AtomicProxy<int> b(std::move(a));
-    ASSERT_FALSE(a);
-    ASSERT_EQ(first.load(), 1);  // nothing committed yet
-    AtomicProxy<int> c(&second);
-    *c = 20;
-    c = std::move(b);  // commits 20 to second, takes over first
-    ASSERT_FALSE(b);
-    ASSERT_EQ(second.load(), 20);
-    ASSERT_EQ(first.load(), 1);
+    ChannelSharedState::Transaction outer(state);
+    {
+      MutablePtr<int> p(&value, state);
+      *p = 2;
+      {
+        ConstPtr<int> c(&value, state);
+        ASSERT_EQ(*c, 2);
+      }
+    }
+    ASSERT_FALSE(canLockFromAnotherThread(state.write_mutex));  // still held by outer
   }
-  ASSERT_EQ(first.load(), 2);
-  ASSERT_EQ(second.load(), 20);
-}
-
-TEST(LockedReference, NullProxiesAreFalse)
-{
-  AtomicProxy<int> a(nullptr);
-  AtomicConstProxy<int> b(nullptr);
-  MutablePtr<int> c(nullptr, nullptr);
-  ASSERT_FALSE(a);
-  ASSERT_FALSE(b);
-  ASSERT_FALSE(c);
+  ASSERT_TRUE(canLockFromAnotherThread(state.write_mutex));
 }

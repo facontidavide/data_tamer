@@ -81,25 +81,6 @@ TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
   ASSERT_EQ(stored, 999.0);
 }
 
-TEST(LoggedValue, ScalarProxiesWriteBackAndHoldCopies)
-{
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  auto channel = LogChannel::create("chan");
-  auto v = channel->createLoggedValue<float>("f", 3.0f);
-  {
-    auto p = v->getMutablePtr();
-    ASSERT_TRUE(p);
-    *p += 1.0f;
-    ASSERT_EQ(v->get(), 3.0f);  // write-back happens on destruction
-  }
-  ASSERT_EQ(v->get(), 4.0f);
-  auto c = v->getConstPtr();
-  v->set(5.0f);
-  ASSERT_EQ(*c, 4.0f);  // copy taken at construction
-#pragma GCC diagnostic pop
-}
-
 TEST(LoggedValue, SetEnabledFromWriterThreadNeedsNoChannel)
 {
   auto channel = LogChannel::create("chan");
@@ -108,12 +89,14 @@ TEST(LoggedValue, SetEnabledFromWriterThreadNeedsNoChannel)
   v->set(2);
   v->setEnabled(false);
   ASSERT_FALSE(v->isEnabled());
-  v->set(3, /*auto_enable=*/true);
+  v->set(3);  // only stores
+  ASSERT_FALSE(v->isEnabled());
+  v->setEnabled(true);
   ASSERT_TRUE(v->isEnabled());
   ASSERT_EQ(v->get(), 3);
 }
 
-TEST(LoggedValue, AutoEnableOnSetDirtiesMask)
+TEST(LoggedValue, SetDoesNotEnableADisabledValue)
 {
   auto channel = LogChannel::create("chan");
   DataTamerTest::Attached<DummySink> sink;
@@ -124,7 +107,11 @@ TEST(LoggedValue, AutoEnableOnSetDirtiesMask)
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), 0u);
 
-  v->set(2.0);  // auto_enable defaults to true
+  v->set(2.0);  // stays disabled
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), 0u);
+  v->setEnabled(true);
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(double));
@@ -152,11 +139,13 @@ public:
     }
     std::memcpy(&seen, snapshot->payload.data(), sizeof(seen));
     for(int b = 1; b < 8; b++)
+    {
       if(((seen >> (8 * b)) & 0xFF) != (seen & 0xFF))
       {
         torn++;
         return;
       }
+    }
     checked++;
   }
 };
@@ -204,13 +193,13 @@ TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
   DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<std::vector<double>>("vec", { 1.0, 2.0 });
+  channel->prepare();
   {
     auto p = v->getMutablePtr();
     p->push_back(3.0);
-    bool lockable = true;
-    std::thread([&] { lockable = channel->writeMutex().try_lock(); }).join();
-    ASSERT_FALSE(lockable);  // held by p
+    ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));  // held by p
   }
+  ASSERT_FALSE(DataTamerTest::writeMutexHeld(*channel));
   ASSERT_EQ(v->get().size(), 3u);
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();

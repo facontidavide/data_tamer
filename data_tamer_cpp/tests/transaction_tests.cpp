@@ -1,4 +1,5 @@
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/sinks/dummy_sink.hpp"
 #include "alloc_counter.hpp"
 #include "test_sinks.hpp"
 #include "wait_for_sleeping_thread.hpp"
@@ -11,6 +12,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <fstream>
+#include <latch>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -153,30 +155,18 @@ private:
   std::string name_ = "CustomValue";
 };
 
+// With probe_mutexes, every channel must be prepared with a sink attached.
 void nestTransactions(const std::vector<std::shared_ptr<LogChannel>>& channels,
                       size_t index, bool probe_mutexes)
 {
   if(index == channels.size())
   {
-    for(const auto& channel : channels)
-    {
-      ASSERT_TRUE(channel->sharedState()->inTransactionOnThisThread());
-    }
     if(probe_mutexes)
     {
-      std::atomic_bool all_locked{ true };
-      std::thread probe([&] {
-        for(const auto& channel : channels)
-        {
-          if(channel->writeMutex().try_lock())
-          {
-            all_locked = false;
-            channel->writeMutex().unlock();
-          }
-        }
-      });
-      probe.join();
-      ASSERT_TRUE(all_locked);
+      for(const auto& channel : channels)
+      {
+        ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));
+      }
     }
     return;
   }
@@ -188,23 +178,19 @@ void nestTransactions(const std::vector<std::shared_ptr<LogChannel>>& channels,
 TEST(Transaction, ScopedWriteOwnsTheSharedWriteMutex)
 {
   auto channel = LogChannel::create("chan");
+  auto value = channel->createLoggedValue<double>("value");
+  channel->addDataSink(DummySink::create());
+  channel->prepare();
   {
     auto tx = channel->scopedWrite();
-    ASSERT_TRUE(channel->sharedState()->inTransactionOnThisThread());
-    std::atomic_bool acquired{ false };
-    std::thread probe([&] {
-      acquired = channel->writeMutex().try_lock();
-      if(acquired)
-      {
-        channel->writeMutex().unlock();
-      }
-    });
-    probe.join();
-    ASSERT_FALSE(acquired);
+    ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));
+    {
+      auto nested = channel->scopedWrite();  // same thread: no deadlock
+      ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));
+    }
+    ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));  // still the outer one
   }
-  ASSERT_FALSE(channel->sharedState()->inTransactionOnThisThread());
-  ASSERT_TRUE(channel->writeMutex().try_lock());
-  channel->writeMutex().unlock();
+  ASSERT_FALSE(DataTamerTest::writeMutexHeld(*channel));
 }
 
 TEST(Transaction, NestedSetAndGetDoNotRelock)
@@ -237,6 +223,11 @@ TEST(Transaction, NestingAcrossMoreThanEightChannelsDoesNotAllocateOrAlias)
     allocation_count = allocations.allocations();
   }
   ASSERT_EQ(allocation_count, 0u);
+  for(auto& channel : channels)
+  {
+    channel->addDataSink(DummySink::create());
+    channel->prepare();
+  }
   nestTransactions(channels, 0, true);
 }
 
@@ -300,7 +291,7 @@ TEST(Transaction, RawPointerWritesAppearTogetherInDeliveredSnapshots)
 
   double value = 1.0;
   raceWriterAgainstSnapshots(*channel, *sink, [&] {
-    std::lock_guard<Mutex> lock(channel->writeMutex());
+    auto tx = channel->scopedWrite();
     pair.a = value;
     std::this_thread::yield();
     pair.b = value;
@@ -348,7 +339,9 @@ TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUnco
       finished = true;
     });
     while(!started)
+    {
       std::this_thread::yield();
+    }
     EXPECT_FALSE(finished.load());
   }
   snapshot.join();
@@ -358,7 +351,9 @@ TEST(Transaction, ContentionCountersReportSnapshotHandoffAndRemainStableWhenUnco
   const auto stats = channel->stats();
   EXPECT_LE(stats.write_lock_contended, 1u);
   if(stats.write_lock_contended == 0)
+  {
     EXPECT_EQ(stats.write_lock_wait_max_ns, 0u);
+  }
   EXPECT_LE(stats.write_lock_wait_max_ns, elapsed);
   EXPECT_EQ(channel->takeSnapshot(),
             SnapshotResult::ok);  // an uncontended snapshot moves neither counter
@@ -370,7 +365,9 @@ TEST(Transaction, ObservedSleepingSnapshotAdvancesContentionCounters)
 {
 #if defined(__linux__)
   if(!std::ifstream("/proc/self/stat"))
+  {
     GTEST_SKIP() << "needs readable procfs";
+  }
   auto channel = LogChannel::create("chan");
   DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
@@ -408,10 +405,17 @@ TEST(Transaction, LoneScalarSetDoesNotTakeWriteMutex)
 {
   auto channel = LogChannel::create("chan");
   auto value = channel->createLoggedValue<double>("value");
-  channel->writeMutex().lock();
-  value->set(1.0);
+  std::latch held(1), release(1);
+  std::thread holder([&] {
+    auto tx = channel->scopedWrite();
+    held.count_down();
+    release.wait();
+  });
+  held.wait();
+  value->set(1.0);  // would deadlock if it took the mutex
   ASSERT_EQ(value->get(), 1.0);
-  channel->writeMutex().unlock();
+  release.count_down();
+  holder.join();
 }
 
 TEST(Transaction, DisabledAndDestroyedValuesAreNotSized)
@@ -447,8 +451,8 @@ TEST(Transaction, SerializationExceptionReleasesWriteMutex)
   channel->registerCustomValue("value", &value, serializer);
 
   ASSERT_THROW((void)channel->takeSnapshot(), std::runtime_error);
-  ASSERT_TRUE(channel->writeMutex().try_lock());
-  channel->writeMutex().unlock();
+  serializer->throw_on_serialize = false;
+  ASSERT_FALSE(DataTamerTest::writeMutexHeld(*channel));  // released by the unwind
 }
 
 // Values enabled inside one transaction must appear together in the snapshot
@@ -457,7 +461,9 @@ TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
 {
 #if defined(__linux__)
   if(!std::ifstream("/proc/self/stat"))
+  {
     GTEST_SKIP() << "needs readable procfs";
+  }
   auto channel = LogChannel::create("chan");
   DataTamerTest::Attached<CheckingSink> sink(CheckingSink::Payload::PAIR);
   channel->addDataSink(sink);
@@ -470,21 +476,23 @@ TEST(Transaction, ValuesEnabledInsideATransactionAppearTogether)
 
   std::atomic<pid_t> tid{ 0 };
   std::atomic<bool> finished{ false };
-  bool ok = false;
+  SnapshotResult result = SnapshotResult::rejected;
   std::thread snapshotter;
   {
     auto tx = channel->scopedWrite();
-    a->set(2.0);  // enables a
+    a->set(2.0);
+    a->setEnabled(true);
     snapshotter = std::thread([&] {
       tid = static_cast<pid_t>(syscall(SYS_gettid));
-      ok = channel->takeSnapshot() == SnapshotResult::ok;  // blocks on the write mutex
+      result = channel->takeSnapshot();  // blocks on the write mutex
       finished = true;
     });
     ASSERT_TRUE(DataTamerTest::waitForSleepingThread(tid, finished));
-    b->set(2.0);  // enables b, still inside the transaction
+    b->set(2.0);
+    b->setEnabled(true);  // still inside the transaction
   }
   snapshotter.join();
-  ASSERT_TRUE(ok);
+  ASSERT_EQ(result, SnapshotResult::ok);
   ASSERT_TRUE(sink->waitFor(2));
   EXPECT_EQ(sink->errors(), 0u);  // PAIR payload: both or neither, never one value
 #else

@@ -257,7 +257,7 @@ inline bool TypeField::operator!=(const TypeField& other) const
   return !(*this == other);
 }
 
-inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false)
+inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = false)
 {
   auto trimString = [](std::string& str) {
     while(!str.empty() && (str.back() == ' ' || str.back() == '\r'))
@@ -431,6 +431,13 @@ inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false
   }
   schema.hash = declared_schema != 0 ? declared_schema : computed;
   return schema;
+}
+
+/// Old misspelled name, kept for one release so that existing parsers compile.
+[[deprecated("use BuildSchemaFromText")]] inline Schema
+BuilSchemaFromText(const std::string& txt, bool check_hash = false)
+{
+  return BuildSchemaFromText(txt, check_hash);
 }
 
 /// Wire size in bytes of a basic type (0 for OTHER).

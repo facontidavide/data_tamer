@@ -32,7 +32,7 @@ int main(int argc, char** argv)
     std::string schema_text(reinterpret_cast<const char*>(mcap_schema->data.data()),
                             mcap_schema->data.size());
 
-    auto dt_schema = DataTamerParser::BuilSchemaFromText(schema_text);
+    auto dt_schema = DataTamerParser::BuildSchemaFromText(schema_text);
     schema_id_to_hash[mcap_schema->id] = dt_schema.hash;
     hash_to_schema[dt_schema.hash] = dt_schema;
   }

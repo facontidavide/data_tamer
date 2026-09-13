@@ -4,6 +4,29 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
+
+  - ``RegistrationID`` is an opaque handle (no public ``first_index`` /
+    ``fields_count``, no ``operator+=``). It denotes one registration: after
+    ``unregister()`` and a new registration of the same name the old handle is
+    stale, and ``LogChannel::setEnabled`` / ``unregister`` throw
+    ``std::invalid_argument`` instead of acting on the replacement. New
+    ``LogChannel::isEnabled(id)`` and noexcept ``trySetEnabled(id, enable)``.
+    The per-series flags live in an append-only table whose reads are safe to
+    race with registration (they were a ``std::deque`` before).
+    Re-registering the same name more than 16 million times throws.
+  - ``LoggedValue::set(value)`` only stores; the ``auto_enable`` parameter is
+    gone. Re-enable with ``setEnabled(true)``.
+  - ``LoggedValue::getMutablePtr()`` / ``getConstPtr()`` exist only for
+    non-scalar values (scalars: ``set()`` / ``get()``), hold the channel's write
+    transaction instead of the raw mutex, so they nest inside ``scopedWrite()``,
+    and are no longer movable (like ``std::lock_guard``). Removed:
+    ``getLockedPtr()``, the ``mutex()`` accessors, ``AtomicProxy`` /
+    ``AtomicConstProxy``.
+  - Removed ``LogChannel::writeMutex()``, ``sharedState()`` and the global
+    ``Mutex`` alias. ``scopedWrite()`` returns ``DataTamer::WriteTransaction``.
+  - Parser: ``BuildSchemaFromText`` is the entry point; the misspelled
+    ``BuilSchemaFromText`` remains as a deprecated alias for one release.
 * **Breaking, snapshots**: ``takeSnapshot()`` returns a ``[[nodiscard]]``
   ``SnapshotResult`` instead of ``bool`` (``ok``, ``partial``, ``rejected``,
   ``no_sinks``, ``not_prepared``, ``pool_exhausted``, ``oversize``, ``blocked``). New
