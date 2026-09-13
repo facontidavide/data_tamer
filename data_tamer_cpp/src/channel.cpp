@@ -87,7 +87,7 @@ struct LogChannel::Pimpl
   struct SinkLink
   {
     // Members are destroyed in reverse order: token must die before its sink.
-    std::shared_ptr<DataSinkBase> sink;
+    std::shared_ptr<SinkWorker> sink;
     std::unique_ptr<moodycamel::ProducerToken> token;
     std::atomic<uint64_t> dropped{ 0 };
     bool schema_registered = false;
@@ -217,7 +217,7 @@ void LogChannel::unregister(const RegistrationID& id)
     _p->series[id.first_index + i].holder.detach();
 }
 
-void LogChannel::addDataSink(std::shared_ptr<DataSinkBase> sink)
+void LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
 {
   if(!sink)
     throw std::invalid_argument("Can't add a null sink");
@@ -237,17 +237,17 @@ void LogChannel::addDataSink(std::shared_ptr<DataSinkBase> sink)
   link->token = link->sink->makeProducerToken();
   if(_p->schema_frozen)
   {
-    link->sink->addChannel(_p->channel_name, _p->schema);
+    link->sink->addSchema(_p->schema);
     link->schema_registered = true;
   }
-  // Neither a throwing token allocation nor addChannel can publish a partial link.
+  // Neither a throwing token allocation nor onSchema can publish a partial link.
   _p->sinks[free_slot] = std::move(link);
   if(_p->logging_started)
     _p->published_sinks[free_slot].store(_p->sinks[free_slot].get(),
                                          std::memory_order_seq_cst);
 }
 
-void LogChannel::removeDataSink(std::shared_ptr<DataSinkBase> sink)
+void LogChannel::removeDataSink(std::shared_ptr<SinkWorker> sink)
 {
   std::lock_guard const lock(_p->control_mutex);
   for(size_t i = 0; i < _p->sinks.size(); ++i)
@@ -346,7 +346,7 @@ uint64_t LogChannel::droppedOversize() const
   return _p->dropped_oversize.load(std::memory_order_relaxed);
 }
 
-uint64_t LogChannel::droppedSnapshots(const std::shared_ptr<DataSinkBase>& sink) const
+uint64_t LogChannel::droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const
 {
   std::lock_guard const lock(_p->control_mutex);
   for(const auto& link : _p->sinks)
@@ -388,7 +388,7 @@ const ActiveMask& LogChannel::getActiveFlags()
 bool LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
 {
   // First call freezes even without sinks. Failed preparation is retryable;
-  // successful addChannel calls are remembered and nothing is published early.
+  // successful onSchema calls are remembered and nothing is published early.
   if(!_p->logging_started)
   {
     std::lock_guard const lock(_p->control_mutex);
@@ -403,13 +403,13 @@ bool LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
           { _p->payload_capacity, checkedDouble(_p->payloadSize()), size_t(256) });
       // Publish the pool only after every slot has reserved successfully.
       _p->pool = std::make_shared<SnapshotPool>(_p->pool_capacity, capacity,
-                                                _p->active_mask.size(), _p->channel_name);
+                                                _p->active_mask.size());
     }
     for(auto& link : _p->sinks)
     {
       if(link && !link->schema_registered)
       {
-        link->sink->addChannel(_p->channel_name, _p->schema);
+        link->sink->addSchema(_p->schema);
         link->schema_registered = true;
       }
     }

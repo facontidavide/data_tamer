@@ -2,6 +2,7 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "../examples/geometry_types.hpp"
+#include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 #include <thread>
@@ -147,7 +148,7 @@ SnapshotView ConvertSnapshot(const DataTamer::Snapshot& snapshot)
 TEST(DataTamerParser, PlainParsing)
 {
   auto channel = DataTamer::LogChannel::create("channel");
-  auto dummy_sink = std::make_shared<DataTamer::DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink;
   channel->addDataSink(dummy_sink);
 
   int32_t v1 = 5;
@@ -161,7 +162,7 @@ TEST(DataTamerParser, PlainParsing)
   channel->registerValue("v4", &v4);
 
   channel->takeSnapshot();
-  dummy_sink->flush();
+  dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
   const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
@@ -192,7 +193,7 @@ TEST(DataTamerParser, CustomParsing)
 {
   DataTamer::ChannelsRegistry registry;
   auto channel = registry.getChannel("channel");
-  auto dummy_sink = std::make_shared<DataTamer::DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink;
   channel->addDataSink(dummy_sink);
 
   Pose pose;
@@ -201,7 +202,7 @@ TEST(DataTamerParser, CustomParsing)
   channel->registerValue("pose", &pose);
 
   channel->takeSnapshot();
-  dummy_sink->flush();
+  dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
   const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
@@ -236,7 +237,7 @@ TEST(DataTamerParser, VectorParsing)
 {
   DataTamer::ChannelsRegistry registry;
   auto channel = registry.getChannel("channel");
-  auto dummy_sink = std::make_shared<DataTamer::DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink;
   channel->addDataSink(dummy_sink);
 
   std::vector<double> valsA = { 10, 11, 12 };
@@ -256,7 +257,7 @@ TEST(DataTamerParser, VectorParsing)
   channel->registerValue("quats", &quats);
 
   channel->takeSnapshot();
-  dummy_sink->flush();
+  dummy_sink.drain();
 
   const auto& schema_in = channel->getSchema();
   const auto& schema_out = DataTamerParser::BuilSchemaFromText(ToStr(schema_in));
@@ -353,10 +354,10 @@ TEST(DataTamerParser, RejectsMalformedInput)
   std::vector<double> samples = { 1.0, 2.0 };
   channel->registerValue("pose", &pose);
   channel->registerValue("samples", &samples);
-  auto sink = std::make_shared<DataTamer::DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->flush();
+  sink.drain();
   const auto snapshot = sink->latestSnapshot();
   const auto schema = BuilSchemaFromText(ToStr(channel->getSchema()));
   auto count_values = [](const std::string&, const VarNumber&) {};

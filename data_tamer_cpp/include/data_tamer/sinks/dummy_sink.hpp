@@ -13,41 +13,15 @@ namespace DataTamer
  * Used mostly for testing and debugging.
  *
  * All accessors take the internal mutex, so they may be called from any thread
- * while the sink thread is delivering snapshots.
+ * while the worker is delivering snapshots. Use SinkWorker::drain() instead of
+ * sleeping to observe every snapshot taken so far.
  */
-class DummySink : public DataSinkBase
+class DummySink : public DataSink
 {
 public:
-  explicit DummySink(size_t queue_capacity = kDefaultQueueCapacity)
-    : DataSinkBase(queue_capacity)
-  {}
+  static std::shared_ptr<SinkWorker> create() { return SinkWorker::create<DummySink>(); }
 
-  ~DummySink() override { stopThread(); }
-
-  /// Deliver every snapshot already pushed by takeSnapshot(), including one the
-  /// worker is currently storing. Tests call this instead of sleeping.
-  void flush() { processQueuedSnapshots(); }
-
-  void addChannel(std::string const& /*name*/, Schema const& schema) override
-  {
-    std::scoped_lock lk(mutex_);
-    schemas_[schema.hash] = schema;
-    snapshots_count_[schema.hash] = 0;
-  }
-
-  bool storeSnapshot(const Snapshot& snapshot) override
-  {
-    std::scoped_lock lk(mutex_);
-    latest_snapshot_ = snapshot;
-    auto it = snapshots_count_.find(snapshot.schema_hash);
-    if(it != snapshots_count_.end())
-    {
-      it->second++;
-    }
-    return true;
-  }
-
-  /// Copy of the most recent snapshot delivered to storeSnapshot().
+  /// Copy of the most recent snapshot delivered to onSnapshot().
   Snapshot latestSnapshot() const
   {
     std::scoped_lock lk(mutex_);
@@ -93,6 +67,25 @@ public:
   {
     std::scoped_lock lk(mutex_);
     return schemas_.at(hash);
+  }
+
+protected:
+  void onSchema(Schema const& schema) override
+  {
+    std::scoped_lock lk(mutex_);
+    schemas_[schema.hash] = schema;
+    snapshots_count_[schema.hash] = 0;
+  }
+
+  void onSnapshot(const SnapshotRef& snapshot) override
+  {
+    std::scoped_lock lk(mutex_);
+    latest_snapshot_ = *snapshot;
+    auto it = snapshots_count_.find(snapshot->schema_hash);
+    if(it != snapshots_count_.end())
+    {
+      it->second++;
+    }
   }
 
 private:

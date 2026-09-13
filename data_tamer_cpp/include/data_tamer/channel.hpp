@@ -21,7 +21,7 @@ inline std::chrono::nanoseconds NsecSinceEpoch()
   return std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch);
 }
 
-class DataSinkBase;
+class SinkWorker;
 class LogChannel;
 class ChannelsRegistry;
 
@@ -160,16 +160,17 @@ public:
   void unregister(const RegistrationID& id);
 
   /**
-   * @brief addDataSink add a sink, i.e. a class collecting our snapshots.
+   * @brief addDataSink attaches a sink (a SinkWorker owning a DataSink, see
+   * MCAPSink::create or SinkWorker::create<T>) that will receive our snapshots.
    * A channel holds at most eight sinks; adding a ninth throws. Adding the
    * same sink twice is a no-op.
    */
-  void addDataSink(std::shared_ptr<DataSinkBase> sink);
+  void addDataSink(std::shared_ptr<SinkWorker> sink);
 
   /**
    * @brief removeDataSink remove a sink, i.e. a class collecting our snapshots.
    */
-  void removeDataSink(std::shared_ptr<DataSinkBase> sink);
+  void removeDataSink(std::shared_ptr<SinkWorker> sink);
 
   /**
   * @brief getNumberOfSinks returns the number of registered sinks.
@@ -246,8 +247,7 @@ public:
   [[nodiscard]] uint64_t droppedOversize() const;
 
   /// Failed publications to this attachment; zero if sink is not attached.
-  [[nodiscard]] uint64_t
-  droppedSnapshots(const std::shared_ptr<DataSinkBase>& sink) const;
+  [[nodiscard]] uint64_t droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const;
 
   struct Stats
   {

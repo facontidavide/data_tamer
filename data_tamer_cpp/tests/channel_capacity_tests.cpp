@@ -1,6 +1,7 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
 #include "alloc_counter.hpp"
+#include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 #include <chrono>
@@ -12,29 +13,36 @@ using namespace DataTamer;
 
 namespace
 {
-class CapacitySink : public DataSinkBase
+class CapacitySink : public DataSink
 {
 public:
-  CapacitySink() { stopThread(); }
-  ~CapacitySink() override { stopThread(); }
-  using DataSinkBase::processQueuedSnapshots;
   SnapshotRef last;
   size_t received = 0;
-  void addChannel(const std::string&, const Schema&) override {}
-  bool storeSnapshot(const Snapshot&) override
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef& snapshot) override
   {
     ++received;
-    last = retainSnapshot();
-    return true;
-  }
-  void drain()
-  {
-    processQueuedSnapshots();
-    last.reset();
+    last = snapshot.clone();
   }
 };
 
-struct SizedValue { uint64_t value = 42; };
+/// Manual delivery, with the retained reference released after each drain.
+struct CapacityWorker : DataTamerTest::Attached<CapacitySink>
+{
+  CapacityWorker() : Attached(DataTamerTest::manual<CapacitySink>().worker) {}
+  void drain() const
+  {
+    worker->drain();
+    sink->last.reset();
+  }
+  /// Deliver and keep the last reference, so the slot stays in use.
+  void deliver() const { worker->drain(); }
+};
+
+struct SizedValue
+{
+  uint64_t value = 42;
+};
 class SizedSerializer : public CustomSerializer
 {
 public:
@@ -50,12 +58,14 @@ public:
   size_t serializedSize(const void*) const override
   {
     ++calls;
-    if(throw_size) throw std::runtime_error("size");
+    if(throw_size)
+      throw std::runtime_error("size");
     return size;
   }
   void serialize(const void* source, SerializeMe::SpanBytes& bytes) const override
   {
-    if(throw_serialize) throw std::runtime_error("serialize");
+    if(throw_serialize)
+      throw std::runtime_error("serialize");
     const auto value = static_cast<const SizedValue*>(source)->value;
     std::memcpy(bytes.data(), &value, 8);
     bytes.trimFront(8);
@@ -66,10 +76,12 @@ public:
 TEST(ChannelCapacity, FreezeWithoutSinkReservesAndRejectsSetters)
 {
   auto channel = LogChannel::create("capacity");
-  auto value = channel->createLoggedValue<std::vector<double>>("value", {1.0});
+  auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
   EXPECT_THROW(channel->setPoolCapacity(0), std::invalid_argument);
-  EXPECT_THROW(channel->setPoolCapacity(std::numeric_limits<size_t>::max()), std::length_error);
-  EXPECT_THROW(channel->setPayloadCapacity(std::numeric_limits<size_t>::max()), std::length_error);
+  EXPECT_THROW(channel->setPoolCapacity(std::numeric_limits<size_t>::max()),
+               std::length_error);
+  EXPECT_THROW(channel->setPayloadCapacity(std::numeric_limits<size_t>::max()),
+               std::length_error);
   channel->setPoolCapacity(2);
   channel->setPayloadCapacity(0);  // Automatic minimum remains valid.
   channel->setStrictMode(true);
@@ -78,7 +90,7 @@ TEST(ChannelCapacity, FreezeWithoutSinkReservesAndRejectsSetters)
   EXPECT_THROW(channel->setPoolCapacity(2), std::runtime_error);
   EXPECT_THROW(channel->setPayloadCapacity(256), std::runtime_error);
   value->set(std::vector<double>(1024, 3.0));
-  auto sink = std::make_shared<CapacitySink>();
+  CapacityWorker sink;
   channel->addDataSink(sink);
   EXPECT_FALSE(channel->takeSnapshot());  // Must use the no-sink freeze's reservation.
   EXPECT_EQ(channel->droppedOversize(), 1u);
@@ -88,7 +100,7 @@ TEST(ChannelCapacity, FreezeWithoutSinkReservesAndRejectsSetters)
 TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
 {
   auto channel = LogChannel::create("capacity");
-  auto sink = std::make_shared<CapacitySink>();
+  CapacityWorker sink;
   auto serializer = std::make_shared<SizedSerializer>();
   SizedValue value;
   channel->registerCustomValue("value", &value, serializer);
@@ -100,7 +112,7 @@ TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
   EXPECT_FALSE(channel->takeSnapshot());
   EXPECT_EQ(serializer->calls, calls);
   EXPECT_EQ(channel->poolExhausted(), 1u);
-  sink->drain();
+  sink.drain();
   EXPECT_TRUE(channel->takeSnapshot());
   EXPECT_EQ(channel->droppedSnapshots(sink), 0u);
 }
@@ -108,14 +120,14 @@ TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
 TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapacity)
 {
   auto channel = LogChannel::create("capacity");
-  auto sink = std::make_shared<CapacitySink>();
-  auto value = channel->createLoggedValue<std::vector<double>>("value", {1.0});
+  CapacityWorker sink;
+  auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
   channel->addDataSink(sink);
   channel->setPoolCapacity(2);
   channel->setPayloadCapacity(256);
   channel->setStrictMode(true);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->drain();
+  sink.drain();
   value->set(std::vector<double>(1024, 3.0));
   EXPECT_FALSE(channel->takeSnapshot());
   EXPECT_EQ(channel->droppedOversize(), 1u);
@@ -123,11 +135,11 @@ TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapaci
   channel->setStrictMode(false);
   ASSERT_TRUE(channel->takeSnapshot());
   EXPECT_EQ(channel->payloadReallocations(), 1u);
-  sink->drain();
+  sink.drain();
   channel->setStrictMode(true);
   EXPECT_FALSE(channel->takeSnapshot());  // Other slot is still small.
-  ASSERT_TRUE(channel->takeSnapshot());  // Grown slot remains usable in strict mode.
-  sink->processQueuedSnapshots();
+  ASSERT_TRUE(channel->takeSnapshot());   // Grown slot remains usable in strict mode.
+  sink.deliver();
   ASSERT_TRUE(sink->last);
   EXPECT_EQ(sink->last->payload.size(), 8196u);
   uint32_t count = 0;
@@ -140,13 +152,13 @@ TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapaci
   channel->setStrictMode(false);
   EXPECT_TRUE(channel->takeSnapshot());
   EXPECT_EQ(channel->payloadReallocations(), 2u);
-  sink->drain();
+  sink.drain();
   value->set(std::vector<double>(1500, 4.0));  // Doubled growth provides spare capacity.
   channel->setStrictMode(true);
   for(int i = 0; i < 4; ++i)
   {
     EXPECT_TRUE(channel->takeSnapshot());
-    sink->drain();
+    sink.drain();
   }
   EXPECT_EQ(channel->stats().dropped_oversize, 2u);
   EXPECT_EQ(channel->stats().payload_reallocations, 2u);
@@ -154,22 +166,23 @@ TEST(ChannelCapacity, StrictDropNonStrictGrowthAndRuntimeToggleUseEachSlotCapaci
 
 TEST(ChannelCapacity, ReservationCoversHintDoubleInitialSizeAndMinimum)
 {
-  for(size_t hint : {size_t(0), size_t(4096)})
+  for(size_t hint : { size_t(0), size_t(4096) })
   {
     auto channel = LogChannel::create("capacity");
-    auto sink = std::make_shared<CapacitySink>();
-    auto value = channel->createLoggedValue<std::vector<double>>("value", std::vector<double>(100));
+    CapacityWorker sink;
+    auto value = channel->createLoggedValue<std::vector<double>>(
+        "value", std::vector<double>(100));
     channel->setPoolCapacity(2);
     channel->setPayloadCapacity(hint);
     channel->setStrictMode(true);
     channel->addDataSink(sink);
     ASSERT_TRUE(channel->takeSnapshot());
-    sink->drain();
+    sink.drain();
     value->set(std::vector<double>(hint ? 500 : 200));
     for(int i = 0; i < 4; ++i)
     {
       EXPECT_TRUE(channel->takeSnapshot());
-      sink->drain();
+      sink.drain();
     }
     EXPECT_EQ(channel->payloadReallocations(), 0u);
     EXPECT_EQ(channel->droppedOversize(), 0u);
@@ -179,7 +192,7 @@ TEST(ChannelCapacity, ReservationCoversHintDoubleInitialSizeAndMinimum)
 TEST(ChannelCapacity, DisabledOversizedAndDeadFieldsNeverSizeOrSerialize)
 {
   auto channel = LogChannel::create("capacity");
-  auto sink = std::make_shared<CapacitySink>();
+  CapacityWorker sink;
   auto serializer = std::make_shared<SizedSerializer>();
   auto value = std::make_unique<SizedValue>();
   auto id = channel->registerCustomValue("value", value.get(), serializer);
@@ -192,7 +205,7 @@ TEST(ChannelCapacity, DisabledOversizedAndDeadFieldsNeverSizeOrSerialize)
   value.reset();
   channel->setEnabled(id, true);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->processQueuedSnapshots();
+  sink.deliver();
   ASSERT_TRUE(sink->last);
   EXPECT_FALSE(GetBit(sink->last->active_mask, 0));
   EXPECT_TRUE(sink->last->payload.empty());
@@ -202,11 +215,11 @@ TEST(ChannelCapacity, DisabledOversizedAndDeadFieldsNeverSizeOrSerialize)
 
 TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochEvenInStrictMode)
 {
-  for(bool strict : {false, true})
-    for(bool sizing : {false, true})
+  for(bool strict : { false, true })
+    for(bool sizing : { false, true })
     {
       auto channel = LogChannel::create("capacity");
-      auto sink = std::make_shared<CapacitySink>();
+      CapacityWorker sink;
       auto serializer = std::make_shared<SizedSerializer>();
       SizedValue value;
       auto id = channel->registerCustomValue("value", &value, serializer);
@@ -214,7 +227,7 @@ TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochEvenInStrictMode)
       channel->setStrictMode(strict);
       channel->addDataSink(sink);
       ASSERT_TRUE(channel->takeSnapshot());
-      sink->drain();
+      sink.drain();
       serializer->throw_size = sizing;
       serializer->throw_serialize = !sizing;
       EXPECT_THROW(channel->takeSnapshot(), std::runtime_error);
@@ -229,7 +242,7 @@ TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochEvenInStrictMode)
 TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndFreezeCanRetry)
 {
   auto channel = LogChannel::create("capacity");
-  auto sink = std::make_shared<CapacitySink>();
+  CapacityWorker sink;
   auto serializer = std::make_shared<SizedSerializer>();
   SizedValue value;
   auto id = channel->registerCustomValue("value", &value, serializer);
@@ -241,7 +254,7 @@ TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndFreezeCanRetry)
   EXPECT_THROW(channel->setPayloadCapacity(256), std::runtime_error);
   serializer->size = 8;
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->drain();
+  sink.drain();
   // Each size fits the byte vector, but their sum cannot be doubled.
   serializer->size = std::vector<uint8_t>().max_size() / 2;
   EXPECT_THROW(channel->takeSnapshot(), std::length_error);
@@ -257,9 +270,9 @@ TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndFreezeCanRetry)
 TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
 {
   auto channel = LogChannel::create(std::string(128, 'c'));
-  auto first = std::make_shared<CapacitySink>();
-  auto second = std::make_shared<CapacitySink>();
-  auto changing = std::make_shared<CapacitySink>();
+  CapacityWorker first;
+  CapacityWorker second;
+  CapacityWorker changing;
   uint64_t value = 42;
   auto id = channel->registerValue("value", &value);
   auto logged = channel->createLoggedValue<uint64_t>("changing", 42);
@@ -267,19 +280,20 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
   channel->addDataSink(second);
   channel->setStrictMode(true);
   ASSERT_TRUE(channel->takeSnapshot());
-  first->drain();
-  second->drain();
-  std::atomic<bool> start{false}, done{false};
-  std::atomic<size_t> churn{0};
+  first.drain();
+  second.drain();
+  std::atomic<bool> start{ false }, done{ false };
+  std::atomic<size_t> churn{ 0 };
   std::thread control([&] {
-    while(!start) std::this_thread::yield();
+    while(!start)
+      std::this_thread::yield();
     do
     {
       logged.reset();
       logged = channel->createLoggedValue<uint64_t>("changing", 42);
       channel->addDataSink(changing);
       channel->removeDataSink(changing);
-      changing->drain();
+      changing.drain();
       ++churn;
     } while(!done);
   });
@@ -297,13 +311,14 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
         allocations += scope.allocations();
         deallocations += scope.deallocations();
       }
-      first->drain();
-      second->drain();
+      first.drain();
+      second.drain();
     }
     if(batch != 9)
     {
       const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-      while(churn.load() <= completed_churn && std::chrono::steady_clock::now() < deadline)
+      while(churn.load() <= completed_churn &&
+            std::chrono::steady_clock::now() < deadline)
         std::this_thread::yield();
       ASSERT_GT(churn.load(), completed_churn) << "control thread stalled";
       completed_churn = churn.load();
@@ -321,16 +336,16 @@ TEST(ChannelCapacity, TenThousandDirtySnapshotsWithControlChurnDoNotAllocate)
 TEST(ChannelCapacity, AutomaticMinimumAndStrictDropRecoverAfterShrink)
 {
   auto channel = LogChannel::create("capacity");
-  auto sink = std::make_shared<CapacitySink>();
+  CapacityWorker sink;
   auto value = channel->createLoggedValue<std::vector<double>>("value");
   channel->setPoolCapacity(2);
   channel->setStrictMode(true);
   channel->addDataSink(sink);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->drain();
+  sink.drain();
   value->set(std::vector<double>(31));  // 4-byte length + 248 bytes fits the minimum.
   EXPECT_TRUE(channel->takeSnapshot());
-  sink->drain();
+  sink.drain();
   value->set(std::vector<double>(32));  // 260 bytes exceeds both initial slots.
   EXPECT_FALSE(channel->takeSnapshot());
   value->set(std::vector<double>(1));

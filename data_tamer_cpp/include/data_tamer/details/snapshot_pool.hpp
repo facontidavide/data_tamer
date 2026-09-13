@@ -32,13 +32,11 @@ class SnapshotPool
 public:
   static constexpr size_t kDefaultCapacity = 64;
 
-  SnapshotPool(size_t capacity, size_t payload_capacity, size_t mask_bytes,
-               std::string channel_name = {})
-    : capacity_(capacity), channel_name_(std::move(channel_name)), slots_(new PoolSlot[capacity])
+  SnapshotPool(size_t capacity, size_t payload_capacity, size_t mask_bytes)
+    : capacity_(capacity), slots_(new PoolSlot[capacity])
   {
     for(size_t i = 0; i < capacity_; i++)
     {
-      slots_[i].snapshot.channel_name = channel_name_;
       slots_[i].snapshot.payload.reserve(payload_capacity);
       slots_[i].snapshot.active_mask.resize(mask_bytes);
     }
@@ -73,9 +71,15 @@ public:
     return nullptr;
   }
 
-  static void addRef(PoolSlot* slot) { slot->refs.fetch_add(1, std::memory_order_relaxed); }
+  static void addRef(PoolSlot* slot)
+  {
+    slot->refs.fetch_add(1, std::memory_order_relaxed);
+  }
 
-  static void release(PoolSlot* slot) { slot->refs.fetch_sub(1, std::memory_order_release); }
+  static void release(PoolSlot* slot)
+  {
+    slot->refs.fetch_sub(1, std::memory_order_release);
+  }
 
   size_t capacity() const { return capacity_; }
 
@@ -97,78 +101,9 @@ public:
 
 private:
   const size_t capacity_;
-  const std::string channel_name_;
   std::unique_ptr<PoolSlot[]> slots_;
   size_t scan_from_ = 0;  // snapshot thread only
   std::atomic<uint64_t> exhausted_{ 0 };
-};
-
-/**
- * @brief Move-only handle to a PoolSlot. Holds one reference on the slot and a
- * shared_ptr to the pool, so a sink may keep it for as long as it likes: the
- * slot is simply not reused until the last handle is destroyed, and the pool
- * outlives the channel if necessary.
- */
-class SnapshotRef
-{
-public:
-  SnapshotRef() = default;
-
-  /// Takes ownership of one already-counted reference on `slot`.
-  SnapshotRef(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot)
-    : pool_(std::move(pool)), slot_(slot)
-  {}
-
-  SnapshotRef(SnapshotRef&& other) noexcept
-    : pool_(std::move(other.pool_)), slot_(other.slot_)
-  {
-    other.slot_ = nullptr;
-  }
-
-  SnapshotRef& operator=(SnapshotRef&& other) noexcept
-  {
-    if(this != &other)
-    {
-      reset();
-      pool_ = std::move(other.pool_);
-      slot_ = other.slot_;
-      other.slot_ = nullptr;
-    }
-    return *this;
-  }
-
-  SnapshotRef(const SnapshotRef&) = delete;
-  SnapshotRef& operator=(const SnapshotRef&) = delete;
-
-  ~SnapshotRef() { reset(); }
-
-  /// Explicit copy: adds a reference.
-  SnapshotRef clone() const
-  {
-    if(slot_)
-    {
-      SnapshotPool::addRef(slot_);
-    }
-    return SnapshotRef(pool_, slot_);
-  }
-
-  void reset()
-  {
-    if(slot_)
-    {
-      SnapshotPool::release(slot_);
-      slot_ = nullptr;
-    }
-    pool_.reset();
-  }
-
-  const Snapshot& operator*() const { return slot_->snapshot; }
-  const Snapshot* operator->() const { return &slot_->snapshot; }
-  explicit operator bool() const { return slot_ != nullptr; }
-
-private:
-  std::shared_ptr<SnapshotPool> pool_;
-  PoolSlot* slot_ = nullptr;
 };
 
 }  // namespace DataTamer

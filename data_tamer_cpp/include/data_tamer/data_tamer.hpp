@@ -18,7 +18,7 @@ public:
 
   /// Once added here, this sink will be automatically connected to
   /// any new channel created with getChannel()
-  void addDefaultSink(std::shared_ptr<DataSinkBase> sink);
+  void addDefaultSink(std::shared_ptr<SinkWorker> sink);
 
   /// Create a new channel or get a previously create one.
   [[nodiscard]] std::shared_ptr<LogChannel> getChannel(std::string const& channel_name);

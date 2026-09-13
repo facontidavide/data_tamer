@@ -1,6 +1,8 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
 
+#include "test_sinks.hpp"
+
 #include <gtest/gtest.h>
 #include <condition_variable>
 #include <cstring>
@@ -10,6 +12,7 @@
 #include <thread>
 
 using namespace DataTamer;
+using DataTamerTest::Attached;
 
 namespace
 {
@@ -103,20 +106,16 @@ public:
   }
 };
 
-class ControlSink : public DataSinkBase
+class ControlSink : public DataSink
 {
 public:
-  ControlSink() { stopThread(); }
-  ~ControlSink() override { stopThread(); }
-  using DataSinkBase::processQueuedSnapshots;
-  using DataSinkBase::retainSnapshot;
   Gate* add_gate = nullptr;
   bool reject_schema = false;
   size_t registrations = 0;
   Schema schema;
   std::vector<Snapshot> snapshots;
-  std::function<void()> on_store;
-  void addChannel(const std::string&, const Schema& value) override
+  std::function<void(const SnapshotRef&)> on_store;
+  void onSchema(const Schema& value) override
   {
     if(add_gate)
       add_gate->pause();
@@ -125,14 +124,19 @@ public:
     ++registrations;
     schema = value;
   }
-  bool storeSnapshot(const Snapshot& value) override
+  void onSnapshot(const SnapshotRef& value) override
   {
-    snapshots.push_back(value);
+    snapshots.push_back(*value);
     if(on_store)
-      on_store();
-    return true;
+      on_store(value);
   }
 };
+
+/// Manual delivery: snapshots reach the sink only when the test drains it.
+Attached<ControlSink> controlSink()
+{
+  return DataTamerTest::manual<ControlSink>();
+}
 
 void checkPayloads(const ControlSink& sink, size_t fields)
 {
@@ -160,19 +164,19 @@ TEST(ChannelControl, EightSinksDuplicateAndRemoval)
   auto channel = LogChannel::create("control");
   uint64_t value = 42;
   channel->registerValue("value", &value);
-  std::vector<std::shared_ptr<ControlSink>> sinks;
+  std::vector<Attached<ControlSink>> sinks;
   for(int i = 0; i < 8; ++i)
   {
-    sinks.push_back(std::make_shared<ControlSink>());
+    sinks.push_back(controlSink());
     channel->addDataSink(sinks.back());
   }
   channel->addDataSink(sinks.front());
   EXPECT_EQ(channel->getNumberOfSinks(), 8u);
-  EXPECT_THROW(channel->addDataSink(std::make_shared<ControlSink>()), std::runtime_error);
+  EXPECT_THROW(channel->addDataSink(controlSink()), std::runtime_error);
   ASSERT_TRUE(channel->takeSnapshot());
   for(auto& sink : sinks)
   {
-    sink->processQueuedSnapshots();
+    sink.drain();
     EXPECT_EQ(sink->registrations, 1u);
     EXPECT_EQ(sink->schema.hash, channel->getSchema().hash);
     EXPECT_EQ(sink->snapshots.size(), 1u);
@@ -181,7 +185,7 @@ TEST(ChannelControl, EightSinksDuplicateAndRemoval)
   channel->removeDataSink(sinks.front());
   channel->removeDataSink(sinks.front());
   ASSERT_TRUE(channel->takeSnapshot());
-  sinks.front()->processQueuedSnapshots();
+  sinks.front().drain();
   EXPECT_EQ(sinks.front()->snapshots.size(), 1u);
   EXPECT_EQ(channel->getNumberOfSinks(), 7u);
 }
@@ -205,7 +209,7 @@ TEST(ChannelControl, FirstCallWithoutSinksFreezesSchema)
 TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
 {
   auto channel = LogChannel::create("control");
-  auto sink = std::make_shared<ControlSink>();
+  auto sink = controlSink();
   auto value = std::make_unique<uint64_t>(42);
   auto id = channel->registerValue("value", value.get());
   channel->addDataSink(sink);
@@ -215,7 +219,7 @@ TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
   channel->setEnabled(id, true);
   EXPECT_FALSE(channel->sharedState()->isEnabled(id.first_index));
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->processQueuedSnapshots();
+  sink.drain();
   EXPECT_FALSE(GetBit(sink->snapshots.back().active_mask, 0));
   EXPECT_TRUE(sink->snapshots.back().payload.empty());
   EXPECT_EQ(channel->getActiveFlags(), sink->snapshots.back().active_mask);
@@ -226,14 +230,14 @@ TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
   auto next = channel->registerValue("value", &replacement);
   EXPECT_EQ(next.first_index, id.first_index);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->processQueuedSnapshots();
+  sink.drain();
   checkPayloads(*sink, 1);
 }
 
 TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
 {
   auto channel = LogChannel::create("control");
-  auto sink = std::make_shared<ControlSink>();
+  auto sink = controlSink();
   auto value = std::make_unique<CustomValue>();
   auto serializer = std::make_shared<PausedSerializer>();
   auto id = channel->registerCustomValue("value", value.get(), serializer);
@@ -262,7 +266,7 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
   serializer->gate = nullptr;
   channel->setEnabled(id, true);
   EXPECT_TRUE(channel->takeSnapshot());
-  sink->processQueuedSnapshots();
+  sink.drain();
   EXPECT_FALSE(GetBit(sink->snapshots.back().active_mask, 0));
   EXPECT_TRUE(sink->snapshots.back().payload.empty());
 }
@@ -270,13 +274,13 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
 TEST(ChannelControl, BlockedAddChannelDoesNotBlockExistingSnapshots)
 {
   auto channel = LogChannel::create("control");
-  auto existing = std::make_shared<ControlSink>();
+  auto existing = controlSink();
   uint64_t value = 42;
   channel->registerValue("value", &value);
   channel->addDataSink(existing);
   ASSERT_TRUE(channel->takeSnapshot());
   Gate gate;
-  auto added = std::make_shared<ControlSink>();
+  auto added = controlSink();
   added->add_gate = &gate;
   auto add = std::async(std::launch::async, [&] { channel->addDataSink(added); });
   EXPECT_TRUE(gate.wait());
@@ -285,10 +289,10 @@ TEST(ChannelControl, BlockedAddChannelDoesNotBlockExistingSnapshots)
   gate.release();
   add.get();
   EXPECT_TRUE(snapshot.get());
-  existing->processQueuedSnapshots();
+  existing.drain();
   EXPECT_EQ(existing->snapshots.size(), 2u);
   EXPECT_TRUE(channel->takeSnapshot());
-  added->processQueuedSnapshots();
+  added.drain();
   EXPECT_EQ(added->registrations, 1u);
   EXPECT_FALSE(added->snapshots.empty());
 }
@@ -299,7 +303,7 @@ TEST(ChannelControl, BlockedAddChannelDoesNotBlockExistingSnapshots)
 TEST(ChannelControl, RemovalWaitsForPausedReaderAndReferencesSurvive)
 {
   auto channel = LogChannel::create("control");
-  auto sink = std::make_shared<ControlSink>();
+  auto sink = controlSink();
   CustomValue value;
   auto serializer = std::make_shared<PausedSerializer>();
   channel->registerCustomValue("value", &value, serializer);
@@ -317,21 +321,20 @@ TEST(ChannelControl, RemovalWaitsForPausedReaderAndReferencesSurvive)
   EXPECT_EQ(channel->getNumberOfSinks(), 0u);
   channel.reset();
   SnapshotRef retained;
-  sink->on_store = [&] { retained = sink->retainSnapshot(); };
-  sink->processQueuedSnapshots();
+  sink->on_store = [&](const SnapshotRef& ref) { retained = ref.clone(); };
+  sink.drain();
   EXPECT_EQ(sink->snapshots.size(), 2u);
   checkPayloads(*sink, 1);
-  sink.reset();
+  sink.worker.reset();
   ASSERT_TRUE(retained);
-  EXPECT_EQ(retained->channel_name, "control");
   EXPECT_EQ(retained->payload.size(), 8u);
 }
 
 TEST(ChannelControl, FailedFreezeRetriesAllLinksAndStillFreezesSchema)
 {
   auto channel = LogChannel::create("control");
-  auto good = std::make_shared<ControlSink>();
-  auto failing = std::make_shared<ControlSink>();
+  auto good = controlSink();
+  auto failing = controlSink();
   uint64_t value = 42;
   channel->registerValue("value", &value);
   channel->addDataSink(failing);
@@ -343,13 +346,13 @@ TEST(ChannelControl, FailedFreezeRetriesAllLinksAndStillFreezesSchema)
   EXPECT_TRUE(channel->takeSnapshot());
   EXPECT_EQ(good->registrations, 1u);
   EXPECT_EQ(failing->registrations, 1u);
-  auto rejected = std::make_shared<ControlSink>();
+  auto rejected = controlSink();
   rejected->reject_schema = true;
   EXPECT_THROW(channel->addDataSink(rejected), std::runtime_error);
   EXPECT_EQ(channel->getNumberOfSinks(), 2u);
   EXPECT_TRUE(channel->takeSnapshot());
-  good->processQueuedSnapshots();
-  failing->processQueuedSnapshots();
+  good.drain();
+  failing.drain();
   EXPECT_EQ(good->snapshots.size(), 2u);
   EXPECT_EQ(failing->snapshots.size(), 2u);
 }
@@ -357,7 +360,7 @@ TEST(ChannelControl, FailedFreezeRetriesAllLinksAndStillFreezesSchema)
 TEST(ChannelControl, RejectedCustomRegistrationDoesNotMutateFrozenSchema)
 {
   auto channel = LogChannel::create("control");
-  auto sink = std::make_shared<ControlSink>();
+  auto sink = controlSink();
   RegisteredCustom value;
   auto id = channel->registerValue("value", &value);
   channel->addDataSink(sink);
@@ -380,8 +383,8 @@ TEST(ChannelControl, RejectedCustomRegistrationDoesNotMutateFrozenSchema)
 TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
 {
   auto channel = LogChannel::create("control");
-  auto stable = std::make_shared<ControlSink>();
-  auto changing = std::make_shared<ControlSink>();
+  auto stable = controlSink();
+  auto changing = controlSink();
   auto logged = channel->createLoggedValue<uint64_t>("logged", 42);
   RegisteredCustom value;
   auto custom_id = channel->registerValue("custom", &value);
@@ -420,14 +423,14 @@ TEST(ChannelControl, ConcurrentChurnTogglesAndSinkChangesPreservePayloads)
   do
   {
     channel->takeSnapshot();
-    stable->processQueuedSnapshots();
-    changing->processQueuedSnapshots();
+    stable.drain();
+    changing.drain();
   } while(!done);
   control.join();
   second_control.join();
   toggler.join();
-  stable->processQueuedSnapshots();
-  changing->processQueuedSnapshots();
+  stable.drain();
+  changing.drain();
   checkPayloads(*stable, 3);
   checkPayloads(*changing, 3);
   EXPECT_FALSE(stable->snapshots.empty());
@@ -438,23 +441,23 @@ TEST(ChannelControl, SerializerExceptionsLeaveEpochAndPoolReusable)
   for(bool size_pass : { false, true })
   {
     auto channel = LogChannel::create("control");
-    auto sink = std::make_shared<ControlSink>();
+    auto sink = controlSink();
     CustomValue value;
     auto serializer = std::make_shared<PausedSerializer>();
     auto id = channel->registerCustomValue("value", &value, serializer);
     channel->addDataSink(sink);
     channel->setPoolCapacity(1);  // a slot leaked by the throw would fail the next call
     ASSERT_TRUE(channel->takeSnapshot());
-    sink->processQueuedSnapshots();
+    sink.drain();
     serializer->throw_size = size_pass;
     serializer->throw_serialize = !size_pass;
     EXPECT_THROW(channel->takeSnapshot(), std::runtime_error);
     serializer->throw_size = serializer->throw_serialize = false;
     EXPECT_TRUE(channel->takeSnapshot());
-    sink->processQueuedSnapshots();
+    sink.drain();
     channel->unregister(id);
     EXPECT_TRUE(channel->takeSnapshot());
-    sink->processQueuedSnapshots();
+    sink.drain();
     EXPECT_EQ(channel->poolExhausted(), 0u);
     EXPECT_EQ(sink->snapshots.size(), 3u);
     checkPayloads(*sink, 1);
@@ -464,7 +467,7 @@ TEST(ChannelControl, SerializerExceptionsLeaveEpochAndPoolReusable)
 TEST(ChannelControl, ExhaustedPoolDoesNotCallSerializer)
 {
   auto channel = LogChannel::create("control");
-  auto sink = std::make_shared<ControlSink>();
+  auto sink = controlSink();
   CustomValue value;
   auto serializer = std::make_shared<PausedSerializer>();
   channel->registerCustomValue("value", &value, serializer);

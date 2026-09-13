@@ -1,6 +1,7 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
+#include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 
@@ -22,8 +23,8 @@ TEST(DataTamerBasic, BasicTypes)
 
 TEST(DataTamerBasic, SinkAdd)
 {
-  auto dummy_sink_A = std::make_shared<DummySink>();
-  auto dummy_sink_B = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink_A;
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink_B;
 
   ChannelsRegistry registry;
   registry.addDefaultSink(dummy_sink_A);
@@ -42,8 +43,8 @@ TEST(DataTamerBasic, SinkAdd)
     channel->takeSnapshot();
   }
 
-  dummy_sink_A->flush();
-  dummy_sink_B->flush();
+  dummy_sink_A.drain();
+  dummy_sink_B.drain();
 
   const auto hash = channel->getSchema().hash;
 
@@ -89,7 +90,7 @@ TEST(DataTamerBasic, SerializeVariant)
 TEST(DataTamerBasic, TestRegistration)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   double v1 = 69.0;
@@ -114,7 +115,7 @@ TEST(DataTamerBasic, TestRegistration)
   id_v2 = channel->registerValue("v2", &v2_bis);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   // changing the pointer after takeSnapshot is valid
   channel->unregister(id_i2);
@@ -134,7 +135,7 @@ TEST(DataTamerBasic, TestRegistration)
   channel->setEnabled(id_i1, false);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   // payload should contain v2, and i2
   auto reduced_size = sizeof(double) + sizeof(int32_t);
@@ -146,7 +147,7 @@ TEST(DataTamerBasic, TestRegistration)
   channel->setEnabled(id_i1, true);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 }
@@ -154,7 +155,7 @@ TEST(DataTamerBasic, TestRegistration)
 TEST(DataTamerBasic, Vector)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   std::vector<float> vect = { 1, 2, 3, 4 };
@@ -164,14 +165,14 @@ TEST(DataTamerBasic, Vector)
   const auto expected_size = 4 * sizeof(float) + sizeof(uint32_t);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
 }
 
 TEST(DataTamerBasic, Disable)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   double v1 = 11;
@@ -194,14 +195,14 @@ TEST(DataTamerBasic, Disable)
                          3 * sizeof(double) + 4 * sizeof(float) + sizeof(uint32_t);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), expected_size);
   ASSERT_EQ(sink->latestActiveMask()[0], 0b11111111);
 
   auto checkSize = [&](const auto& id, size_t size) {
     channel->setEnabled(id, false);
     channel->takeSnapshot();
-    sink->flush();
+    sink.drain();
     channel->setEnabled(id, true);
 
     size_t expected = expected_size - size;
@@ -233,16 +234,15 @@ TEST(DataTamerBasic, Disable)
 TEST(DataTamerBasic, VectorWithChangingSize)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   std::vector<float> vect = { 1, 2, 3, 4 };
   channel->registerValue("vect", &vect);
 
   channel->takeSnapshot();
-  sink->flush();
-  ASSERT_EQ(sink->latestPayloadSize(),
-            vect.size() * sizeof(float) + sizeof(uint32_t));
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 
   // if we push more elements into the vector, it should
   // work, even if there is a new allocation of memory
@@ -252,17 +252,15 @@ TEST(DataTamerBasic, VectorWithChangingSize)
   }
 
   channel->takeSnapshot();
-  sink->flush();
-  ASSERT_EQ(sink->latestPayloadSize(),
-            vect.size() * sizeof(float) + sizeof(uint32_t));
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 
   // same is the vector size is reduced
   vect.resize(5);
 
   channel->takeSnapshot();
-  sink->flush();
-  ASSERT_EQ(sink->latestPayloadSize(),
-            vect.size() * sizeof(float) + sizeof(uint32_t));
+  sink.drain();
+  ASSERT_EQ(sink->latestPayloadSize(), vect.size() * sizeof(float) + sizeof(uint32_t));
 }
 
 TEST(DataTamerBasic, LockedPtr)
@@ -301,7 +299,7 @@ TEST(DataTamerBasic, FinishQueue)
   auto const temp_path =
       std::filesystem::temp_directory_path() / std::filesystem::path("data_tamer_test."
                                                                      "mcap");
-  auto sink = std::make_shared<MCAPSink>(temp_path.string());
+  DataTamerTest::Attached<MCAPSink> sink(temp_path.string());
   channel->addDataSink(sink);
 
   double const value = 1.;
@@ -309,13 +307,15 @@ TEST(DataTamerBasic, FinishQueue)
 
   EXPECT_TRUE(channel->takeSnapshot());
 
-  sink->finishQueueAndStop();
+  sink.worker->stop();
+  sink->stopRecording();
 
   // now we shouldn't be able to take more snapshots
   EXPECT_FALSE(channel->takeSnapshot());
 
   // restart the recording
   sink->restartRecording(temp_path);
+  sink.worker->start();
 
   EXPECT_TRUE(channel->takeSnapshot());
 

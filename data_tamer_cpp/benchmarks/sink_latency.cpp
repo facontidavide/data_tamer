@@ -30,27 +30,20 @@ std::chrono::nanoseconds steadyNow()
       std::chrono::steady_clock::now().time_since_epoch());
 }
 
-class LatencySink : public DataSinkBase
+class LatencySink : public DataSink
 {
 public:
   LatencySink() { latencies_.reserve(kSnapshots); }
-  ~LatencySink() override { finish(); }
 
-  void addChannel(const std::string&, const Schema&) override {}
+  void onSchema(const Schema&) override {}
 
-  void finish()
-  {
-    stopThread();
-    processQueuedSnapshots();
-  }
-
+  /// Valid once the owning SinkWorker has been stopped.
   std::vector<int64_t>& latencies() { return latencies_; }
 
 protected:
-  bool storeSnapshot(const Snapshot& snapshot) override
+  void onSnapshot(const SnapshotRef& snapshot) override
   {
-    latencies_.push_back((steadyNow() - snapshot.timestamp).count());
-    return true;
+    latencies_.push_back((steadyNow() - snapshot->timestamp).count());
   }
 
 private:
@@ -115,7 +108,7 @@ bool readCpuTicks(uint64_t& ticks)
 
 int measureIdle()
 {
-  auto sink = std::make_shared<LatencySink>();
+  auto sink = SinkWorker::create<LatencySink>();
 #ifdef __linux__
   uint64_t before = 0;
   uint64_t after = 0;
@@ -134,7 +127,7 @@ int measureIdle()
     std::fprintf(stderr, "failed to read process CPU ticks\n");
     return 1;
   }
-  sink->finish();
+  sink->stop();
 
   const double elapsed = std::chrono::duration<double>(end - start).count();
   const uint64_t ticks = after - before;
@@ -144,7 +137,7 @@ int measureIdle()
               static_cast<unsigned long long>(ticks), ticks_per_second, elapsed,
               cpu_percent);
 #else
-  sink->finish();
+  sink->stop();
   std::printf("idle CPU measurement unavailable on this platform\n");
 #endif
   return 0;
@@ -153,7 +146,7 @@ int measureIdle()
 int measureDelivery()
 {
   auto channel = LogChannel::create("sink_latency");
-  auto sink = std::make_shared<LatencySink>();
+  auto sink = SinkWorker::create<LatencySink>();
   channel->addDataSink(sink);
   uint64_t value = 0;
   channel->registerValue("value", &value);
@@ -176,10 +169,10 @@ int measureDelivery()
     }
   }
 
-  sink->finish();
+  sink->stop();
   std::printf("sink_latency snapshots=%zu rate_hz=1000\n", kSnapshots);
   std::printf("submissions successful=%zu failed=%zu\n", successful, failed);
-  printLatencies(sink->latencies());
+  printLatencies(sink->as<LatencySink>().latencies());
   return 0;
 }
 }  // namespace

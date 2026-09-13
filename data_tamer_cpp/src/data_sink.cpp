@@ -3,8 +3,6 @@
 #include "ConcurrentQueue/blockingconcurrentqueue.h"
 
 #include <atomic>
-#include <cassert>
-#include <cstdio>
 #include <exception>
 #include <mutex>
 #include <new>
@@ -20,29 +18,128 @@ struct QueueTraits : moodycamel::ConcurrentQueueDefaultTraits
   static void free(void* pointer) { ::operator delete(pointer); }
 };
 
-// Only the queue-dispatched callback on this thread may retain current_ref.
-thread_local const DataSinkBase* callback_sink = nullptr;
 constexpr uint64_t kClosed = uint64_t{ 1 } << 63;
 }  // namespace
 
-struct DataSinkBase::Pimpl
+//---------------- SnapshotRef ----------------
+
+SnapshotRef::SnapshotRef(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot)
+  : pool_(std::move(pool)), slot_(slot)
+{}
+
+SnapshotRef::SnapshotRef(SnapshotRef&& other) noexcept
+  : pool_(std::move(other.pool_)), slot_(other.slot_)
+{
+  other.slot_ = nullptr;
+}
+
+SnapshotRef& SnapshotRef::operator=(SnapshotRef&& other) noexcept
+{
+  if(this != &other)
+  {
+    reset();
+    pool_ = std::move(other.pool_);
+    slot_ = other.slot_;
+    other.slot_ = nullptr;
+  }
+  return *this;
+}
+
+SnapshotRef::~SnapshotRef()
+{
+  reset();
+}
+
+SnapshotRef SnapshotRef::clone() const
+{
+  if(slot_)
+  {
+    SnapshotPool::addRef(slot_);
+  }
+  return SnapshotRef(pool_, slot_);
+}
+
+void SnapshotRef::reset()
+{
+  if(slot_)
+  {
+    SnapshotPool::release(slot_);
+    slot_ = nullptr;
+  }
+  pool_.reset();
+}
+
+const Snapshot& SnapshotRef::operator*() const
+{
+  return slot_->snapshot;
+}
+
+const Snapshot* SnapshotRef::operator->() const
+{
+  return &slot_->snapshot;
+}
+
+//---------------- SinkWorker ----------------
+
+struct SinkWorker::Pimpl
 {
   explicit Pimpl(size_t capacity) : queue(capacity) {}
 
-  void deliver(DataSinkBase* self)
+  // Caller holds store_mutex.
+  void deliver(DataSink& sink)
   {
-    const auto previous = callback_sink;
-    callback_sink = self;
     try
     {
-      self->storeSnapshot(*current_ref);
+      sink.onSnapshot(current_ref);
+    }
+    catch(const std::exception& e)
+    {
+      recordError(e.what());
     }
     catch(...)
     {
-      store_errors.fetch_add(1, std::memory_order_relaxed);
+      recordError("unknown exception");
     }
-    callback_sink = previous;
     current_ref.reset();
+  }
+
+  void recordError(const char* what)
+  {
+    errors.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard lock(error_mutex);
+    last_error = what;
+  }
+
+  void startThread(DataSink& sink)
+  {
+    thread = std::jthread([this, &sink](std::stop_token stop) {
+      while(!stop.stop_requested())
+      {
+        std::unique_lock handoff(handoff_mutex);
+        std::unique_lock lock(store_mutex);
+        handoff.unlock();
+        if(stop.stop_requested())
+          break;
+        if(queue.wait_dequeue_timed(current_ref, std::chrono::milliseconds(50)))
+        {
+          // Drain everything already queued under the mutex we hold; one
+          // lock round-trip per wake-up instead of one per snapshot.
+          do
+          {
+            deliver(sink);
+          } while(queue.try_dequeue(current_ref));
+        }
+      }
+    });
+  }
+
+  void joinThread()
+  {
+    if(thread.joinable())
+    {
+      thread.request_stop();
+      thread.join();
+    }
   }
 
   moodycamel::BlockingConcurrentQueue<SnapshotRef, QueueTraits> queue;
@@ -52,49 +149,32 @@ struct DataSinkBase::Pimpl
   std::mutex store_mutex;
   SnapshotRef current_ref;
   std::atomic<uint64_t> admission{ 0 };
-  std::atomic<uint64_t> store_errors{ 0 };
+  std::atomic<uint64_t> errors{ 0 };
+  std::mutex error_mutex;
+  std::string last_error;
   std::jthread thread;  // its stop token replaces a run flag
+  Delivery delivery = Delivery::Threaded;
 };
 
-DataSinkBase::DataSinkBase(size_t queue_capacity) : _p(new Pimpl(queue_capacity))
+SinkWorker::SinkWorker(std::unique_ptr<DataSink> sink, size_t queue_capacity,
+                       Delivery delivery)
+  : _p(new Pimpl(queue_capacity)), _sink(std::move(sink))
 {
-  // _p and all its members must exist before the worker can observe them.
-  _p->thread = std::jthread([this](std::stop_token stop) {
-    while(!stop.stop_requested())
-    {
-      std::unique_lock handoff(_p->handoff_mutex);
-      std::unique_lock lock(_p->store_mutex);
-      handoff.unlock();
-      if(stop.stop_requested())
-        break;
-      if(_p->queue.wait_dequeue_timed(_p->current_ref, std::chrono::milliseconds(50)))
-      {
-        // Drain everything already queued under the mutex we hold; one
-        // lock round-trip per wake-up instead of one per snapshot.
-        do
-        {
-          _p->deliver(this);
-        } while(_p->queue.try_dequeue(_p->current_ref));
-      }
-    }
-  });
-}
-
-DataSinkBase::~DataSinkBase()
-{
-  if(_p->thread.joinable())
+  if(!_sink)
+    throw std::invalid_argument("SinkWorker: null sink");
+  _p->delivery = delivery;
+  if(delivery == Delivery::Threaded)
   {
-    // Construction unwinding must preserve the original exception.
-    if(std::uncaught_exceptions() == 0)
-    {
-      std::fputs("DataSinkBase: derived destructor must call stopThread()\n", stderr);
-      assert(false && "derived destructor must call stopThread()");
-    }
-    stopThread();
+    _p->startThread(*_sink);
   }
 }
 
-std::unique_ptr<moodycamel::ProducerToken> DataSinkBase::makeProducerToken()
+SinkWorker::~SinkWorker()
+{
+  stop();
+}
+
+std::unique_ptr<moodycamel::ProducerToken> SinkWorker::makeProducerToken()
 {
   auto token = std::make_unique<moodycamel::ProducerToken>(_p->queue);
   if(!token->valid())
@@ -102,17 +182,17 @@ std::unique_ptr<moodycamel::ProducerToken> DataSinkBase::makeProducerToken()
   return token;
 }
 
-bool DataSinkBase::tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snapshot)
+bool SinkWorker::tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snapshot)
 {
   // Announce first, check second: a transient increment on a closed sink is
-  // withdrawn at once, and stopAcceptingSnapshots() waits for it like any other.
+  // withdrawn at once, and stop() waits for it like any other.
   struct AdmissionGuard
   {
     std::atomic<uint64_t>& admission;
     ~AdmissionGuard()
     {
       admission.fetch_sub(1, std::memory_order_release);
-      admission.notify_all();  // cheap when nobody waits; wakes stopAcceptingSnapshots()
+      admission.notify_all();  // cheap when nobody waits; wakes stop()
     }
   } guard{ _p->admission };
   if(_p->admission.fetch_add(1, std::memory_order_acq_rel) & kClosed)
@@ -121,7 +201,14 @@ bool DataSinkBase::tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snaps
   return _p->queue.try_enqueue(token, std::move(snapshot));
 }
 
-void DataSinkBase::stopAcceptingSnapshots()
+void SinkWorker::addSchema(const Schema& schema)
+{
+  std::lock_guard handoff(_p->handoff_mutex);
+  std::lock_guard lock(_p->store_mutex);
+  _sink->onSchema(schema);
+}
+
+void SinkWorker::stop()
 {
   _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
   // Wait until every admitted enqueue has finished: block on the counter instead
@@ -131,44 +218,38 @@ void DataSinkBase::stopAcceptingSnapshots()
   {
     _p->admission.wait(state, std::memory_order_acquire);
   }
+  _p->joinThread();
+  drain();
 }
 
-void DataSinkBase::startAcceptingSnapshots()
+void SinkWorker::start()
 {
+  if(_p->delivery == Delivery::Threaded && !_p->thread.joinable())
+  {
+    _p->startThread(*_sink);
+  }
   _p->admission.fetch_and(~kClosed, std::memory_order_release);
 }
 
-void DataSinkBase::processQueuedSnapshots()
+void SinkWorker::drain()
 {
   std::lock_guard handoff(_p->handoff_mutex);
   std::lock_guard lock(_p->store_mutex);
   while(_p->queue.try_dequeue(_p->current_ref))
   {
-    _p->deliver(this);
+    _p->deliver(*_sink);
   }
 }
 
-void DataSinkBase::stopThread()
+uint64_t SinkWorker::errors() const
 {
-  if(_p->thread.joinable())
-  {
-    _p->thread.request_stop();
-    _p->thread.join();
-  }
+  return _p->errors.load(std::memory_order_relaxed);
 }
 
-uint64_t DataSinkBase::storeErrors() const
+std::string SinkWorker::lastError() const
 {
-  return _p->store_errors.load(std::memory_order_relaxed);
-}
-
-SnapshotRef DataSinkBase::retainSnapshot() const
-{
-  assert(callback_sink == this && "retainSnapshot is only valid inside a queued "
-                                  "callback");
-  if(callback_sink != this)
-    return {};
-  return _p->current_ref.clone();
+  std::lock_guard lock(_p->error_mutex);
+  return _p->last_error;
 }
 
 }  // namespace DataTamer

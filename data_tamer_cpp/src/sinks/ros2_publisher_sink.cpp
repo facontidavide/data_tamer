@@ -2,7 +2,6 @@
 #include "data_tamer_msgs/msg/schemas.hpp"
 #include "data_tamer_msgs/msg/snapshot.hpp"
 
-#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -16,8 +15,8 @@ struct ROS2PublisherSink::Pimpl
     : node_interface(std::move(node_interface))
   {}
 
-  std::unordered_map<std::string, Schema> schemas;
-  std::mutex schema_mutex;
+  // onSchema/onSnapshot are serialized by the SinkWorker: no lock needed.
+  std::unordered_map<uint64_t, Schema> schemas;
 
   rclcpp::Publisher<data_tamer_msgs::msg::Schemas>::SharedPtr schema_publisher;
   rclcpp::Publisher<data_tamer_msgs::msg::Snapshot>::SharedPtr data_publisher;
@@ -34,10 +33,7 @@ ROS2PublisherSink::ROS2PublisherSink(PublisherNodeInterfaces node_interface,
   create_publishers(topic_prefix);
 }
 
-ROS2PublisherSink::~ROS2PublisherSink()
-{
-  stopThread();
-}
+ROS2PublisherSink::~ROS2PublisherSink() = default;
 
 void ROS2PublisherSink::create_publishers(const std::string& topic_prefix)
 {
@@ -53,46 +49,41 @@ void ROS2PublisherSink::create_publishers(const std::string& topic_prefix)
       _p->node_interface, topic_prefix + "/data", data_qos);
 }
 
-void ROS2PublisherSink::addChannel(const std::string& channel_name, const Schema& schema)
+void ROS2PublisherSink::onSchema(const Schema& schema)
 {
-  std::scoped_lock lk(_p->schema_mutex);
-  _p->schemas[channel_name] = schema;
+  _p->schemas[schema.hash] = schema;
   _p->schema_changed = true;
 }
 
-bool ROS2PublisherSink::storeSnapshot(const Snapshot& snapshot)
+void ROS2PublisherSink::onSnapshot(const SnapshotRef& ref)
 {
   // send the schemas, if you haven't yet.
+  if(_p->schema_changed)
   {
-    std::scoped_lock lk(_p->schema_mutex);
-    if(_p->schema_changed)
+    data_tamer_msgs::msg::Schemas msg;
+    msg.schemas.reserve(_p->schemas.size());
+
+    for(const auto& [hash, schema] : _p->schemas)
     {
-      data_tamer_msgs::msg::Schemas msg;
-      msg.schemas.reserve(_p->schemas.size());
+      data_tamer_msgs::msg::Schema schema_msg;
+      schema_msg.hash = hash;
+      schema_msg.channel_name = schema.channel_name;
+      std::ostringstream ss;
+      ss << schema;
+      schema_msg.schema_text = ss.str();
 
-      for(const auto& [channel_name, schema] : _p->schemas)
-      {
-        data_tamer_msgs::msg::Schema schema_msg;
-        schema_msg.hash = schema.hash;
-        schema_msg.channel_name = channel_name;
-        std::ostringstream ss;
-        ss << schema;
-        schema_msg.schema_text = ss.str();
-
-        msg.schemas.push_back(std::move(schema_msg));
-      }
-      _p->schema_publisher->publish(msg);
-      _p->schema_changed = false;  // only once published; a throw leaves it pending
+      msg.schemas.push_back(std::move(schema_msg));
     }
+    _p->schema_publisher->publish(msg);
+    _p->schema_changed = false;  // only once published; a throw leaves it pending
   }
   //----------------------------------------
+  const Snapshot& snapshot = *ref;
   _p->data_msg.timestamp_nsec = uint64_t(snapshot.timestamp.count());
   _p->data_msg.schema_hash = snapshot.schema_hash;
   _p->data_msg.active_mask = snapshot.active_mask;
   _p->data_msg.payload = snapshot.payload;
   _p->data_publisher->publish(_p->data_msg);
-
-  return true;
 }
 
 }  // namespace DataTamer

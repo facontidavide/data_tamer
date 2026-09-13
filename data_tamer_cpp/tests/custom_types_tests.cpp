@@ -2,6 +2,7 @@
 #include "data_tamer/sinks/dummy_sink.hpp"
 
 #include "../examples/geometry_types.hpp"
+#include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 
@@ -42,7 +43,7 @@ std::string_view TypeDefinition(TestType& obj, AddField& add)
 TEST(DataTamerCustom, Registration)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   Pose poseA;
@@ -64,7 +65,7 @@ TEST(DataTamerCustom, Registration)
 TEST(DataTamerCustom, CustomType1)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   Pose pose = { { 1, 2, 3 }, { 4, 5, 6, 7 } };
@@ -75,7 +76,7 @@ TEST(DataTamerCustom, CustomType1)
   channel->registerValue("test_value", &my_test);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   auto expected_size = sizeof(Pose) + sizeof(double) + sizeof(int32_t) +
                        sizeof(uint32_t) + 4 * sizeof(Point3D) + sizeof(TestType::Color) +
@@ -137,7 +138,7 @@ TEST(DataTamerCustom, CustomType1)
 TEST(DataTamerCustom, CustomType2)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   std::array<Point3D, 2> points;
@@ -147,7 +148,7 @@ TEST(DataTamerCustom, CustomType2)
   channel->registerValue("quats", &quats);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   auto expected_size = 2 * sizeof(Point3D) + 3 * sizeof(Quaternion) + sizeof(uint32_t);
 
@@ -221,7 +222,7 @@ public:
 TEST(DataTamerCustom, CustomType3)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   auto serializer = std::make_shared<Pos2D_Serializer>();
@@ -240,7 +241,7 @@ TEST(DataTamerCustom, CustomType3)
   channel->registerCustomValue("v3", &v3, serializer);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   const auto expected_size = 6 * sizeof(Pos2D) + sizeof(uint32_t);
 
@@ -272,14 +273,14 @@ TEST(DataTamerCustom, CustomType3)
 TEST(DataTamerCustom, RegisterConstMethods)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
 
   PseudoEigen::Vector2d vect = { 1, 2 };
   channel->registerValue("vect", &vect);
 
   channel->takeSnapshot();
-  sink->flush();
+  sink.drain();
 
   const auto expected_size = 2 * sizeof(double);
 
@@ -335,12 +336,12 @@ std::string_view TypeDefinition(Chassis& c, AddField& add)
 TEST(DataTamerCustom, FixedSizeOfNestedFixedArraysMatchesPayload)
 {
   auto channel = LogChannel::create("chan");
-  auto sink = std::make_shared<DummySink>();
+  DataTamerTest::Attached<DataTamer::DummySink> sink;
   channel->addDataSink(sink);
   Chassis chassis;
   channel->registerValue("chassis", &chassis);
   ASSERT_TRUE(channel->takeSnapshot());
-  sink->flush();
+  sink.drain();
   const size_t expected = 4 * (3 * sizeof(double) + 2 * sizeof(int32_t)) + sizeof(double);
   EXPECT_EQ(sink->latestPayloadSize(), expected);
 }

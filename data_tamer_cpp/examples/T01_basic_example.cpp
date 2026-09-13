@@ -8,7 +8,7 @@ int main()
 
   // start defining one or more Sinks that must be added by default.
   // Do addDefaultSink BEFORE creating a channel.
-  auto dummy_sink = std::make_shared<DummySink>();
+  auto dummy_sink = DummySink::create();
   ChannelsRegistry::Global().addDefaultSink(dummy_sink);
 
   // Create (or get) a channel using the global registry (singleton)

@@ -11,7 +11,7 @@ namespace DataTamer
 struct ChannelsRegistry::Pimpl
 {
   std::unordered_map<std::string, std::shared_ptr<LogChannel>> channels;
-  std::unordered_set<std::shared_ptr<DataSinkBase>> default_sinks;
+  std::unordered_set<std::shared_ptr<SinkWorker>> default_sinks;
   Mutex mutex;
 };
 
@@ -25,7 +25,7 @@ ChannelsRegistry& ChannelsRegistry::Global()
   return obj;
 }
 
-void ChannelsRegistry::addDefaultSink(std::shared_ptr<DataSinkBase> sink)
+void ChannelsRegistry::addDefaultSink(std::shared_ptr<SinkWorker> sink)
 {
   if(!sink)
     throw std::invalid_argument("addDefaultSink: null sink");

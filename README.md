@@ -34,7 +34,9 @@ DataTamer will forward the collected data to 1 or multiple **sinks**;
 a sink may save the information immediately in a file (currently, we support [MCAP](https://mcap.dev/))
 or publish it using an inter-process communication, for instance, a ROS2 publisher.
 
-You can easily create your own, specialized sinks.
+You can easily create your own, specialized sinks: implement `DataTamer::DataSink`
+(two callbacks, `onSchema` and `onSnapshot`) and wrap it with `SinkWorker::create<MySink>()`,
+which owns the delivery queue and thread. See `data_tamer/sinks/dummy_sink.hpp` for a small one.
 
 Use [PlotJuggler](https://github.com/facontidavide/PlotJuggler) to
 visualize your logs offline or in real-time.
@@ -95,7 +97,7 @@ Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst); measurements in
 int main()
 {
   // Multiple channels can use this sink. Data will be saved in mylog.mcap
-  auto mcap_sink = std::make_shared<DataTamer::MCAPSink>("mylog.mcap");
+  auto mcap_sink = DataTamer::MCAPSink::create("mylog.mcap");
 
   // Create a channel and attach a sink. A channel can have multiple sinks
   auto channel = DataTamer::LogChannel::create("my_channel");
@@ -178,7 +180,7 @@ std::string_view TypeDefinition(Point3D& point, AddField& add) {
 int main()
 {
   auto channel = DataTamer::LogChannel::create("my_channel");
-  channel->addDataSink(std::make_shared<DataTamer::MCAPSink>("mylog.mcap"));
+  channel->addDataSink(DataTamer::MCAPSink::create("mylog.mcap"));
 
   // Array/vectors are supported natively
   std::vector<double> values = {1, 2, 3, 4};

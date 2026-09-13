@@ -7,6 +7,7 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
+#include "test_sinks.hpp"
 #include "../examples/geometry_types.hpp"
 
 #include <mcap/reader.hpp>
@@ -41,17 +42,6 @@ std::string_view TypeDefinition(StampedPose& p, AddField& add)
   return "Pose";
 }
 
-// Sinks without a worker thread, so delivery happens exactly when the test drains
-// them: no race between the worker and finishQueueAndStop(), deterministic order.
-struct SyncSink : DummySink
-{
-  SyncSink() { stopThread(); }
-};
-struct SyncMcap : MCAPSink
-{
-  explicit SyncMcap(const std::string& path) : MCAPSink(path, false) { stopThread(); }
-};
-
 const std::string kDir = DATA_TAMER_WIRE_FORMAT_DIR;
 
 std::vector<uint8_t> readFile(const std::string& name)
@@ -85,8 +75,9 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
        ("data_tamer_wire_format_" + std::to_string(::getpid()) + ".mcap"))
           .string();
   auto channel = LogChannel::create("wire_test");
-  auto sink = std::make_shared<SyncSink>();
-  auto mcap = std::make_shared<SyncMcap>(mcap_path);
+  // Manual delivery: snapshots reach the sinks exactly when the test drains them.
+  auto sink = DataTamerTest::manual<DummySink>();
+  auto mcap = DataTamerTest::manual<MCAPSink>(mcap_path, false);
   channel->addDataSink(sink);
   channel->addDataSink(mcap);
 
@@ -130,7 +121,7 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
 
   const std::chrono::nanoseconds stamp(1234567890);
   ASSERT_TRUE(channel->takeSnapshot(stamp));
-  sink->flush();
+  sink.drain();
   const Snapshot full = sink->latestSnapshot();
 
   const std::string schema_text = ToStr(channel->getSchema());
@@ -144,13 +135,14 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   channel->setEnabled(id_i16, false);
   channel->setEnabled(id_pose, false);
   ASSERT_TRUE(channel->takeSnapshot(stamp));
-  sink->flush();
+  sink.drain();
   const Snapshot masked = sink->latestSnapshot();
   checkGolden("snapshot_masked.mask", masked.active_mask);
   checkGolden("snapshot_masked.payload", masked.payload);
 
   // The MCAP records MCAPSink actually wrote: schema, channel and message bodies.
-  mcap->finishQueueAndStop();
+  mcap.worker->stop();
+  mcap->stopRecording();
   mcap::McapReader reader;
   ASSERT_TRUE(reader.open(mcap_path).ok());
   std::vector<std::vector<uint8_t>> bodies;

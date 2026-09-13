@@ -46,6 +46,6 @@ std::string_view TypeDefinition(Probe& p, AddField& add)
   auto logged = channel->createLoggedValue<double>("logged");
   logged->set(1.0);
   auto tx = channel->scopedWrite();
-  channel->addDataSink(std::make_shared<DataTamer::DummySink>());
+  channel->addDataSink(DataTamer::DummySink::create());
 }
 }  // namespace
