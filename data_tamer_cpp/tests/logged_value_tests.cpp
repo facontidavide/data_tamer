@@ -59,7 +59,7 @@ TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
   DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<double>("v", 1.0);
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   {
@@ -72,7 +72,7 @@ TEST(LoggedValue, ScalarSetIsSeenBySnapshotAndDoesNotAllocate)
   }
   ASSERT_EQ(v->get(), 999.0);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   const auto snap = sink->latestSnapshot();
   ASSERT_EQ(snap.payload.size(), sizeof(double));
@@ -120,12 +120,12 @@ TEST(LoggedValue, AutoEnableOnSetDirtiesMask)
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<double>("v", 1.0);
   v->setEnabled(false);
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), 0u);
 
   v->set(2.0);  // auto_enable defaults to true
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(double));
 }
@@ -168,7 +168,7 @@ TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
   DataTamerTest::Attached<TearingSink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<uint64_t>("v", 0);
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
 
   std::atomic_bool stop{ false };
   std::thread writer([&] {
@@ -187,7 +187,9 @@ TEST(LoggedValue, ScalarWriterRacesSnapshotCleanly)
   });
   for(int i = 0; i < 2000; i++)
   {
-    channel->takeSnapshot();
+    // A slow consumer may exhaust the pool; nothing else may go wrong.
+    const auto result = channel->takeSnapshot();
+    ASSERT_TRUE(result == SnapshotResult::ok || result == SnapshotResult::pool_exhausted);
   }
   stop = true;
   writer.join();
@@ -210,7 +212,7 @@ TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
     ASSERT_FALSE(lockable);  // held by p
   }
   ASSERT_EQ(v->get().size(), 3u);
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(uint32_t) + 3 * sizeof(double));
 }
@@ -224,7 +226,7 @@ TEST(LoggedValue, NonScalarProxyExcludesSnapshot)
   DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<std::vector<double>>("vec");
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   std::atomic_bool stop{ false };
   std::thread writer([&] {
     while(!stop)
@@ -236,7 +238,8 @@ TEST(LoggedValue, NonScalarProxyExcludesSnapshot)
   });
   for(int i = 0; i < 3000; i++)
   {
-    channel->takeSnapshot();
+    const auto result = channel->takeSnapshot();
+    ASSERT_TRUE(result == SnapshotResult::ok || result == SnapshotResult::pool_exhausted);
   }
   stop = true;
   writer.join();

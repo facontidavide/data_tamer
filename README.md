@@ -60,10 +60,15 @@ object. If you prefer a safer RAII interface, use `DataTamer::createLoggedValue`
 
 ## Real-time snapshot contract
 
-- One thread per channel calls `takeSnapshot()`. The first call freezes the schema and
-  pre-allocates a pool of 64 snapshots; after that, snapshots do not allocate as long as
-  payloads fit their slots. Tune beforehand with `setPoolCapacity()`, `setPayloadCapacity()`
-  and `setStrictMode()` (drop oversize snapshots instead of growing).
+- One thread per channel calls `takeSnapshot()`. `prepare()` freezes the schema, pre-allocates
+  a pool of 64 snapshots and announces the schema to the sinks; the first `takeSnapshot()` with
+  sinks attached calls it for you. Tune beforehand with `setPoolCapacity()` and
+  `setPayloadCapacity()`.
+- `takeSnapshot()` returns a `SnapshotResult` (`ok`, `partial`, `rejected`, `no_sinks`,
+  `pool_exhausted`, ...). It may wait for a writer holding the mutex and grows a slot whose
+  payload no longer fits. `tryTakeSnapshot()` is the real-time variant: the library does no
+  blocking acquisition (`blocked`) and no allocation (`oversize`) on that path, and it requires
+  `prepare()` (`not_prepared`). Custom serializers must follow the same rules there.
 - Scalar `LoggedValue::set()` / `get()` are wait-free atomics. To capture several values
   together, group the writes:
 

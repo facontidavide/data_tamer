@@ -159,7 +159,7 @@ int measureDelivery()
     next += kPeriod;
     std::this_thread::sleep_until(next);
     value = i;
-    if(channel->takeSnapshot(steadyNow()))
+    if(channel->takeSnapshot(steadyNow()) == SnapshotResult::ok)
     {
       ++successful;
     }

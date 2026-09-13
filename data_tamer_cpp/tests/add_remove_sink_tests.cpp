@@ -9,11 +9,12 @@
 using namespace DataTamer;
 
 void take_snapshots(std::shared_ptr<LogChannel> channel,
-                    const DataTamerTest::Attached<DummySink>& sink, int count)
+                    const DataTamerTest::Attached<DummySink>& sink, int count,
+                    SnapshotResult expected = SnapshotResult::ok)
 {
   for(int i = 0; i < count; i++)
   {
-    channel->takeSnapshot();
+    ASSERT_EQ(channel->takeSnapshot(), expected);
   }
   sink.drain();
 }
@@ -66,7 +67,7 @@ TEST(DataTamerSinkRegistry, RemoveSinkStopsRecording)
   ASSERT_EQ(channel->getNumberOfSinks(), 0);
 
   // Taking more snapshots, should not be recorded in the sink (i.e does not increase snapshots_count)
-  take_snapshots(channel, sink, snapshot_count);
+  take_snapshots(channel, sink, snapshot_count, SnapshotResult::no_sinks);
 
   ASSERT_EQ(sink->snapshotsCount(hash), snapshot_count);
 }

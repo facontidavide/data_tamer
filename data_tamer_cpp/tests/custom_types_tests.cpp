@@ -75,7 +75,7 @@ TEST(DataTamerCustom, CustomType1)
   my_test.positions.resize(4);
   channel->registerValue("test_value", &my_test);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   auto expected_size = sizeof(Pose) + sizeof(double) + sizeof(int32_t) +
@@ -147,7 +147,7 @@ TEST(DataTamerCustom, CustomType2)
   channel->registerValue("points", &points);
   channel->registerValue("quats", &quats);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   auto expected_size = 2 * sizeof(Point3D) + 3 * sizeof(Quaternion) + sizeof(uint32_t);
@@ -240,7 +240,7 @@ TEST(DataTamerCustom, CustomType3)
   channel->registerCustomValue("v2", &v2, serializer);
   channel->registerCustomValue("v3", &v3, serializer);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   const auto expected_size = 6 * sizeof(Pos2D) + sizeof(uint32_t);
@@ -279,7 +279,7 @@ TEST(DataTamerCustom, RegisterConstMethods)
   PseudoEigen::Vector2d vect = { 1, 2 };
   channel->registerValue("vect", &vect);
 
-  channel->takeSnapshot();
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
   const auto expected_size = 2 * sizeof(double);
@@ -340,7 +340,7 @@ TEST(DataTamerCustom, FixedSizeOfNestedFixedArraysMatchesPayload)
   channel->addDataSink(sink);
   Chassis chassis;
   channel->registerValue("chassis", &chassis);
-  ASSERT_TRUE(channel->takeSnapshot());
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
   const size_t expected = 4 * (3 * sizeof(double) + 2 * sizeof(int32_t)) + sizeof(double);
   EXPECT_EQ(sink->latestPayloadSize(), expected);

@@ -120,7 +120,7 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   channel->registerValue("points", &points);
 
   const std::chrono::nanoseconds stamp(1234567890);
-  ASSERT_TRUE(channel->takeSnapshot(stamp));
+  ASSERT_EQ(channel->takeSnapshot(stamp), SnapshotResult::ok);
   sink.drain();
   const Snapshot full = sink->latestSnapshot();
 
@@ -134,7 +134,7 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   // disappear from the payload; everything else keeps its relative order.
   channel->setEnabled(id_i16, false);
   channel->setEnabled(id_pose, false);
-  ASSERT_TRUE(channel->takeSnapshot(stamp));
+  ASSERT_EQ(channel->takeSnapshot(stamp), SnapshotResult::ok);
   sink.drain();
   const Snapshot masked = sink->latestSnapshot();
   checkGolden("snapshot_masked.mask", masked.active_mask);

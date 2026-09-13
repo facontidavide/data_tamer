@@ -28,7 +28,10 @@ int main()
   auto logged_float = channel->createLoggedValue<float>("real");
 
   // this is the way you store the current snapshot of the values
-  channel->takeSnapshot();
+  if(channel->takeSnapshot() != SnapshotResult::ok)
+  {
+    std::cout << "snapshot not delivered to every sink" << std::endl;
+  }
 
   // you can modify logged_float like this
   logged_float->set(6.28f);
@@ -46,5 +49,5 @@ int main()
 
   // The serialized data of the next snapshot will contain
   // only [value_int], i.e. [id2], since the other two are disabled
-  channel->takeSnapshot();
+  (void)channel->takeSnapshot();
 }

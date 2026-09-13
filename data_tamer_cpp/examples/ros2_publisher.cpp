@@ -42,7 +42,7 @@ int main(int argc, char* argv[])
     {
       RCLCPP_INFO(node->get_logger(), "snapshots: %d\n", count);
     }
-    if(!channel->takeSnapshot())
+    if(channel->takeSnapshot() != SnapshotResult::ok)
     {
       RCLCPP_ERROR(node->get_logger(), "pushing failed");
     }
