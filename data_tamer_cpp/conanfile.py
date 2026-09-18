@@ -15,13 +15,15 @@ class DataTamerConan(ConanFile):
         "shared": [True, False],
         "fPIC": [True, False],
         "tests": [True, False],
-        "examples": [True, False]
+        "examples": [True, False],
+        "eigen": [True, False]
     }
     default_options = {
         "shared": False,
         "fPIC": True,
         "tests": True,
-        "examples": True
+        "examples": True,
+        "eigen": True
     }
     exports_sources = (
         "3rdparty/*",
@@ -38,6 +40,9 @@ class DataTamerConan(ConanFile):
         self.requires("mcap/1.3.0")
         if self.options.tests:
             self.requires("gtest/1.14.0")
+        if self.options.eigen:
+            # Matches libeigen3-dev on Ubuntu 22.04, the oldest distro we support.
+            self.requires("eigen/3.4.0")
 
     def build_requirements(self):
         self.tool_requires("cmake/3.26.4")
@@ -61,7 +66,8 @@ class DataTamerConan(ConanFile):
         cmake.configure(
             {
                 "DATA_TAMER_BUILD_TESTS": self.options.tests,
-                "DATA_TAMER_BUILD_EXAMPLES": self.options.examples
+                "DATA_TAMER_BUILD_EXAMPLES": self.options.examples,
+                "DATA_TAMER_EIGEN_SUPPORT": self.options.eigen
             }
         )
         cmake.build()

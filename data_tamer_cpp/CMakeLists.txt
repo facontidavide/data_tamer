@@ -29,6 +29,17 @@ if (DATA_TAMER_BUILD_ROS)
     endif()
 endif()
 
+option(DATA_TAMER_EIGEN_SUPPORT "Enable Eigen support" ON)
+if (DATA_TAMER_EIGEN_SUPPORT)
+    find_package(Eigen3 QUIET)
+    if (NOT Eigen3_FOUND)
+        set(DATA_TAMER_EIGEN_SUPPORT FALSE)
+        message(WARNING "Eigen3 not found, building without Eigen support. Set DATA_TAMER_EIGEN_SUPPORT to false to disable this warning.")
+    else()
+        message(STATUS "Eigen3 found, building with Eigen support.")
+    endif()
+endif()
+
 ###########################################
 # check if mcap can be found. If true,
 # probably we used conan. If false, build from 3rdparty
@@ -95,6 +106,10 @@ target_include_directories(data_tamer
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/3rdparty>
 )
 target_compile_definitions(data_tamer PUBLIC -DDATA_TAMER_VERSION="${CMAKE_PROJECT_VERSION}")
+target_compile_definitions(data_tamer PUBLIC DATA_TAMER_EIGEN_SUPPORT=$<BOOL:${DATA_TAMER_EIGEN_SUPPORT}>)
+if (DATA_TAMER_EIGEN_SUPPORT)
+    target_link_libraries(data_tamer PUBLIC Eigen3::Eigen)
+endif()
 
 set(INSTALL_TARGETS data_tamer)
 
@@ -127,6 +142,10 @@ if (DATA_TAMER_BUILD_ROS)
 
     ament_export_targets(data_tamerTargets HAS_LIBRARY_TARGET)
     ament_export_dependencies(mcap_vendor rclcpp rclcpp_lifecycle data_tamer_msgs)
+    if (DATA_TAMER_EIGEN_SUPPORT)
+        ament_export_dependencies(Eigen3)
+    endif()
+
     ament_package()
 
 elseif( USE_VENDORED_MCAP )

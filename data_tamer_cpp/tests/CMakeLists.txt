@@ -10,7 +10,8 @@ if(gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
         ros2_publisher_tests.cpp
         serialize_me_tests.cpp
         trait_tests.cpp
-        wire_format_tests.cpp)
+        wire_format_tests.cpp
+        eigen_tests.cpp)
 
     target_include_directories(datatamer_test
         PUBLIC $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
@@ -34,7 +35,8 @@ else()
         parser_tests.cpp
         serialize_me_tests.cpp
         add_remove_sink_tests.cpp
-        wire_format_tests.cpp)
+        wire_format_tests.cpp
+        eigen_tests.cpp)
     gtest_discover_tests(datatamer_test DISCOVERY_MODE PRE_TEST)
 
     target_include_directories(datatamer_test
