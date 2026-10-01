@@ -287,7 +287,7 @@ inline Schema BuilSchemaFromText(const std::string& txt, bool check_hash = false
     if(str_left == "### hash:")
     {
       // check compatibility
-      declared_schema = std::stoul(str_right);
+      declared_schema = std::stoull(str_right);
       continue;
     }
 

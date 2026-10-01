@@ -88,6 +88,17 @@ TEST(DataTamerParser, SchemaHash)
   ASSERT_EQ(schema_out.fields[7].field_name, "array_3");
 }
 
+TEST(DataTamerParser, DeclaredSchemaHashUsesFullUint64Range)
+{
+  const auto schema = BuilSchemaFromText("### hash: 18446744073709551615\nfloat64 "
+                                         "value\n");
+  EXPECT_EQ(schema.hash, std::numeric_limits<uint64_t>::max());
+  ASSERT_EQ(schema.fields.size(), 1U);
+  EXPECT_EQ(schema.fields.front().field_name, "value");
+  EXPECT_THROW(BuilSchemaFromText("### hash: 18446744073709551616\nfloat64 value\n"),
+               std::out_of_range);
+}
+
 TEST(DataTamerParser, CustomTypes)
 {
   auto channel = DataTamer::LogChannel::create("chan");
