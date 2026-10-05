@@ -20,7 +20,8 @@ set(DATATAMER_TEST_SOURCES
     abi_tests.cpp
     locked_reference_tests.cpp
     serialize_me_tests.cpp
-    wire_format_tests.cpp)
+    wire_format_tests.cpp
+    name_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)

@@ -65,6 +65,9 @@ on a real-time thread.
   old id is stale: `setEnabled()` and `unregister()` throw `std::invalid_argument` instead of
   touching the replacement, `isEnabled()` returns false, and `trySetEnabled()` returns false
   without throwing (use it on real-time threads).
+- Value names are unique per channel, contain no spaces and no empty `/`-separated
+  components: `"loco/LF/x"` is accepted, `"/loco//LF/x/"` throws. Build hierarchical names
+  with `DataTamer::JoinNames("loco/", leg, "x")`, which collapses the slashes.
 - `LoggedValue::set()` only stores; a value disabled with `setEnabled(false)` stays disabled
   until `setEnabled(true)`.
 
