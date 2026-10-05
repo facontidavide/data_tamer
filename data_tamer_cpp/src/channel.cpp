@@ -23,6 +23,39 @@ size_t checkedDouble(size_t size)
   }
   return 2 * size;
 }
+
+// Why `name` can't be a value or field name, or nullptr if it can. Empty
+// '/'-separated components would show up as empty path elements in PlotJuggler;
+// a space would break the schema text ("<type> <name>").
+const char* InvalidNameReason(std::string_view name)
+{
+  if(name.empty())
+  {
+    return "it is empty";
+  }
+  if(name.find(' ') != std::string_view::npos)
+  {
+    return "it contains a space";
+  }
+  if(name.front() == '/')
+  {
+    return "it starts with '/'";
+  }
+  if(name.back() == '/')
+  {
+    return "it ends with '/'";
+  }
+  if(name.find("//") != std::string_view::npos)
+  {
+    return "it contains '//'";
+  }
+  return nullptr;
+}
+
+std::string ChannelPrefix(const std::string& channel_name)
+{
+  return "channel '" + channel_name + "': ";
+}
 }  // namespace
 
 struct LogChannel::Pimpl
@@ -160,18 +193,16 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
                                              ValuePtr&& value_ptr,
                                              CustomSerializer::Ptr type_info)
 {
-  // The public registration template holds control_mutex, including type discovery.
-  if(name.find(' ') != std::string::npos)
-  {
-    throw std::runtime_error("name can not contain spaces");
-  }
-
+  // The public registration template holds control_mutex, including type
+  // discovery, and has already validated the name with checkValueName().
   auto it = _p->registered_values.find(name);
   if(it == _p->registered_values.end())
   {
     if(_p->schema_frozen)
     {
-      throw std::runtime_error("Can't register a new value once recording started");
+      throw std::runtime_error(ChannelPrefix(_p->channel_name) +
+                               "can't register new value '" + name +
+                               "' once recording started");
     }
     const auto type = value_ptr.type();
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
@@ -208,15 +239,18 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
   auto& instance = _p->series[index];
   if(_p->shared->isRegistered(index))
   {
-    throw std::runtime_error("This name was already registered. Unregister it first");
+    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "value '" + name +
+                             "' registered twice (unregister() it first)");
   }
   if(instance.holder != value_ptr)
   {
-    throw std::runtime_error("Can't change the type of a previously registered value");
+    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "value '" + name +
+                             "' was previously registered with a different type");
   }
   if(!_p->shared->canReregister(index))
   {
-    throw std::length_error("registration slot exhausted: '" + name +
+    throw std::length_error(ChannelPrefix(_p->channel_name) +
+                            "registration slot exhausted: '" + name +
                             "' was re-registered 16 million times");
   }
   instance.holder = std::move(value_ptr);
@@ -477,6 +511,27 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
   _p->schema.custom_types[custom_type_name] = fields;
   _p->schema.hash = ComputeSchemaHash(_p->schema);
   _p->invalidateAnnouncements();
+}
+
+void LogChannel::checkValueName(const std::string& name) const
+{
+  if(const char* reason = InvalidNameReason(name))
+  {
+    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "invalid value name '" +
+                             name + "': " + reason +
+                             " (use DataTamer::JoinNames() to build hierarchical names)");
+  }
+}
+
+void LogChannel::checkFieldName(std::string_view type_name,
+                                std::string_view field_name) const
+{
+  if(const char* reason = InvalidNameReason(field_name))
+  {
+    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "custom type '" +
+                             std::string(type_name) + "' has invalid field name '" +
+                             std::string(field_name) + "': " + reason);
+  }
 }
 
 std::mutex& LogChannel::controlMutex()
