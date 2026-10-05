@@ -21,6 +21,26 @@
 // recent ROS 2 distributions, so that header follows rclcpp's standard.
 #include "data_tamer_parser/data_tamer_parser.hpp"
 
+namespace probe_lib
+{
+template <int N>
+struct ProbeVec
+{
+  double v[N] = {};
+};
+}  // namespace probe_lib
+
+template <int N>
+struct DataTamer::TypeDefinitionTrait<probe_lib::ProbeVec<N>>
+{
+  static std::string name() { return "ProbeVec" + std::to_string(N); }
+  template <class AddField>
+  static void define(probe_lib::ProbeVec<N>& p, AddField& add)
+  {
+    add("x", &p.v[0]);
+  }
+};
+
 // Instantiate the templates a consumer would.
 namespace
 {
@@ -39,6 +59,8 @@ std::string_view TypeDefinition(Probe& p, AddField& add)
   auto channel = DataTamer::LogChannel::create("probe");
   double d = 0;
   Probe probe;
+  probe_lib::ProbeVec<2> probe_vec;
+  channel->registerValue("probe_vec", &probe_vec);
   std::vector<double> v;
   channel->registerValue("d", &d);
   channel->registerValue("probe", &probe);

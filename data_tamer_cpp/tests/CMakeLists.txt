@@ -5,6 +5,7 @@ set(DATATAMER_TEST_SOURCES
     parser_tests.cpp
     add_remove_sink_tests.cpp
     trait_tests.cpp
+    type_definition_trait_tests.cpp
     alloc_counter.cpp
     alloc_counter_tests.cpp
     write_mutex_tests.cpp
