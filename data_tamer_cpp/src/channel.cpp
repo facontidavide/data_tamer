@@ -24,34 +24,6 @@ size_t checkedDouble(size_t size)
   return 2 * size;
 }
 
-// Why `name` can't be a value or field name, or nullptr if it can. Empty
-// '/'-separated components would show up as empty path elements in PlotJuggler;
-// a space would break the schema text ("<type> <name>").
-const char* InvalidNameReason(std::string_view name)
-{
-  if(name.empty())
-  {
-    return "it is empty";
-  }
-  if(name.find(' ') != std::string_view::npos)
-  {
-    return "it contains a space";
-  }
-  if(name.front() == '/')
-  {
-    return "it starts with '/'";
-  }
-  if(name.back() == '/')
-  {
-    return "it ends with '/'";
-  }
-  if(name.find("//") != std::string_view::npos)
-  {
-    return "it contains '//'";
-  }
-  return nullptr;
-}
-
 std::string ChannelPrefix(const std::string& channel_name)
 {
   return "channel '" + channel_name + "': ";
@@ -515,22 +487,10 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
 
 void LogChannel::checkValueName(const std::string& name) const
 {
-  if(const char* reason = InvalidNameReason(name))
+  if(name.find(' ') != std::string::npos)
   {
     throw std::runtime_error(ChannelPrefix(_p->channel_name) + "invalid value name '" +
-                             name + "': " + reason +
-                             " (use DataTamer::JoinNames() to build hierarchical names)");
-  }
-}
-
-void LogChannel::checkFieldName(std::string_view type_name,
-                                std::string_view field_name) const
-{
-  if(const char* reason = InvalidNameReason(field_name))
-  {
-    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "custom type '" +
-                             std::string(type_name) + "' has invalid field name '" +
-                             std::string(field_name) + "': " + reason);
+                             name + "': it contains a space");
   }
 }
 

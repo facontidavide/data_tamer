@@ -68,7 +68,11 @@ std::string_view TypeDefinition(Probe& p, AddField& add)
   channel->registerValue("probe", &probe);
   channel->registerValue("v", &v);
   double joined = 0;
-  channel->registerValue(DataTamer::JoinNames("ns/", std::string("joined")), &joined);
+  const std::string joined_name = DataTamer::JoinNames("ns/", std::string("joined"));
+  if(DataTamer::IsCanonicalName(joined_name))
+  {
+    channel->registerValue(joined_name, &joined);
+  }
   auto logged = channel->createLoggedValue<double>("logged");
   logged->set(1.0);
   auto tx = channel->scopedWrite();
