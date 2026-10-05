@@ -185,6 +185,7 @@ struct Point3D
 } // end namespace MyNamespace
 
 // You must implement the function TypeDefinition in the same namespace as Point3D
+// (or specialize DataTamer::TypeDefinitionTrait, see below)
 namespace MyNamespace
 {
 template <typename AddField>
@@ -213,6 +214,63 @@ int main()
   channel->takeSnapshot();
 }
 ```
+
+### Types you can't (or don't want to) modify
+
+`TypeDefinition` is found by argument-dependent lookup, so it must live in the
+namespace of the type. For third-party types (Eigen, a vendor SDK, ...) you can
+instead specialize `DataTamer::TypeDefinitionTrait` and leave their namespace
+alone:
+
+```cpp
+#include "data_tamer/custom_types.hpp"
+#include <third_party/geometry.hpp>  // defines third_party::Point
+
+template <>
+struct DataTamer::TypeDefinitionTrait<third_party::Point>
+{
+  template <typename AddField>
+  static std::string_view define(third_party::Point& p, AddField& add)
+  {
+    add("x", &p.x);
+    add("y", &p.y);
+    return "Point";
+  }
+};
+```
+
+Partial specializations work too; the second, defaulted template parameter
+accepts `std::enable_if_t<...>` / `std::void_t<...>`. For class templates the
+name can be built at runtime with an optional `static std::string name()`: it
+is evaluated once per type (per shared library, like any function-local
+static), and `define()` may then return `void`. A `define()` that returns a
+`std::string` is cached the same way; a `std::string_view` or `const char*`
+must point to storage that outlives the program, such as a string literal.
+
+```cpp
+template <typename T, int N>
+struct DataTamer::TypeDefinitionTrait<Eigen::Matrix<T, N, 1>>
+{
+  static std::string name() { return "Vector" + std::to_string(N); }
+
+  template <typename AddField>
+  static void define(Eigen::Matrix<T, N, 1>& v, AddField& add)
+  {
+    static_assert(N <= 4);
+    static const char* names[] = { "x", "y", "z", "w" };
+    for(int i = 0; i < N; i++)
+    {
+      add(names[i], &v[i]);
+    }
+  }
+};
+```
+
+The specialization must be visible wherever the type is registered. If a type
+has both a `TypeDefinitionTrait` specialization and a `TypeDefinition` overload,
+the trait is used. A specialization whose `define()` can not be called as
+`define(T&, AddField&)` with a generic `AddField` is a compile error rather
+than being ignored.
 
 ## Publishing on ROS 2
 

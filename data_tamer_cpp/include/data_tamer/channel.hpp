@@ -444,7 +444,7 @@ inline void LogChannel::updateTypeRegistry()
         updateTypeRegistryImpl<MemberType>(fields, field_name);
       };
       T dummy;
-      TypeDefinition(dummy, func);
+      SerializeMe::InvokeTypeDefinition(dummy, func);
       addCustomType(type_name, fields);
     }
   }

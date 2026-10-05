@@ -30,6 +30,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -68,29 +69,155 @@ using SpanBytes = Span<uint8_t>;
 using SpanBytesConst = Span<uint8_t const>;
 using StringSize = uint16_t;
 
-// Check if a Function like this is implemented:
-//
-// template <typename Func> std::string_view TypeDefinition(T&, Func&);
-
-template <typename T, class = void>
-struct has_TypeDefinition : std::false_type
-{
-};
-
 const auto EmptyFuncion = [](const char*, void*) {};
 using EmptyFunc = decltype(EmptyFuncion);
 
 template <typename T1, typename T2>
 using enable_if_same_t = std::enable_if_t<std::is_same_v<T1, T2>>;
 
+}  // namespace SerializeMe
+
+namespace DataTamer
+{
+/**
+ * @brief Customization point that describes a type without reopening its namespace.
+ *
+ * Specialize it (fully, or partially using the second parameter for
+ * std::enable_if / std::void_t) in namespace DataTamer:
+ *
+ *   template <>
+ *   struct DataTamer::TypeDefinitionTrait<third_party::Point>
+ *   {
+ *     template <class AddField>
+ *     static std::string_view define(third_party::Point& p, AddField& add)
+ *     {
+ *       add("x", &p.x);
+ *       add("y", &p.y);
+ *       return "Point";
+ *     }
+ *   };
+ *
+ * Optionally, the specialization may also provide
+ *
+ *   static std::string name();
+ *
+ * to build the type name at runtime (useful for class templates, e.g.
+ * "Vector" + std::to_string(N)). It is evaluated once per type (per shared
+ * library, as for any function-local static) and cached;
+ * when present, the value returned by define() is ignored and define() may
+ * return void.
+ *
+ * define() may also return an owning string (e.g. std::string): it is then
+ * evaluated once per type and cached.
+ *
+ * If a type has both a TypeDefinitionTrait specialization and a
+ * TypeDefinition() overload found by argument-dependent lookup, the trait wins.
+ * A specialization whose define() can not be called as
+ * define(T&, AddField&) is a compile error (it is never silently ignored).
+ *
+ * The specialization must be visible before the type is first used with
+ * DataTamer (as for any template specialization).
+ */
+template <typename T, typename = void>
+struct TypeDefinitionTrait
+{
+  // Marks the primary template: a specialization does not have it.
+  using unspecialized_tag = void;
+};
+}  // namespace DataTamer
+
+namespace SerializeMe
+{
+
+// True if DataTamer::TypeDefinitionTrait<T> is specialized with a
+// static define(T&, AddField&) function.
+template <typename T, class = void>
+struct has_TypeDefinitionTrait : std::false_type
+{
+};
+
 template <typename T>
-struct has_TypeDefinition<
+struct has_TypeDefinitionTrait<
+    T, std::void_t<decltype(DataTamer::TypeDefinitionTrait<T>::define(
+           std::declval<T&>(), std::declval<EmptyFunc&>()))>> : std::true_type
+{
+};
+
+// True if DataTamer::TypeDefinitionTrait<T> is specialized at all.
+template <typename T, class = void>
+struct is_TypeDefinitionTrait_specialized : std::true_type
+{
+};
+
+template <typename T>
+struct is_TypeDefinitionTrait_specialized<
+    T, std::void_t<typename DataTamer::TypeDefinitionTrait<T>::unspecialized_tag>>
+  : std::false_type
+{
+};
+
+// True if DataTamer::TypeDefinitionTrait<T> provides static name().
+template <typename T, class = void>
+struct has_TypeDefinitionTraitName : std::false_type
+{
+};
+
+template <typename T>
+struct has_TypeDefinitionTraitName<
+    T, std::enable_if_t<std::is_convertible_v<
+           decltype(DataTamer::TypeDefinitionTrait<T>::name()), std::string>>>
+  : std::true_type
+{
+};
+
+// Check if a Function like this is implemented in the namespace of T
+// (found by argument-dependent lookup):
+//
+// template <typename Func> std::string_view TypeDefinition(T&, Func&);
+
+template <typename T, class = void>
+struct has_TypeDefinitionADL : std::false_type
+{
+};
+
+template <typename T>
+struct has_TypeDefinitionADL<
     T, enable_if_same_t<std::string_view,
                         decltype(TypeDefinition(std::declval<T&>(),
                                                 std::declval<EmptyFunc&>()))>>
   : std::true_type
 {
 };
+
+// True if T is described either by DataTamer::TypeDefinitionTrait<T> or by
+// a TypeDefinition() overload found by ADL.
+// (The second parameter is unused; kept for source compatibility.)
+template <typename T, class = void>
+struct has_TypeDefinition : std::bool_constant<has_TypeDefinitionTrait<T>::value ||
+                                               has_TypeDefinitionADL<T>::value>
+{
+  static_assert(!is_TypeDefinitionTrait_specialized<T>::value ||
+                    has_TypeDefinitionTrait<T>::value,
+                "DataTamer::TypeDefinitionTrait<T> is specialized, but it has no "
+                "static define(T&, AddField&) callable with a generic AddField");
+};
+
+// Call the definition of T: DataTamer::TypeDefinitionTrait<T>::define() if
+// specialized, otherwise the ADL overload TypeDefinition(obj, add_field).
+// Every place that walks the fields of a custom type must go through this.
+template <typename T, typename AddField>
+inline decltype(auto) InvokeTypeDefinition(T& obj, AddField& add_field)
+{
+  static_assert(has_TypeDefinition<T>::value, "Missing TypeDefinition");
+  if constexpr(has_TypeDefinitionTrait<T>::value)
+  {
+    return DataTamer::TypeDefinitionTrait<T>::define(obj, add_field);
+  }
+  else
+  {
+    return TypeDefinition(obj, add_field);
+  }
+}
 
 //------------- Forward declarations of BufferSize ------------------
 
@@ -338,7 +465,7 @@ inline size_t BufferSize(const T& val)
       total_size += BufferSize(*field);
     };
 
-    TypeDefinition(const_cast<T&>(val), func);
+    InvokeTypeDefinition(const_cast<T&>(val), func);
     return total_size;
   }
 }
@@ -400,10 +527,11 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest)
   }
   else
   {
-    auto func = [&buffer](const char*, const auto* field) {
+    // fields are written: the pointer must not be const
+    auto func = [&buffer](const char*, auto* field) {
       DeserializeFromBuffer(buffer, *field);
     };
-    TypeDefinition(dest, func);
+    InvokeTypeDefinition(dest, func);
   }
 }
 
@@ -512,7 +640,7 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
     auto func = [&buffer](const char*, const auto* field) {
       SerializeIntoBuffer(buffer, *field);
     };
-    TypeDefinition(const_cast<T&>(value), func);
+    InvokeTypeDefinition(const_cast<T&>(value), func);
   }
 }
 
