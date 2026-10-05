@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Schema.msg"
   "msg/Schemas.msg"
   "msg/Snapshot.msg"
+  "msg/SnapshotBatch.msg"
 )
 
 ament_export_dependencies(rosidl_default_runtime)
