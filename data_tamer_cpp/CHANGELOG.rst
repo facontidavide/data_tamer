@@ -16,6 +16,18 @@ Unreleased
   (default on) puts the schemas of the batch's snapshots in the message, so it
   decodes without the ``schemas`` topic. Schema texts are now serialized once,
   in ``onSchema()``, instead of on every republish.
+* ``ROS2PublisherSink`` QoS is bounded (2.0 review item 18). The data topic
+  (``data`` or ``data_batch``) uses the new ``ROS2PublisherOptions::data_qos``,
+  by default reliable ``KeepLast(100)`` instead of ``KeepAll``, so a slow or
+  stalled subscriber no longer makes the publishing process grow without bound.
+  ``schemas`` is reliable, transient-local ``KeepLast(1)``: every message is the
+  complete catalog, so a late subscriber still gets all schemas. The catalog is
+  published as soon as the sink learns a schema (``prepare()``, or
+  ``addDataSink()`` on a prepared channel) instead of with the next snapshot, so
+  call ``prepare()`` explicitly outside the control loop. A failed publication
+  does not fail ``prepare()``: it is retried by the next snapshot (counted in
+  ``SinkWorker::errors()``) or by ``flush()``, which now publishes a pending
+  catalog even without aggregation and throws if that fails.
 * Parser helpers to decode the ROS messages without depending on ROS (templates
   on the message type): ``DataTamerParser::SchemaRegistry`` (schemas by hash,
   filled from ``Schemas`` or embedded batch schemas), ``ToSnapshotView()`` and

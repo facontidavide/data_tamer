@@ -45,7 +45,8 @@ struct ROS2PublisherSink::Pimpl
   rclcpp::Publisher<data_tamer_msgs::msg::Snapshot>::SharedPtr data_publisher;
   rclcpp::Publisher<data_tamer_msgs::msg::SnapshotBatch>::SharedPtr batch_publisher;
 
-  bool schema_changed = true;
+  // The catalog changed and has not been published successfully since.
+  bool schema_changed = false;
   data_tamer_msgs::msg::Snapshot data_msg;
 
   data_tamer_msgs::msg::SnapshotBatch batch_msg;
@@ -88,11 +89,13 @@ ROS2PublisherSink::~ROS2PublisherSink()
 
 void ROS2PublisherSink::create_publishers(const std::string& topic_prefix)
 {
-  rclcpp::QoS schemas_qos{ rclcpp::KeepAll() };
+  // Every message is the complete catalog: keeping the latest one is enough for
+  // late subscribers (transient-local), and bounds what the publisher retains.
+  rclcpp::QoS schemas_qos{ rclcpp::KeepLast(1) };
   schemas_qos.reliable();
   schemas_qos.transient_local();  // latch
 
-  const rclcpp::QoS data_qos{ rclcpp::KeepAll() };
+  const rclcpp::QoS& data_qos = _p->options.data_qos;
 
   _p->schema_publisher = rclcpp::create_publisher<data_tamer_msgs::msg::Schemas>(
       _p->node_interface, topic_prefix + "/schemas", schemas_qos);
@@ -121,6 +124,18 @@ void ROS2PublisherSink::onSchema(const Schema& schema)
   std::lock_guard lock(_p->mutex);
   _p->schemas[schema.hash] = std::move(schema_msg);
   _p->schema_changed = true;
+
+  // Publish the catalog now, from the thread running prepare() / addDataSink()
+  // (serialized with onSnapshot() by the SinkWorker), so that subscribers get
+  // it without waiting for a snapshot. Publisher::publish() is thread-safe.
+  // A failure must not make prepare() fail: the catalog stays pending, and the
+  // next onSnapshot() or flush() retries it and reports the error.
+  try
+  {
+    _p->publishSchemasIfChanged();
+  }
+  catch(...)
+  {}
 }
 
 void ROS2PublisherSink::onSnapshot(const SnapshotRef& ref)
@@ -141,9 +156,9 @@ void ROS2PublisherSink::onSnapshot(const SnapshotRef& ref)
 void ROS2PublisherSink::flush()
 {
   std::lock_guard lock(_p->mutex);
+  _p->publishSchemasIfChanged();  // a catalog whose publication failed earlier
   if(_p->options.aggregate && _p->batch_count > 0)
   {
-    _p->publishSchemasIfChanged();
     _p->publishBatch();
   }
 }

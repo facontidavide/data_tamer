@@ -44,12 +44,34 @@ struct ROS2PublisherOptions
   /// "/"-separated paths, but readers that predate it (e.g. older PlotJuggler
   /// releases) only understand SchemaFormat::Text.
   SchemaFormat schema_format = SchemaFormat::Text;
+  /// QoS of `<topic_prefix>/data` (or `<topic_prefix>/data_batch`). The default
+  /// keeps the last 100 messages per publisher, so a slow or stalled subscriber
+  /// costs a bounded amount of memory (older messages are dropped for it instead
+  /// of queuing without limit). It is reliable so that subscribers which keep up
+  /// lose nothing, and so that both reliable and best-effort subscribers match.
+  /// With aggregation each message is a batch: size the depth accordingly.
+  /// `<topic_prefix>/schemas` is not affected: it is always reliable,
+  /// transient-local, KeepLast(1).
+  rclcpp::QoS data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable();
 };
 
 /// Publishes schemas and snapshots on `<topic_prefix>/schemas` and
 /// `<topic_prefix>/data` (or `<topic_prefix>/data_batch`, see
 /// ROS2PublisherOptions::aggregate). Create it with ROS2PublisherSink::create()
 /// and pass the returned worker to LogChannel::addDataSink().
+///
+/// Every message on `<topic_prefix>/schemas` holds the complete catalog (all the
+/// schemas the sink knows), and the topic is reliable, transient-local with
+/// depth 1: a late subscriber receives the latest catalog. It is published as
+/// soon as the sink learns a schema, i.e. by LogChannel::prepare() (explicit or
+/// from the first takeSnapshot()) or by addDataSink() on a prepared channel, on
+/// the calling thread. If that publish fails, prepare() still succeeds and the
+/// catalog stays pending: the next snapshot retries it (a failure is counted by
+/// the SinkWorker, see SinkWorker::errors()), and so does flush() (a failure
+/// throws to its caller).
+///
+/// Call LogChannel::prepare() explicitly outside the control loop: otherwise the
+/// first takeSnapshot() prepares the channel, which includes this DDS write.
 class ROS2PublisherSink : public DataSink
 {
 public:
@@ -69,10 +91,11 @@ public:
                                                  topic_prefix, options);
   }
 
-  /// Publishes the pending batch, if any (the destructor does it too).
+  /// Publishes the pending batch, if any (the destructor does it too), and
+  /// the schema catalog if its last publication failed (also without
+  /// aggregation). Throws if a publication fails.
   /// Thread-safe: may be called from any thread, e.g.
   /// `worker->as<ROS2PublisherSink>().flush()` after `worker->drain()`.
-  /// No-op when aggregation is disabled.
   void flush();
 
   ~ROS2PublisherSink() override;
