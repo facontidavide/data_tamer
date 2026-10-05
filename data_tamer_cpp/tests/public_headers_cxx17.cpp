@@ -8,6 +8,7 @@
 #include "data_tamer/custom_types.hpp"
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/logged_value.hpp"
+#include "data_tamer/names.hpp"
 #include "data_tamer/types.hpp"
 #include "data_tamer/values.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
@@ -65,6 +66,8 @@ std::string_view TypeDefinition(Probe& p, AddField& add)
   channel->registerValue("d", &d);
   channel->registerValue("probe", &probe);
   channel->registerValue("v", &v);
+  double joined = 0;
+  channel->registerValue(DataTamer::JoinNames("ns/", std::string("joined")), &joined);
   auto logged = channel->createLoggedValue<double>("logged");
   logged->set(1.0);
   auto tx = channel->scopedWrite();

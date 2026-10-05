@@ -70,6 +70,21 @@ Unreleased
   overloads keep working. ``CustomTypeName<T>::get()`` is no longer
   ``constexpr``. ``SerializeMe::DeserializeFromBuffer`` now compiles for custom
   types (it passed const field pointers and could not write the fields).
+* **Breaking, value names** (#97): registration rejects names that are empty or
+  have empty ``/``-separated components (leading, trailing or repeated ``/``,
+  e.g. ``"/loco//torso/x"``), which PlotJuggler showed as empty path elements.
+  The same rules, and the existing no-spaces rule, now also apply to the field
+  names of a ``TypeDefinition`` (or ``TypeDefinitionTrait``) and of every
+  custom type nested in it; a
+  rejected type leaves the channel unchanged. ``registerCustomValue()`` checks
+  only the value name: the serializer owns its schema text.
+  New header-only ``DataTamer::JoinNames(parts...)`` (``data_tamer/names.hpp``,
+  included by ``channel.hpp``) joins components with a single ``/`` and drops
+  empty ones, so namespaces may carry trailing slashes:
+  ``JoinNames("/loco/", "LF/", "x") == "loco/LF/x"``. Registration errors now
+  name the channel and the value, e.g. ``channel 'controller/walk': value
+  'loco/LF/x' registered twice (unregister() it first)``; the name checks run
+  before any custom type is discovered.
 * **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
 
   - ``RegistrationID`` is an opaque handle (no public ``first_index`` /
