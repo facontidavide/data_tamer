@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 using namespace SerializeMe;
@@ -57,4 +58,15 @@ TEST(SerializeMe, NumbersRoundTripAtUnalignedOffsets)
   ASSERT_EQ(i_out, i);
   ASSERT_EQ(u_out, u);
   ASSERT_EQ(input.size(), 0u);
+}
+
+// A read-only span views a const vector; a mutable span still cannot.
+TEST(SerializeMe, ConstSpanFromConstVector)
+{
+  const std::vector<uint8_t> bytes = { 7, 8, 9 };
+  const SpanBytesConst view = bytes;
+  EXPECT_EQ(view.data(), bytes.data());
+  EXPECT_EQ(view.size(), 3u);
+  static_assert(!std::is_constructible_v<SpanBytes, const std::vector<uint8_t>&>);
+  static_assert(std::is_constructible_v<SpanBytes, std::vector<uint8_t>&>);
 }

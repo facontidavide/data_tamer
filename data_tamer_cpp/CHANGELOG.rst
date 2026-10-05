@@ -97,6 +97,21 @@ Unreleased
   ``log_2026.10.05_1.mcap``.
 * MCAP messages carry a per-channel ``sequence`` number (1, 2, 3, ... per MCAP
   channel and file) instead of always 1, so readers can detect gaps (#98).
+* New ``data_tamer/sinks/mcap_encoding.hpp`` (#96): inline helpers
+  ``mcap_encoding::AddChannel()``, ``WriteSnapshot()`` (for a ``Snapshot``),
+  ``WriteMessage()`` (from a timestamp and mask and payload spans, e.g.
+  for stored data) and ``EncodeMessageBody()`` that write the MCAP records of
+  ``docs/wire_format.md``. ``MCAPSink`` uses them. The caller provides the
+  sequence number and a reusable scratch buffer (no allocation once it is large
+  enough). They need ``data_tamer::data_tamer`` (and ``mcap_vendor::mcap`` under
+  ROS 2); outside ROS 2 the bundled MCAP headers are now installed (under
+  ``include/data_tamer_mcap``) and exported with data_tamer through the
+  header-only ``data_tamer::mcap_headers`` target, so a shared install exports
+  no zstd/lz4 library paths; libdata_tamer already contains the MCAP
+  implementation (do not define ``MCAP_IMPLEMENTATION``). A shared build no
+  longer installs ``libmcap_lib.a``. ``SerializeMe::Span<const T>`` converts from a
+  ``const std::vector<T>&``. The ``DataSink`` documentation now explains that a
+  slow ``onSnapshot()`` exhausts the channel's shared snapshot pool for every sink.
 * **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
 
   - ``RegistrationID`` is an opaque handle (no public ``first_index`` /
