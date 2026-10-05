@@ -279,7 +279,10 @@ Two reference decoders implement it:
 - C++, a single header without external dependencies that you can copy into your project:
   [data_tamer_parser.hpp](data_tamer_cpp/include/data_tamer_parser/data_tamer_parser.hpp),
   used in [mcap_reader](data_tamer_cpp/examples/mcap_reader.cpp).
-- Python, standard library only: [python/data_tamer_parser.py](python/data_tamer_parser.py).
+- Python, standard library only: [python/data_tamer_parser.py](python/data_tamer_parser.py),
+  packaged as `data-tamer-parser` (`pip install ./python`, see [python/README.md](python/README.md)).
+  `iter_mcap("log.mcap")` reads a whole MCAP file (with `pip install "./python[mcap]"`) and
+  `schema.field_names()` lists the flattened names of a schema without decoding a message.
 
 Both read either schema rendering (the line format and YAML) and include helpers for the
 ROS 2 messages that need no ROS dependency, since they only read message fields:
