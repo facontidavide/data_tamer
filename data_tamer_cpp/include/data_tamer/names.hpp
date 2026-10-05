@@ -44,10 +44,10 @@ inline void AppendNameComponents(std::string& out, std::string_view part)
  *   JoinNames("loco", "", "torso")   == "loco/torso"
  *   JoinNames("loco//torso/")        == "loco/torso"
  *
- * LogChannel::registerValue() rejects names with empty components (leading,
- * trailing or repeated '/'), because PlotJuggler would show them as empty path
- * elements; this helper always produces an accepted name, unless the result is
- * empty or a component contains a space.
+ * LogChannel::registerValue() accepts names with empty components (leading,
+ * trailing or repeated '/'), but PlotJuggler shows them as empty path
+ * elements. The result of this helper is always a canonical name (see
+ * IsCanonicalName()), unless it is empty or a component contains a space.
  *
  * @param parts anything convertible to std::string_view (std::string, const char*, ...).
  *              Passing a null `const char*` is undefined behaviour, as for
@@ -59,6 +59,27 @@ template <typename... Parts>
   std::string out;
   (details::AppendNameComponents(out, std::string_view(parts)), ...);
   return out;
+}
+
+/**
+ * @brief True if `name` is a canonical hierarchical name: non-empty, without
+ * spaces and without empty '/'-separated components (no leading, trailing or
+ * repeated '/').
+ *
+ * Registration only rejects spaces; this is an opt-in check for code that
+ * wants to enforce canonical names, e.g. in a debug build:
+ *
+ *   assert(DataTamer::IsCanonicalName(name));
+ *   channel->registerValue(name, &value);
+ *
+ *   IsCanonicalName("loco/LF/x")   == true
+ *   IsCanonicalName("/loco//LF/x") == false
+ */
+[[nodiscard]] inline bool IsCanonicalName(std::string_view name)
+{
+  return !name.empty() && name.find(' ') == std::string_view::npos &&
+         name.front() != '/' && name.back() != '/' &&
+         name.find("//") == std::string_view::npos;
 }
 
 }  // namespace DataTamer

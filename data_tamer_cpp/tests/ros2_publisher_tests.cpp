@@ -463,11 +463,11 @@ TEST(DataTamerROS2Publisher, QoS)
   EXPECT_EQ(schemas_info[0].qos_profile().durability(),
             rclcpp::DurabilityPolicy::TransientLocal);
 
-  // default data QoS: reliable, bounded history
+  // default data QoS: reliable KeepAll, as before ROS2PublisherOptions::data_qos
   const ROS2PublisherOptions defaults;
   EXPECT_EQ(defaults.data_qos.reliability(), rclcpp::ReliabilityPolicy::Reliable);
-  EXPECT_EQ(defaults.data_qos.history(), rclcpp::HistoryPolicy::KeepLast);
-  EXPECT_EQ(defaults.data_qos.depth(), 100u);
+  EXPECT_EQ(defaults.data_qos.history(), rclcpp::HistoryPolicy::KeepAll);
+  EXPECT_EQ(defaults.data_qos.durability(), rclcpp::DurabilityPolicy::Volatile);
 }
 
 int main(int argc, char** argv)

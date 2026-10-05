@@ -87,7 +87,7 @@ std::string_view TypeDefinition(OuterOk& obj, AddField& add)
   return "OuterOk";
 }
 
-// Recursive type: validation must terminate.
+// Recursive type.
 struct TreeNode
 {
   double value = 0;
@@ -103,7 +103,8 @@ std::string_view TypeDefinition(TreeNode& obj, AddField& add)
 }  // namespace
 
 // Types described only by DataTamer::TypeDefinitionTrait (no ADL overload), and
-// one with both, where the trait is the definition that is registered.
+// one with both, where the trait is the definition that is registered. Their
+// field names are not canonical; registration accepts them.
 namespace names_third_party
 {
 struct TraitBad
@@ -117,7 +118,7 @@ struct BothBadTrait
 template <typename AddField>
 std::string_view TypeDefinition(BothBadTrait& obj, AddField& add)
 {
-  add("x", &obj.x);  // valid, but not the definition in use
+  add("x", &obj.x);  // not the definition in use
   return "BothBadTrait";
 }
 }  // namespace names_third_party
@@ -157,6 +158,21 @@ TEST(Names, JoinNamesCollapsesSlashes)
   EXPECT_EQ(JoinNames(ns, leaf, std::string("q")), "controller/walk/LF/q");
 }
 
+TEST(Names, IsCanonicalName)
+{
+  EXPECT_TRUE(IsCanonicalName("x"));
+  EXPECT_TRUE(IsCanonicalName("loco/LF/x"));
+  EXPECT_TRUE(IsCanonicalName("points[0]/x"));
+  EXPECT_TRUE(IsCanonicalName(JoinNames("/loco/", "LF/", "x")));
+  EXPECT_FALSE(IsCanonicalName(""));
+  EXPECT_FALSE(IsCanonicalName("/"));
+  EXPECT_FALSE(IsCanonicalName("/loco/x"));
+  EXPECT_FALSE(IsCanonicalName("loco/x/"));
+  EXPECT_FALSE(IsCanonicalName("loco//x"));
+  EXPECT_FALSE(IsCanonicalName("loco x"));
+  EXPECT_FALSE(IsCanonicalName(JoinNames("/", "")));
+}
+
 TEST(Names, AcceptsHierarchicalNames)
 {
   auto channel = LogChannel::create("controller/walk");
@@ -171,7 +187,42 @@ TEST(Names, AcceptsHierarchicalNames)
   EXPECT_EQ(channel->getSchema().fields.at(1).field_name, "loco/LF/y");
 }
 
-TEST(Names, RejectsEmptyComponentsInEveryOverload)
+// Registration only rejects spaces: names with empty '/'-separated components,
+// and the empty name, are accepted unchanged (IsCanonicalName() is opt-in).
+TEST(Names, AcceptsNonCanonicalNamesInEveryOverload)
+{
+  double scalar = 0;
+  std::atomic<int32_t> atomic{ 0 };
+  std::vector<double> vect(2);
+  std::array<double, 3> array{};
+  Point3D point;
+  std::vector<Point3D> points(2);
+  auto serializer = std::make_shared<CustomSerializerT<Point3D>>("Point3D");
+
+  for(const std::string name : { "/loco/x", "loco/x/", "loco//x", "" })
+  {
+    const std::vector<std::function<void(LogChannel&)>> registrations = {
+      [&](LogChannel& c) { (void)c.registerValue(name, &scalar); },
+      [&](LogChannel& c) { (void)c.registerValue(name, &atomic); },
+      [&](LogChannel& c) { (void)c.registerValue(name, &vect); },
+      [&](LogChannel& c) { (void)c.registerValue(name, &array); },
+      [&](LogChannel& c) { (void)c.registerValue(name, &point); },
+      [&](LogChannel& c) { (void)c.registerValue(name, &points); },
+      [&](LogChannel& c) { (void)c.registerCustomValue(name, &point, serializer); },
+      [&](LogChannel& c) { (void)c.createLoggedValue<double>(name); },
+    };
+    for(const auto& registration : registrations)
+    {
+      auto channel = LogChannel::create("chan");
+      EXPECT_NO_THROW(registration(*channel)) << "'" << name << "'";
+      const auto schema = channel->getSchema();
+      ASSERT_EQ(schema.fields.size(), 1u);
+      EXPECT_EQ(schema.fields.front().field_name, name);
+    }
+  }
+}
+
+TEST(Names, RejectsSpacesInEveryOverload)
 {
   auto channel = LogChannel::create("controller/walk");
   double scalar = 0;
@@ -182,30 +233,23 @@ TEST(Names, RejectsEmptyComponentsInEveryOverload)
   std::vector<Point3D> points(2);
   auto serializer = std::make_shared<CustomSerializerT<Point3D>>("Point3D");
 
-  const std::vector<std::pair<std::string, std::string>> bad_names = {
-    { "/loco/x", "starts with '/'" }, { "loco/x/", "ends with '/'" },
-    { "loco//x", "contains '//'" },   { "", "is empty" },
-    { "loco x", "contains a space" },
+  const std::string name = "loco x";
+  const std::vector<std::function<void()>> registrations = {
+    [&] { (void)channel->registerValue(name, &scalar); },
+    [&] { (void)channel->registerValue(name, &atomic); },
+    [&] { (void)channel->registerValue(name, &vect); },
+    [&] { (void)channel->registerValue(name, &array); },
+    [&] { (void)channel->registerValue(name, &point); },
+    [&] { (void)channel->registerValue(name, &points); },
+    [&] { (void)channel->registerCustomValue(name, &point, serializer); },
+    [&] { (void)channel->createLoggedValue<double>(name); },
   };
-  for(const auto& [name, reason] : bad_names)
+  for(const auto& registration : registrations)
   {
-    const std::vector<std::function<void()>> registrations = {
-      [&] { (void)channel->registerValue(name, &scalar); },
-      [&] { (void)channel->registerValue(name, &atomic); },
-      [&] { (void)channel->registerValue(name, &vect); },
-      [&] { (void)channel->registerValue(name, &array); },
-      [&] { (void)channel->registerValue(name, &point); },
-      [&] { (void)channel->registerValue(name, &points); },
-      [&] { (void)channel->registerCustomValue(name, &point, serializer); },
-      [&] { (void)channel->createLoggedValue<double>(name); },
-    };
-    for(const auto& registration : registrations)
-    {
-      const auto msg = RegistrationError(registration);
-      EXPECT_TRUE(Contains(msg, "channel 'controller/walk'")) << msg;
-      EXPECT_TRUE(Contains(msg, "'" + name + "'")) << msg;
-      EXPECT_TRUE(Contains(msg, reason)) << msg;
-    }
+    const auto msg = RegistrationError(registration);
+    EXPECT_TRUE(Contains(msg, "channel 'controller/walk'")) << msg;
+    EXPECT_TRUE(Contains(msg, "'" + name + "'")) << msg;
+    EXPECT_TRUE(Contains(msg, "contains a space")) << msg;
   }
   // Rejected names leave nothing behind, not even the custom type discovered
   // while registering a Point3D.
@@ -214,60 +258,29 @@ TEST(Names, RejectsEmptyComponentsInEveryOverload)
   EXPECT_TRUE(schema.custom_types.empty());
 }
 
-TEST(Names, RejectsInvalidCustomFieldNames)
+// The field names of a TypeDefinition / TypeDefinitionTrait (nested types
+// included) are not checked at registration.
+TEST(Names, AcceptsAnyCustomFieldNames)
 {
   auto channel = LogChannel::create("chan");
   BadFields bad;
-  const auto msg = RegistrationError([&] { (void)channel->registerValue("bad", &bad); });
-  EXPECT_TRUE(Contains(msg, "channel 'chan'")) << msg;
-  EXPECT_TRUE(Contains(msg, "custom type 'BadFields'")) << msg;
-  EXPECT_TRUE(Contains(msg, "'y/'")) << msg;
-  EXPECT_TRUE(channel->getSchema().custom_types.empty());
-  EXPECT_TRUE(channel->getSchema().fields.empty());
-
-  // The type was not half-registered: a second attempt is rejected again.
-  std::vector<BadFields> bad_vect(1);
-  EXPECT_THROW((void)channel->registerValue("bad_vect", &bad_vect), std::runtime_error);
-  EXPECT_TRUE(channel->getSchema().custom_types.empty());
-}
-
-TEST(Names, RejectsInvalidFieldNamesOfNestedTypes)
-{
-  auto channel = LogChannel::create("chan");
   OuterOk outer;
-  for(const std::string name : { "o1", "o2" })
-  {
-    const auto msg =
-        RegistrationError([&] { (void)channel->registerValue(name, &outer); });
-    EXPECT_TRUE(Contains(msg, "custom type 'InnerBad'")) << msg;
-    EXPECT_TRUE(Contains(msg, "'/v'")) << msg;
-  }
-  // Neither the outer nor the inner type was half-registered.
-  const auto schema = channel->getSchema();
-  EXPECT_TRUE(schema.fields.empty());
-  EXPECT_TRUE(schema.custom_types.empty());
-
-  TreeNode tree;
-  EXPECT_NO_THROW((void)channel->registerValue("tree", &tree));
-  EXPECT_EQ(channel->getSchema().custom_types.count("TreeNode"), 1u);
-}
-
-TEST(Names, RejectsInvalidFieldNamesOfTraitTypes)
-{
-  auto channel = LogChannel::create("chan");
   names_third_party::TraitBad trait_only;
-  auto msg = RegistrationError([&] { (void)channel->registerValue("t", &trait_only); });
-  EXPECT_TRUE(Contains(msg, "custom type 'TraitBad'")) << msg;
-  EXPECT_TRUE(Contains(msg, "'a//x'")) << msg;
-
-  // The trait wins over the ADL overload, for validation as for registration.
   names_third_party::BothBadTrait both;
-  msg = RegistrationError([&] { (void)channel->registerValue("b", &both); });
-  EXPECT_TRUE(Contains(msg, "'x/'")) << msg;
+  TreeNode tree;
+  EXPECT_NO_THROW((void)channel->registerValue("bad", &bad));
+  EXPECT_NO_THROW((void)channel->registerValue("outer", &outer));
+  EXPECT_NO_THROW((void)channel->registerValue("t", &trait_only));
+  EXPECT_NO_THROW((void)channel->registerValue("b", &both));
+  EXPECT_NO_THROW((void)channel->registerValue("tree", &tree));
 
   const auto schema = channel->getSchema();
-  EXPECT_TRUE(schema.fields.empty());
-  EXPECT_TRUE(schema.custom_types.empty());
+  EXPECT_EQ(schema.custom_types.at("BadFields").at(1).field_name, "y/");
+  EXPECT_EQ(schema.custom_types.at("InnerBad").at(0).field_name, "/v");
+  EXPECT_EQ(schema.custom_types.at("TraitBad").at(0).field_name, "a//x");
+  // The trait wins over the ADL overload.
+  EXPECT_EQ(schema.custom_types.at("BothBadTrait").at(0).field_name, "x/");
+  EXPECT_EQ(schema.custom_types.count("TreeNode"), 1u);
 }
 
 TEST(Names, ErrorsNameChannelAndValue)

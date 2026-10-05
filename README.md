@@ -65,9 +65,11 @@ on a real-time thread.
   old id is stale: `setEnabled()` and `unregister()` throw `std::invalid_argument` instead of
   touching the replacement, `isEnabled()` returns false, and `trySetEnabled()` returns false
   without throwing (use it on real-time threads).
-- Value names are unique per channel, contain no spaces and no empty `/`-separated
-  components: `"loco/LF/x"` is accepted, `"/loco//LF/x/"` throws. Build hierarchical names
-  with `DataTamer::JoinNames("loco/", leg, "x")`, which collapses the slashes.
+- Value names are unique per channel and contain no spaces. Names with empty `/`-separated
+  components such as `"/loco//LF/x/"` are accepted, but PlotJuggler shows them as empty path
+  elements: build hierarchical names with `DataTamer::JoinNames("loco/", leg, "x")`, which
+  collapses the slashes, and check them with `DataTamer::IsCanonicalName()` if you want to
+  enforce that (e.g. `assert(DataTamer::IsCanonicalName(name))`).
 - `LoggedValue::set()` only stores; a value disabled with `setEnabled(false)` stays disabled
   until `setEnabled(true)`.
 
@@ -120,6 +122,9 @@ int main()
 {
   // Multiple channels can use this sink. Data will be saved in mylog.mcap
   auto mcap_sink = DataTamer::MCAPSink::create("mylog.mcap");
+  // By default the file is truncated every 10 minutes, DISCARDING what was recorded:
+  // continue in mylog_1.mcap, mylog_2.mcap, ... instead (or setMaxTimeBeforeReset(0s)).
+  mcap_sink->as<DataTamer::MCAPSink>().setCreateNewFileOnReset(true);
 
   // Create a channel and attach a sink. A channel can have multiple sinks
   auto channel = DataTamer::LogChannel::create("my_channel");
@@ -301,10 +306,11 @@ sink->as<DataTamer::ROS2PublisherSink>().flush();
 Each message on `<prefix>/schemas` is the complete schema catalog, published as soon as a
 channel is prepared (reliable, transient-local, depth 1: late subscribers get the latest
 catalog). Call `channel->prepare()` before the control loop: otherwise the first
-`takeSnapshot()` prepares the channel and does that DDS write. The data topic is reliable with
-a bounded history, `KeepLast(100)` by default, so a slow subscriber cannot make the publishing
-process grow without bound; change it with `options.data_qos`, e.g.
-`rclcpp::QoS(rclcpp::KeepLast(10)).best_effort()`. A best-effort publisher does not match
+`takeSnapshot()` prepares the channel and does that DDS write. The data topic uses
+`options.data_qos`, by default reliable `KeepAll`: nothing is dropped, but a slow or stalled
+subscriber makes the publishing process queue messages without bound. In a robot process,
+prefer a bounded history, e.g. `options.data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable()`
+(or `rclcpp::QoS(rclcpp::KeepLast(10)).best_effort()`). A best-effort publisher does not match
 reliable subscribers, so they must use best effort too (a best-effort subscriber, as in
 `ros2_subscriber.py`, matches either).
 

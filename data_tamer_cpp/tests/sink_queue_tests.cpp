@@ -460,8 +460,8 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
-  // Rolling over into new files is the default: no setCreateNewFileOnReset() (#98).
   auto sink = manual<MCAPSink>((directory / "rollover.tamer.mcap").string());
+  sink->setCreateNewFileOnReset(true);
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // Every callback rolls over.
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 8; ++i)
@@ -497,7 +497,7 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
   std::filesystem::remove_all(directory);
 }
 
-TEST(SinkQueue, McapTruncateOnResetIsOptIn)
+TEST(SinkQueue, McapTruncatesOnResetByDefault)
 {
   const auto directory =
       std::filesystem::temp_directory_path() /
@@ -505,8 +505,8 @@ TEST(SinkQueue, McapTruncateOnResetIsOptIn)
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
+  // Truncating the same file is the default: no setCreateNewFileOnReset().
   auto sink = manual<MCAPSink>((directory / "truncate.mcap").string());
-  sink->setCreateNewFileOnReset(false);
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 4; ++i)
@@ -613,6 +613,7 @@ TEST(SinkQueue, McapRolloverRestartsSequencePerFile)
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
   auto sink = manual<MCAPSink>((directory / "seq.mcap").string());
+  sink->setCreateNewFileOnReset(true);
   auto channel = channelWith(sink, &value);
   const auto take = [&](int count) {
     for(int i = 0; i < count; ++i)
@@ -648,6 +649,7 @@ TEST(SinkQueue, McapRolloverSkipsExistingFiles)
   }
   uint64_t value = 1;
   auto sink = manual<MCAPSink>((directory / "run.tamer.mcap").string());
+  sink->setCreateNewFileOnReset(true);
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 3; ++i)

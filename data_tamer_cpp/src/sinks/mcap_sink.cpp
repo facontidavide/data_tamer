@@ -73,7 +73,7 @@ struct MCAPSink::Pimpl
   std::unordered_map<uint64_t, ChannelInfo> hash_to_channel;
   std::unordered_map<uint64_t, Schema> schemas;
 
-  bool create_file_on_reset = true;
+  bool create_file_on_reset = false;
   std::string original_filepath;
   size_t file_reset_counter = 1;
 
@@ -145,8 +145,9 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
     throw std::runtime_error("MCAP write failed: " + status.message);
   }
 
-  // If reset_time is exceeded, continue in a new numbered file (or truncate
-  // the current one, if create_file_on_reset was disabled).
+  // If reset_time is exceeded, truncate the current file (better than filling
+  // the disk, if you forgot to stop the application), or continue in a new
+  // numbered file if create_file_on_reset is enabled.
   if(_p->reset_time != std::chrono::seconds(0) &&
      std::chrono::system_clock::now() - _p->start_time > _p->reset_time)
   {
