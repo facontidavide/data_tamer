@@ -1,11 +1,9 @@
 #include "data_tamer/sinks/mcap_sink.hpp"
-#include "data_tamer/contrib/SerializeMe.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -13,30 +11,12 @@
 #define MCAP_IMPLEMENTATION
 #endif
 
-#include <mcap/writer.hpp>
-#include <mcap/reader.hpp>
-
-#if defined __has_include && __has_include("boost/container/small_vector.hpp")
-#include <boost/container/small_vector.hpp>
-
-namespace SerializeMe
-{
-template <size_t N>
-void SerializeIntoBuffer(SpanBytes& buffer,
-                         boost::container::small_vector<uint8_t, N> const& value)
-{
-  SerializeMe::SerializeIntoBuffer(buffer, uint32_t(value.size()));
-  std::memcpy(buffer.data(), value.data(), value.size());
-  buffer.trimFront(value.size());
-}
-}  // end namespace SerializeMe
-
-#endif
+// After MCAP_IMPLEMENTATION: this includes <mcap/writer.hpp>.
+#include "data_tamer/sinks/mcap_encoding.hpp"
+#include <mcap/reader.hpp>  // its implementation is compiled here, as before
 
 namespace DataTamer
 {
-
-static constexpr char const* kDataTamer = "data_tamer";
 
 namespace details
 {
@@ -100,7 +80,7 @@ struct MCAPSink::Pimpl
   std::chrono::seconds reset_time = std::chrono::seconds(60 * 10);
   std::chrono::system_clock::time_point start_time;
 
-  std::vector<uint8_t> merged_payload;
+  std::vector<uint8_t> message_body;  // reused, see mcap_encoding::WriteMessage
   bool forced_stop_recording = false;
   std::recursive_mutex mutex;
 };
@@ -119,7 +99,7 @@ void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compress
   std::scoped_lock lk(_p->mutex);
   // Open the new file first: if that fails the current recording stays intact.
   auto writer = std::make_unique<mcap::McapWriter>();
-  mcap::McapWriterOptions options(kDataTamer);
+  mcap::McapWriterOptions options(mcap_encoding::kEncoding);
   options.compression =
       do_compression ? mcap::Compression::Zstd : mcap::Compression::None;
   const auto status = writer->open(filepath, options);
@@ -140,27 +120,13 @@ void MCAPSink::onSchema(Schema const& schema)
 {
   std::scoped_lock lk(_p->mutex);
   _p->schemas[schema.hash] = schema;
-  const auto& channel_name = schema.channel_name;
   auto it = _p->hash_to_channel.find(schema.hash);
   if(it != _p->hash_to_channel.end() || !_p->writer)  // stopped: re-added on restart
   {
     return;
   }
 
-  std::stringstream ss;
-  ss << schema;
-  std::string schema_str = ss.str();
-
-  auto const schema_name = channel_name + "::" + std::to_string(schema.hash);
-
-  // Register a Schema
-  mcap::Schema mcap_schema(schema_name, kDataTamer, schema_str);
-  _p->writer->addSchema(mcap_schema);
-
-  // Register a Channel
-  mcap::Channel publisher(channel_name, kDataTamer, mcap_schema.id);
-  _p->writer->addChannel(publisher);
-  _p->hash_to_channel[schema.hash].id = publisher.id;
+  _p->hash_to_channel[schema.hash].id = mcap_encoding::AddChannel(*_p->writer, schema);
 }
 
 void MCAPSink::onSnapshot(const SnapshotRef& ref)
@@ -171,27 +137,9 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
     return;
   }
   const Snapshot& snapshot = *ref;
-  // the payload must contain both the ActiveMask and the other data
-  auto& merged_payload = _p->merged_payload;
-  const auto size_mask = snapshot.active_mask.size();
-  const auto size_data = snapshot.payload.size();
-
-  merged_payload.resize(size_mask + size_data + sizeof(uint32_t) * 2);
-  SerializeMe::SpanBytes buffer(merged_payload);
-  SerializeMe::SerializeIntoBuffer(buffer, snapshot.active_mask);
-  SerializeMe::SerializeIntoBuffer(buffer, snapshot.payload);
-
-  // Write our message
-  mcap::Message msg;
   auto& channel = _p->hash_to_channel.at(snapshot.schema_hash);
-  msg.channelId = channel.id;
-  msg.sequence = channel.next_sequence++;
-  // Timestamp requires nanosecond
-  msg.logTime = mcap::Timestamp(snapshot.timestamp.count());
-  msg.publishTime = msg.logTime;
-  msg.data = reinterpret_cast<std::byte const*>(merged_payload.data());  // NOLINT
-  msg.dataSize = merged_payload.size();
-  const auto status = _p->writer->write(msg);
+  const auto status = mcap_encoding::WriteSnapshot(
+      *_p->writer, channel.id, channel.next_sequence++, snapshot, _p->message_body);
   if(!status.ok())
   {
     throw std::runtime_error("MCAP write failed: " + status.message);

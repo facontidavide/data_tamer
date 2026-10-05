@@ -86,6 +86,18 @@ private:
  * - onSnapshot() runs on the worker thread, in queue order. Throw to report a
  *   failure: the worker counts it and keeps the message (see SinkWorker).
  *
+ * Keep onSnapshot() short. Every queued or retained SnapshotRef holds a slot of
+ * the channel's snapshot pool, which all sinks of that channel share
+ * (SnapshotPool::kDefaultCapacity = 64 slots, see LogChannel::setPoolCapacity).
+ * A sink that blocks in onSnapshot(), or retains its references, lets the
+ * snapshots queued behind it pile up; once they occupy every slot,
+ * takeSnapshot() and tryTakeSnapshot() return SnapshotResult::pool_exhausted
+ * and the sample is lost for EVERY sink of the channel, not only the slow one.
+ * At a 1 kHz control rate, 64 slots last 64 ms. A sink that needs to do slow
+ * work (network, disk flushes, batching) should copy what it needs
+ * (`Snapshot copy = *ref;`), hand the copy to its own thread and return, or
+ * raise the pool capacity before prepare().
+ *
  * A callback may use the channel's const queries (getSchema(), stats(), ...)
  * but must never call anything that changes it (registration, sinks,
  * prepare()): those wait for callbacks to finish and would deadlock.

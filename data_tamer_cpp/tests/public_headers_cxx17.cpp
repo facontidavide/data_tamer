@@ -18,6 +18,7 @@
 #include "data_tamer/details/write_mutex.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
+#include "data_tamer/sinks/mcap_encoding.hpp"
 // sinks/ros2_publisher_sink.hpp is not checked: rclcpp itself requires C++20 on
 // recent ROS 2 distributions, so that header follows rclcpp's standard.
 #include "data_tamer_parser/data_tamer_parser.hpp"
