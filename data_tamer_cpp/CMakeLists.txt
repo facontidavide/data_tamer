@@ -50,6 +50,7 @@ add_library(data_tamer
     src/data_sink.cpp
     src/types.cpp
     src/sinks/mcap_sink.cpp
+    src/sinks/mcap_ring_sink.cpp
     $<$<BOOL:${DATA_TAMER_BUILD_ROS}>:src/sinks/ros2_publisher_sink.cpp>
 )
 add_library(data_tamer::data_tamer ALIAS data_tamer)

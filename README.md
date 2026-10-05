@@ -317,6 +317,44 @@ reliable subscribers, so they must use best effort too (a best-effort subscriber
 [ros2_publisher](data_tamer_cpp/examples/ros2_publisher.cpp) (`--aggregate`, `--yaml`) and
 [python/ros2_subscriber.py](python/ros2_subscriber.py) show both ends.
 
+## Flight recorder: dump the last seconds on demand
+
+`MCAPRingSink` keeps the last `window` of every attached channel in a preallocated RAM ring
+and writes an MCAP file only when you call `requestDump()`, for instance on a protective stop
+or a fault. See [T04_flight_recorder.cpp](data_tamer_cpp/examples/T04_flight_recorder.cpp).
+
+```cpp
+#include "data_tamer/sinks/mcap_ring_sink.hpp"
+
+DataTamer::MCAPRingOptions options;
+options.filepath = "fault.mcap";          // fault_1.mcap, fault_2.mcap, ... never overwritten
+options.window = std::chrono::seconds(5);  // history before the trigger
+options.capacity_bytes = 64 << 20;         // RAM ring; the sink uses about twice this
+auto worker = DataTamer::MCAPRingSink::create(options);
+channel->addDataSink(worker);
+auto& recorder = worker->as<DataTamer::MCAPRingSink>();
+
+// From any thread, real-time ones included: one atomic compare-exchange.
+recorder.requestDump(std::chrono::seconds(2));  // also keep 2 s after the event
+
+// At shutdown, write a dump requested just before it.
+worker->stop();
+recorder.flushPendingDump();
+```
+
+- The trigger is the first snapshot delivered after the request, and all times are snapshot
+  timestamps: with trigger time `T` the file holds `[T - window, T + post_trigger]`, so a dump
+  behaves the same in simulation, replay and on hardware. It is complete at the first snapshot
+  stamped after `T + post_trigger`; channels are queued separately, so a snapshot of another
+  channel delivered later than that one is not included even if stamped earlier.
+- `onSnapshot()` copies the data into the ring and releases the pool slot at once; it allocates
+  nothing after the ring is allocated. When the ring is full, the oldest snapshots are evicted
+  even if younger than `window`; a dump that lost data that way reports `truncated`.
+- A writer thread writes the file; the sink worker never waits for disk. While a request is
+  active (until its dump is handed to the writer) further requests return `false` and are
+  ignored. `setDumpCallback()` reports each file (including write errors such as a full disk),
+  `stats()` the counters. Dump numbers whose file exists already are skipped.
+
 # Compilation
 
 ## Compiling with ROS2
