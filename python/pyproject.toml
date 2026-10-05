@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-tamer-parser"
+dynamic = ["version"]
+description = "Decoder for the Data Tamer wire format (MCAP files, ROS 2 messages); standard library only"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]  # a copy of the repository's LICENSE
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["data_tamer", "mcap", "ros2", "logging", "robotics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.optional-dependencies]
+mcap = ["mcap>=1.0"]  # for iter_mcap()
+
+[project.urls]
+Homepage = "https://github.com/PlotJuggler/data_tamer"
+"Wire format" = "https://github.com/PlotJuggler/data_tamer/blob/V2/docs/wire_format.md"
+
+[tool.setuptools]
+# Only the decoder module: the ROS example and the tests next to it are not installed.
+py-modules = ["data_tamer_parser"]
+
+[tool.setuptools.dynamic]
+version = { attr = "data_tamer_parser.__version__" }

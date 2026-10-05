@@ -82,3 +82,8 @@ build*
 *.mcap
 .superpowers/
 .worktrees/
+
+# Python packaging (python/pyproject.toml)
+__pycache__/
+*.egg-info/
+python/dist/
