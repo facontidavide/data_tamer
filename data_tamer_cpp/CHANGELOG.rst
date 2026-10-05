@@ -85,6 +85,18 @@ Unreleased
   name the channel and the value, e.g. ``channel 'controller/walk': value
   'loco/LF/x' registered twice (unregister() it first)``; the name checks run
   before any custom type is discovered.
+* **Breaking, MCAP rollover** (#98): when ``setMaxTimeBeforeReset`` expires
+  (600 s by default), ``MCAPSink`` now continues in a new numbered file instead
+  of truncating the current one, so nothing recorded is discarded. Truncation is
+  opt-in with ``setCreateNewFileOnReset(false)``. Numbered names that already
+  exist (e.g. from a previous run with the same path) are skipped instead of
+  overwritten. The counter is inserted before the extension, now the trailing
+  run of alphabetic dot-segments, so multi-part extensions survive and dotted
+  stems stay whole: ``run.tamer.mcap`` rolls over to ``run_1.tamer.mcap`` (it
+  was ``run.tamer_1.mcap``), ``log_2026.10.05.mcap`` to
+  ``log_2026.10.05_1.mcap``.
+* MCAP messages carry a per-channel ``sequence`` number (1, 2, 3, ... per MCAP
+  channel and file) instead of always 1, so readers can detect gaps (#98).
 * **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
 
   - ``RegistrationID`` is an opaque handle (no public ``first_index`` /

@@ -284,7 +284,9 @@ their own clock.
 - One MCAP **channel** record per channel: `topic` = the channel name,
   `messageEncoding` = `data_tamer`, `metadata` empty.
 - Each **message** has `logTime` = `publishTime` = the snapshot timestamp in
-  nanoseconds, `sequence` = 1, and this body:
+  nanoseconds, `sequence` = a per-channel counter (1 for the first message of
+  each MCAP channel in a file, then +1 per message of that channel; a jump
+  means messages are missing), and this body:
 
 ```
 uint32 mask_length        little-endian

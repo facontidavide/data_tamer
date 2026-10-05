@@ -160,6 +160,7 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
     EXPECT_EQ(view.channel->topic, "wire_test");
     EXPECT_EQ(view.channel->messageEncoding, "data_tamer");
     EXPECT_EQ(view.message.logTime, mcap::Timestamp(stamp.count()));
+    EXPECT_EQ(view.message.sequence, bodies.size() + 1);  // per channel, from 1
     const auto* data = reinterpret_cast<const uint8_t*>(view.message.data);
     bodies.emplace_back(data, data + view.message.dataSize);
   }
