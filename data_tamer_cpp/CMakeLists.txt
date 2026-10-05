@@ -93,7 +93,7 @@ if(DATA_TAMER_BUILD_ROS)
     )
 
     ament_export_targets(data_tamerTargets HAS_LIBRARY_TARGET)
-    ament_export_dependencies(mcap_vendor rclcpp rclcpp_lifecycle data_tamer_msgs)
+    ament_export_dependencies(Threads mcap_vendor rclcpp rclcpp_lifecycle data_tamer_msgs)
     ament_package()
 elseif(TARGET mcap_lib)
     list(APPEND INSTALL_TARGETS mcap_lib)
