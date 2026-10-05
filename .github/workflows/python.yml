@@ -1,0 +1,75 @@
+name: python
+
+# Tests the Python decoder (python/), builds its sdist and wheel, and publishes
+# them to PyPI as data-tamer-parser when a release tag X.Y.Z is pushed. The
+# package is versioned with the library: release tag == package.xml version ==
+# data_tamer_parser.__version__ (checked below). Publishing uses PyPI trusted
+# publishing: the project must list this repository, this workflow (python.yml)
+# and the environment "pypi" as a trusted publisher on pypi.org.
+
+on:
+  push:
+    branches: [main, V2]
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python }}
+    - name: Test without optional packages
+      working-directory: python
+      run: python -m unittest -v
+    - name: Install the package with the mcap extra
+      run: |
+        python -m pip install "./python[mcap]"
+        cd "$RUNNER_TEMP" && python -c "import data_tamer_parser, mcap; print(data_tamer_parser.__file__)"
+    - name: Test with mcap (iter_mcap tests run)
+      working-directory: python
+      run: python -m unittest -v
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Build sdist and wheel
+      run: |
+        python -m pip install build
+        python -m build python --outdir dist
+    - name: Check that the tag matches the package version
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        [[ "${GITHUB_REF_NAME}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release tag"; exit 1; }
+        version=$(python -c "import sys; sys.path.insert(0, 'python'); import data_tamer_parser; print(data_tamer_parser.__version__)")
+        test "$version" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != data_tamer_parser.__version__ $version"; exit 1; }
+    - uses: actions/upload-artifact@v4
+      with:
+        name: python-dist
+        path: dist/
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: python-dist
+        path: dist/
+    - uses: pypa/gh-action-pypi-publish@release/v1

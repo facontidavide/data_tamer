@@ -262,6 +262,9 @@ decoders use 64) so that a malformed or cyclic schema cannot recurse forever.
 Flattened series names, as produced by the reference decoders and PlotJuggler:
 nested fields join with `/`, container elements append `[i]`:
 `pose/position/x`, `vec[2]`, `points[1]/z`.
+`Schema.field_names()` in the Python decoder lists these names from the schema
+alone; the length of a dynamic vector is only known per message, so it lists
+its elements once with empty brackets (`vec[]`, `points[]/z`).
 
 ### 3.3 Timestamp
 
