@@ -10,7 +10,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -29,7 +31,9 @@ public:
   void onSnapshot(const SnapshotRef& snapshot) override
   {
     if(callback)
+    {
       callback(snapshot);
+    }
   }
   std::function<void(const SnapshotRef&)> callback;
   std::atomic<int> registrations{ 0 };
@@ -86,7 +90,9 @@ TEST(SinkQueue, QueueOverflowReleasesFailedFanoutWithoutExhaustingPool)
   int received = 0;
   large->callback = [&](const SnapshotRef&) { ++received; };
   for(int i = 0; i < 32; ++i)
+  {
     ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
   EXPECT_EQ(small->registrations.load(), 1);
   large.drain();
   for(int i = 0; i < 160; ++i)
@@ -144,16 +150,22 @@ TEST(SinkQueue, FixedPayloadFanoutAndOverflowDoNotAllocate)
     for(int i = 0; i < 200; ++i)
     {
       if(channel->takeSnapshot() == SnapshotResult::ok)
+      {
         ++successes;
+      }
       else
+      {
         ++failures;
+      }
       large.drain();
     }
     small.drain();
     for(int i = 0; i < 100; ++i)
     {
       if(channel->takeSnapshot() == SnapshotResult::ok)
+      {
         ++successes;
+      }
       small.drain();
       large.drain();
     }
@@ -182,7 +194,9 @@ TEST(SinkQueue, ExceptionsReleaseReferencesAndDoNotStopDelivery)
       ++calls;
       delivered.notify_all();
       if(calls % 2)
+      {
         throw std::runtime_error("callback failed");
+      }
     };
     for(int i = 0; i < 160; ++i)
     {
@@ -194,7 +208,9 @@ TEST(SinkQueue, ExceptionsReleaseReferencesAndDoNotStopDelivery)
             delivered.wait_for(lock, std::chrono::seconds(5), [&] { return calls > i; }));
       }
       else
+      {
         sink.drain();
+      }
     }
     sink.worker->stop();
     EXPECT_EQ(calls, 160);
@@ -215,7 +231,9 @@ TEST(SinkQueue, WorkerAndManualDrainerSerializeCallbacksAndPreserveProducerOrder
   std::vector<uint64_t> values[2];
   sink->callback = [&](const SnapshotRef& snapshot) {
     if(active.fetch_add(1) != 0)
+    {
       ++overlap;
+    }
     uint64_t value = 0;
     std::memcpy(&value, snapshot->payload.data(), sizeof(value));
     values[snapshot->schema_hash == first_hash ? 0 : 1].push_back(value);
@@ -224,17 +242,27 @@ TEST(SinkQueue, WorkerAndManualDrainerSerializeCallbacksAndPreserveProducerOrder
   std::atomic<bool> done{ false };
   std::thread drainer([&] {
     while(!done)
+    {
       sink.drain();
+    }
   });
   std::vector<uint64_t> accepted[2];
   std::thread producer([&] {
     for(b = 0; b < 1000; ++b)
+    {
       if(second->takeSnapshot() == SnapshotResult::ok)
+      {
         accepted[1].push_back(b);
+      }
+    }
   });
   for(a = 0; a < 1000; ++a)
+  {
     if(first->takeSnapshot() == SnapshotResult::ok)
+    {
       accepted[0].push_back(a);
+    }
+  }
   producer.join();
   done = true;
   drainer.join();
@@ -276,19 +304,25 @@ TEST(SinkQueue, StopDuringPublicationDrainsEveryAcceptedSnapshot)
     while(publish)
     {
       if(channel->takeSnapshot() == SnapshotResult::ok)
+      {
         ++accepted;
+      }
       attempted = true;
     }
   });
   while(!attempted)
+  {
     std::this_thread::yield();
+  }
   // stop() closes admission at once, then waits for the blocked callback.
   std::thread stopper([&] { sink.worker->stop(); });
   publish = false;
   producer.join();
   while(channel->takeSnapshot() ==
         SnapshotResult::ok)  // admitted until the close is observed
+  {
     ++accepted;
+  }
   {
     std::lock_guard lock(mutex);
     release = true;
@@ -355,7 +389,9 @@ TEST(SinkQueue, WorkerDestructionDeliversQueuedSnapshotsBeforeTheSink)
     auto sink = manual<Observer>(delivered, destroyed);
     channel->addDataSink(sink);
     for(int i = 0; i < 5; ++i)
+    {
       ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    }
     channel->removeDataSink(sink);
   }
   EXPECT_TRUE(destroyed);
@@ -390,8 +426,12 @@ TEST(SinkQueue, McapFinalizationWritesEveryAcceptedSnapshotAfterRestart)
     }
     size_t accepted = 0;
     for(int i = 0; i < 1000; ++i)
+    {
       if(channel->takeSnapshot() == SnapshotResult::ok)
+      {
         ++accepted;
+      }
+    }
     for(int repeat = 0; repeat < 2; ++repeat)  // stopping twice must be harmless
     {
       sink.worker->stop();
@@ -420,31 +460,214 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
-  auto sink = manual<MCAPSink>((directory / "rollover.mcap").string());
-  sink->setCreateNewFileOnReset(true);
+  // Rolling over into new files is the default: no setCreateNewFileOnReset() (#98).
+  auto sink = manual<MCAPSink>((directory / "rollover.tamer.mcap").string());
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // Every callback rolls over.
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 8; ++i)
+  {
     ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
   sink.worker->stop();  // delivers the 8, each one rolling the file over
   EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
   sink->stopRecording();
   size_t count = 0;
+  size_t files = 0;
   for(const auto& file : std::filesystem::directory_iterator(directory))
   {
-    // rollover.mcap, rollover_1.mcap, ...: the counter goes before the extension (#71)
-    EXPECT_EQ(file.path().extension(), ".mcap") << file.path();
-    EXPECT_TRUE(file.path().stem().string().rfind("rollover", 0) == 0) << file.path();
+    // rollover.tamer.mcap, rollover_1.tamer.mcap, ...: the counter goes before
+    // the extension, so the multi-part extension survives (#71, #98)
+    const auto name = file.path().filename().string();
+    EXPECT_EQ(name.substr(name.find('.')), ".tamer.mcap") << file.path();
+    EXPECT_TRUE(name.rfind("rollover", 0) == 0) << file.path();
     mcap::McapReader reader;
     ASSERT_TRUE(reader.open(file.path().string()).ok());
+    for(const auto& message : reader.readMessages())
+    {
+      // Sequence numbers restart at 1 in every file.
+      EXPECT_EQ(message.message.sequence, 1u) << file.path();
+      ++count;
+    }
+    ++files;
+  }
+  EXPECT_EQ(count, 8u);
+  EXPECT_EQ(files, 9u);  // the last rollover leaves an empty file
+  EXPECT_TRUE(std::filesystem::exists(directory / "rollover_1.tamer.mcap"));
+  EXPECT_TRUE(std::filesystem::exists(directory / "rollover_8.tamer.mcap"));
+  std::filesystem::remove_all(directory);
+}
+
+TEST(SinkQueue, McapTruncateOnResetIsOptIn)
+{
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("data_tamer_truncate_" + std::to_string(NsecSinceEpoch().count()));
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  uint64_t value = 1;
+  auto sink = manual<MCAPSink>((directory / "truncate.mcap").string());
+  sink->setCreateNewFileOnReset(false);
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));
+  auto channel = channelWith(sink, &value);
+  for(int i = 0; i < 4; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.worker->stop();
+  sink->stopRecording();
+  size_t files = 0;
+  for(const auto& file : std::filesystem::directory_iterator(directory))
+  {
+    EXPECT_EQ(file.path().filename(), "truncate.mcap");
+    mcap::McapReader reader;
+    ASSERT_TRUE(reader.open(file.path().string()).ok());
+    size_t count = 0;
     for(const auto& message : reader.readMessages())
     {
       (void)message;
       ++count;
     }
+    EXPECT_EQ(count, 0u);  // each reset discarded what came before
+    ++files;
   }
-  EXPECT_EQ(count, 8u);
-  EXPECT_TRUE(std::filesystem::exists(directory / "rollover_1.mcap"));
+  EXPECT_EQ(files, 1u);
+  std::filesystem::remove_all(directory);
+}
+
+TEST(SinkQueue, McapSequenceIsPerChannel)
+{
+  const auto path =
+      (std::filesystem::temp_directory_path() /
+       ("data_tamer_sequence_" + std::to_string(NsecSinceEpoch().count()) + ".mcap"))
+          .string();
+  uint64_t value = 1;
+  auto sink = manual<MCAPSink>(path);
+  auto first = channelWith(sink, &value, "first");
+  auto second = channelWith(sink, &value, "second");
+  for(int i = 0; i < 5; ++i)
+  {
+    ASSERT_EQ(first->takeSnapshot(), SnapshotResult::ok);
+    if(i % 2 == 0)
+    {
+      ASSERT_EQ(second->takeSnapshot(), SnapshotResult::ok);
+    }
+  }
+  sink.worker->stop();
+  sink->stopRecording();
+  std::map<std::string, std::vector<uint32_t>> sequences;
+  {
+    mcap::McapReader reader;
+    ASSERT_TRUE(reader.open(path).ok());
+    for(const auto& message : reader.readMessages())
+    {
+      sequences[message.channel->topic].push_back(message.message.sequence);
+    }
+  }
+  std::filesystem::remove(path);
+  EXPECT_EQ(sequences["first"], (std::vector<uint32_t>{ 1, 2, 3, 4, 5 }));
+  EXPECT_EQ(sequences["second"], (std::vector<uint32_t>{ 1, 2, 3 }));
+}
+
+TEST(SinkQueue, McapNumberedPathKeepsMultiPartExtension)
+{
+  using details::NumberedPath;
+  EXPECT_EQ(NumberedPath("run.tamer.mcap", 1), "run_1.tamer.mcap");
+  EXPECT_EQ(NumberedPath("log.mcap", 3), "log_3.mcap");
+  EXPECT_EQ(NumberedPath("log", 2), "log_2");
+  EXPECT_EQ(NumberedPath("/tmp/dir.d/run.tamer.mcap", 4), "/tmp/dir.d/run_4.tamer.mcap");
+  EXPECT_EQ(NumberedPath("dir.d/log", 1), "dir.d/log_1");
+  EXPECT_EQ(NumberedPath("C:\\data.d\\log.mcap", 1), "C:\\data.d\\log_1.mcap");
+  EXPECT_EQ(NumberedPath(".hidden", 1), ".hidden_1");
+  EXPECT_EQ(NumberedPath("dir/.hidden.mcap", 2), "dir/.hidden_2.mcap");
+  EXPECT_EQ(NumberedPath("./run.mcap", 1), "./run_1.mcap");
+  // Dotted stems stay whole: only alphabetic trailing segments are the extension.
+  EXPECT_EQ(NumberedPath("robot_v1.2.mcap", 1), "robot_v1.2_1.mcap");
+  EXPECT_EQ(NumberedPath("log_2026.10.05.mcap", 1), "log_2026.10.05_1.mcap");
+  EXPECT_EQ(NumberedPath("data.v2.mcap", 1), "data.v2_1.mcap");
+  EXPECT_EQ(NumberedPath("log.123", 1), "log.123_1");
+  EXPECT_EQ(NumberedPath("log.", 1), "log._1");
+  EXPECT_EQ(NumberedPath("run.TAMER.Mcap", 1), "run_1.TAMER.Mcap");
+}
+
+namespace
+{
+std::vector<uint32_t> mcapSequences(const std::filesystem::path& path)
+{
+  std::vector<uint32_t> sequences;
+  mcap::McapReader reader;
+  EXPECT_TRUE(reader.open(path.string()).ok()) << path;
+  for(const auto& message : reader.readMessages())
+  {
+    sequences.push_back(message.message.sequence);
+  }
+  return sequences;
+}
+}  // namespace
+
+TEST(SinkQueue, McapRolloverRestartsSequencePerFile)
+{
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("data_tamer_rollover_seq_" + std::to_string(NsecSinceEpoch().count()));
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  uint64_t value = 1;
+  auto sink = manual<MCAPSink>((directory / "seq.mcap").string());
+  auto channel = channelWith(sink, &value);
+  const auto take = [&](int count) {
+    for(int i = 0; i < count; ++i)
+    {
+      ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    }
+    sink.drain();
+  };
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(0));  // no rollover
+  take(3);
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // roll over after the next
+  take(1);
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(0));
+  take(3);
+  sink.worker->stop();
+  sink->stopRecording();
+  EXPECT_EQ(mcapSequences(directory / "seq.mcap"), (std::vector<uint32_t>{ 1, 2, 3, 4 }));
+  EXPECT_EQ(mcapSequences(directory / "seq_1.mcap"), (std::vector<uint32_t>{ 1, 2, 3 }));
+  std::filesystem::remove_all(directory);
+}
+
+TEST(SinkQueue, McapRolloverSkipsExistingFiles)
+{
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("data_tamer_rollover_skip_" + std::to_string(NsecSinceEpoch().count()));
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  // Leftovers of a previous run with the same path (with a gap at _3).
+  for(const char* name : { "run_1.tamer.mcap", "run_2.tamer.mcap", "run_4.tamer.mcap" })
+  {
+    std::ofstream(directory / name) << "previous run";
+  }
+  uint64_t value = 1;
+  auto sink = manual<MCAPSink>((directory / "run.tamer.mcap").string());
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));
+  auto channel = channelWith(sink, &value);
+  for(int i = 0; i < 3; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.worker->stop();
+  sink->stopRecording();
+  for(const char* name : { "run_1.tamer.mcap", "run_2.tamer.mcap", "run_4.tamer.mcap" })
+  {
+    std::ifstream file(directory / name);
+    std::string content;
+    std::getline(file, content);
+    EXPECT_EQ(content, "previous run") << name;
+  }
+  // The three rollovers used the first unused names: _3, _5, _6.
+  EXPECT_EQ(mcapSequences(directory / "run_3.tamer.mcap"), std::vector<uint32_t>{ 1 });
+  EXPECT_EQ(mcapSequences(directory / "run_5.tamer.mcap"), std::vector<uint32_t>{ 1 });
+  EXPECT_TRUE(mcapSequences(directory / "run_6.tamer.mcap").empty());
+  EXPECT_FALSE(std::filesystem::exists(directory / "run_7.tamer.mcap"));
   std::filesystem::remove_all(directory);
 }
 
@@ -468,7 +691,9 @@ TEST(SinkQueue, FastConsumerCannotReleaseParentBeforeSecondFanout)
   }
   size_t accepted = 0;
   for(value = 0; value < 10000; ++value)
+  {
     accepted += channel->takeSnapshot() == SnapshotResult::ok;
+  }
   first.worker->stop();
   second.worker->stop();
   EXPECT_GT(accepted, 0u);
