@@ -7,6 +7,7 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
+#include "data_tamer_parser/data_tamer_parser.hpp"
 #include "test_sinks.hpp"
 #include "../examples/geometry_types.hpp"
 
@@ -127,6 +128,8 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   const std::string schema_text = ToStr(channel->getSchema());
   checkGolden("schema.txt", { schema_text.begin(), schema_text.end() });
   EXPECT_EQ(channel->getSchema().hash, SchemaTextHash(schema_text));
+  const std::string schema_yaml = ToYaml(channel->getSchema());
+  checkGolden("schema.yaml", { schema_yaml.begin(), schema_yaml.end() });
   checkGolden("snapshot_full.mask", full.active_mask);
   checkGolden("snapshot_full.payload", full.payload);
 
@@ -165,4 +168,49 @@ TEST(WireFormat, SchemaTextAndSnapshotsMatchGoldenVectors)
   ASSERT_EQ(bodies.size(), 2u);
   checkGolden("snapshot_full.mcap_message", bodies[0]);
   checkGolden("snapshot_masked.mcap_message", bodies[1]);
+}
+
+// The YAML rendering (section 2.1) of names that are "/"-separated paths:
+// nesting, runs that cannot be nested, and keys that need quoting.
+TEST(WireFormat, YamlSchemaMatchesGoldenVectors)
+{
+  auto channel = LogChannel::create("nested test");
+  auto sink = DataTamerTest::manual<DummySink>();
+  channel->addDataSink(sink);
+
+  double value = 0;
+  uint8_t flag = 0;
+  StampedPose pose;
+  channel->registerValue("arm/joint_1/position", &value);
+  channel->registerValue("arm/joint_1/velocity", &value);
+  channel->registerValue("arm/joint_2/position", &value);
+  channel->registerValue("arm/joint_2/velocity", &value);
+  channel->registerValue("arm/mode", &flag);
+  channel->registerValue("state", &flag);
+  channel->registerValue("arm/late", &value);  // "arm" is taken: stays flat
+  channel->registerValue("single/x", &value);  // a run of one: stays flat
+  channel->registerValue("dup", &flag);        // a field named like the group
+  channel->registerValue("dup/a", &value);
+  channel->registerValue("dup/b", &value);
+  channel->registerValue("on", &flag);  // YAML 1.1 boolean: quoted
+  channel->registerValue("7up/x", &value);
+  channel->registerValue("7up/y", &value);  // nested under a quoted key
+  channel->registerValue("cart/pose", &pose);
+
+  const Schema schema = channel->getSchema();
+  const std::string text = ToStr(schema);
+  const std::string yaml = ToYaml(schema);
+  checkGolden("schema_nested.txt", { text.begin(), text.end() });
+  checkGolden("schema_nested.yaml", { yaml.begin(), yaml.end() });
+
+  // Both renderings parse to the same schema, and the YAML one verifies the
+  // hash through the line format it renders back to.
+  const auto from_text = DataTamerParser::BuildSchemaFromText(text, true);
+  const auto from_yaml = DataTamerParser::BuildSchemaFromText(yaml, true);
+  EXPECT_EQ(from_yaml.hash, schema.hash);
+  EXPECT_EQ(from_yaml.channel_name, "nested test");
+  EXPECT_EQ(from_yaml.fields, from_text.fields);
+  EXPECT_EQ(from_yaml.custom_types, from_text.custom_types);
+  EXPECT_EQ(DataTamerParser::ToText(from_yaml), text);
+  EXPECT_LT(yaml.size(), text.size());
 }

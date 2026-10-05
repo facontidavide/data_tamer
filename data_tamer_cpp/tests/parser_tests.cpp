@@ -8,6 +8,7 @@
 #include <thread>
 #include <variant>
 #include <cstring>
+#include <locale>
 #include <string>
 
 using namespace DataTamerParser;
@@ -429,4 +430,219 @@ TEST(DataTamerParser, RejectsMalformedInput)
   EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "
                                    "c\n\nint32[3 a\n"),
                std::runtime_error);
+}
+
+namespace
+{
+// Same field names as the data_tamer_msgs types, without depending on ROS.
+struct FakeSchemaMsg
+{
+  uint64_t hash;
+  std::string channel_name;
+  std::string schema_text;
+};
+struct FakeSnapshotMsg
+{
+  uint64_t timestamp_nsec;
+  uint64_t schema_hash;
+  std::vector<uint8_t> active_mask;
+  std::vector<uint8_t> payload;
+};
+struct FakeBatchMsg
+{
+  std::vector<FakeSchemaMsg> schemas;
+  std::vector<FakeSnapshotMsg> snapshots;
+};
+}  // namespace
+
+TEST(DataTamerParser, SnapshotBatchHelpers)
+{
+  auto channel = DataTamer::LogChannel::create("batch_channel");
+  DataTamerTest::Attached<DataTamer::DummySink> dummy_sink;
+  channel->addDataSink(dummy_sink);
+
+  int32_t v1 = 0;
+  double v2 = 0;
+  channel->registerValue("v1", &v1);
+  channel->registerValue("v2", &v2);
+  const auto schema_in = channel->getSchema();
+
+  FakeBatchMsg batch;
+  batch.schemas.push_back({ schema_in.hash, schema_in.channel_name, ToStr(schema_in) });
+  for(int i = 0; i < 3; i++)
+  {
+    v1 = i;
+    v2 = 0.5 * i;
+    ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
+    dummy_sink.drain();
+    const auto snapshot = dummy_sink->latestSnapshot();
+    batch.snapshots.push_back({ uint64_t(snapshot.timestamp.count()),
+                                snapshot.schema_hash, snapshot.active_mask,
+                                snapshot.payload });
+  }
+  // a snapshot whose schema is unknown is skipped
+  batch.snapshots.push_back({ 0, schema_in.hash + 1, {}, {} });
+
+  DataTamerParser::SchemaRegistry registry;
+  std::vector<std::map<std::string, double>> decoded;
+  const size_t visited = DataTamerParser::ForEachSnapshotInBatch(
+      registry, batch,
+      [&](const DataTamerParser::Schema& schema,
+          const DataTamerParser::SnapshotView& view) {
+        EXPECT_EQ(schema.channel_name, "batch_channel");
+        auto& values = decoded.emplace_back();
+        EXPECT_TRUE(DataTamerParser::ParseSnapshot(
+            schema, view,
+            [&](const std::string& name, const DataTamerParser::VarNumber& n) {
+              values[name] = std::visit([](const auto& var) { return double(var); }, n);
+            }));
+      });
+
+  ASSERT_EQ(visited, 3u);
+  ASSERT_EQ(registry.size(), 1u);
+  ASSERT_NE(registry.find(schema_in.hash), nullptr);
+  ASSERT_EQ(decoded.size(), 3u);
+  for(int i = 0; i < 3; i++)
+  {
+    EXPECT_EQ(decoded[size_t(i)].at("v1"), i);
+    EXPECT_EQ(decoded[size_t(i)].at("v2"), 0.5 * i);
+  }
+
+  // without embedded schemas, a registry filled earlier (e.g. from the
+  // `schemas` topic) still decodes the batch
+  batch.schemas.clear();
+  EXPECT_EQ(DataTamerParser::ForEachSnapshotInBatch(registry, batch,
+                                                    [](const auto&, const auto&) {}),
+            3u);
+  DataTamerParser::SchemaRegistry empty_registry;
+  EXPECT_EQ(DataTamerParser::ForEachSnapshotInBatch(empty_registry, batch,
+                                                    [](const auto&, const auto&) {}),
+            0u);
+}
+
+TEST(DataTamerParser, YamlSchemaRoundTrip)
+{
+  DataTamer::Schema schema;
+  schema.channel_name = "yaml";
+  schema.fields = { { "a/b/c", DataTamer::BasicType::FLOAT64, "", false, 0 },
+                    { "a/b/d", DataTamer::BasicType::INT32, "", true, 0 },
+                    { "a/e", DataTamer::BasicType::OTHER, "Custom Type", true, 3 },
+                    { "x", DataTamer::BasicType::UINT8, "", false, 0 } };
+  schema.custom_types["Custom Type"] = { { "v", DataTamer::BasicType::BOOL, "", false,
+                                           0 } };
+  schema.custom_schemas["Blob"] = { "proto\"buf", "line 1\n\tline \"2\"\x01\nlast" };
+  schema.hash = DataTamer::ComputeSchemaHash(schema);
+
+  const auto yaml = DataTamer::ToYaml(schema);
+  const auto parsed = BuildSchemaFromText(yaml, true);
+  EXPECT_EQ(parsed.hash, schema.hash);
+  ASSERT_EQ(parsed.fields.size(), 4u);
+  EXPECT_EQ(parsed.fields[0].field_name, "a/b/c");
+  EXPECT_EQ(parsed.fields[1].field_name, "a/b/d");
+  EXPECT_TRUE(parsed.fields[1].is_vector);
+  EXPECT_EQ(parsed.fields[2].type_name, "Custom Type");
+  EXPECT_EQ(parsed.fields[2].array_size, 3u);
+  EXPECT_EQ(parsed.fields[3].type, BasicType::UINT8);
+  ASSERT_EQ(parsed.custom_schemas.count("Blob"), 1u);
+  EXPECT_EQ(parsed.custom_schemas.at("Blob").encoding, "proto\"buf");
+  EXPECT_EQ(parsed.custom_schemas.at("Blob").schema, "line 1\n\tline \"2\"\x01\nlast");
+  EXPECT_EQ(ToText(parsed), DataTamer::ToStr(schema));
+  EXPECT_EQ(DataTamer::RenderSchema(schema, DataTamer::SchemaFormat::Yaml), yaml);
+  EXPECT_EQ(DataTamer::RenderSchema(schema, DataTamer::SchemaFormat::Text),
+            DataTamer::ToStr(schema));
+
+  // empty mappings
+  DataTamer::Schema empty;
+  empty.channel_name = "empty";
+  empty.hash = DataTamer::ComputeSchemaHash(empty);
+  EXPECT_TRUE(BuildSchemaFromText(DataTamer::ToYaml(empty), true).fields.empty());
+}
+
+TEST(DataTamerParser, YamlSchemaRejectsMalformedInput)
+{
+  const std::string head = "version: 6\nhash: 1\nchannel_name: c\n";
+  EXPECT_THROW(BuildSchemaFromText("version: 7\nhash: 1\nchannel_name: c\nfields: {}\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText(head), std::runtime_error);  // no fields
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: float64\n  a: int8\n"),
+               std::runtime_error);  // duplicate key
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: float64\n   b: int8\n"),
+               std::runtime_error);  // indentation
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: [float64]\n"),
+               std::runtime_error);  // flow sequence
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  \"a: float64\n"),
+               std::runtime_error);  // unterminated string
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: int32[0]\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: float64\n", true),
+               std::runtime_error);  // wrong hash
+  // numbers too large for uint64 / an array extent: runtime_error, not out_of_range
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  a: "
+                                          "int32[99999999999999999999999]\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText("version: 6\nhash: "
+                                   "99999999999999999999\nchannel_name: "
+                                   "c\nfields: {}\n"),
+               std::runtime_error);
+  EXPECT_THROW(BuildSchemaFromText(head + "fields:\n  \"\\uD800\": int8\n"),
+               std::runtime_error);  // surrogate
+  EXPECT_THROW(BuildSchemaFromText("  version: 6\n  hash: 1\n  channel_name: c\n  "
+                                   "fields: {}\n"),
+               std::runtime_error);  // top level must start at column 0
+  std::string deep = head + "fields:\n";
+  for(int i = 0; i < 100; i++)
+  {
+    deep += std::string(size_t(2 * (i + 1)), ' ') + "k:\n";
+  }
+  EXPECT_THROW(BuildSchemaFromText(deep), std::runtime_error);
+}
+
+TEST(DataTamerParser, YamlSchemaIsLocaleIndependentAndEscapesLineBreaks)
+{
+  // a global locale with digit grouping must not leak into the hash line
+  struct Grouping : std::numpunct<char>
+  {
+    char do_thousands_sep() const override { return ','; }
+    std::string do_grouping() const override { return "\3"; }
+  };
+  const std::locale previous =
+      std::locale::global(std::locale(std::locale(), new Grouping));
+
+  DataTamer::Schema schema;
+  schema.channel_name = "line\u2028sep";
+  // NEL, LS and PS are line breaks for YAML 1.1 loaders: they must be escaped
+  schema.fields = { { "a\u0085b", DataTamer::BasicType::INT8, "", false, 0 },
+                    { "c\u2029d", DataTamer::BasicType::INT8, "", false, 0 },
+                    { "caf\u00e9", DataTamer::BasicType::INT8, "", false, 0 } };
+  schema.hash = DataTamer::ComputeSchemaHash(schema);
+  const auto yaml = DataTamer::ToYaml(schema);
+  std::locale::global(previous);
+
+  EXPECT_NE(yaml.find("hash: " + std::to_string(schema.hash) + "\n"), std::string::npos)
+      << yaml;
+  EXPECT_EQ(yaml.find("\u2028"), std::string::npos);
+  EXPECT_EQ(yaml.find("\u2029"), std::string::npos);
+  EXPECT_EQ(yaml.find("\u0085"), std::string::npos);
+  EXPECT_NE(yaml.find("\"line\\u2028sep\""), std::string::npos) << yaml;
+  EXPECT_NE(yaml.find("\"a\\x85b\""), std::string::npos) << yaml;
+  EXPECT_NE(yaml.find("\"caf\u00e9\""), std::string::npos) << yaml;  // other UTF-8 as is
+
+  const auto parsed = BuildSchemaFromText(yaml, true);
+  EXPECT_EQ(parsed.channel_name, "line\u2028sep");
+  ASSERT_EQ(parsed.fields.size(), 3u);
+  EXPECT_EQ(parsed.fields[0].field_name, "a\u0085b");
+  EXPECT_EQ(parsed.fields[1].field_name, "c\u2029d");
+}
+
+TEST(DataTamerParser, SchemaRegistryRejectsHashMismatch)
+{
+  DataTamer::Schema schema;
+  schema.channel_name = "c";
+  schema.fields = { { "a", DataTamer::BasicType::INT8, "", false, 0 } };
+  schema.hash = DataTamer::ComputeSchemaHash(schema);
+  DataTamerParser::SchemaRegistry registry;
+  EXPECT_THROW(registry.add(schema.hash + 1, DataTamer::ToStr(schema)),
+               std::runtime_error);
+  EXPECT_EQ(registry.size(), 0u);
+  EXPECT_EQ(registry.add(schema.hash, DataTamer::ToYaml(schema)).fields.size(), 1u);
 }

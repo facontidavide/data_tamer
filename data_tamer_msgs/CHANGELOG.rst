@@ -2,6 +2,11 @@
 Changelog for package data_tamer_msgs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Unreleased
+----------
+* New ``SnapshotBatch`` message: several ``Snapshot`` plus, optionally, the
+  ``Schema`` of each, to publish fewer, self-contained messages.
+
 1.0.4 (2026-07-26)
 ------------------
 

@@ -2,15 +2,31 @@
 #include "data_tamer/sinks/ros2_publisher_sink.hpp"
 
 #include <cmath>
+#include <string>
 
 using namespace DataTamer;
 
+// Usage: ros2_publisher [--aggregate] [--yaml]
+//   --aggregate  publish SnapshotBatch messages on /test/data_batch (100 snapshots
+//                or 100 ms per message) instead of one Snapshot per sample on /test/data
+//   --yaml       write the schemas as YAML (wire format version 6)
+// python/ros2_subscriber.py decodes either.
 int main(int argc, char* argv[])
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<rclcpp::Node>("test_datatamer");
 
-  auto ros2_sink = ROS2PublisherSink::create(node, "test");
+  ROS2PublisherOptions options;
+  for(int i = 1; i < argc; i++)
+  {
+    const std::string arg = argv[i];
+    options.aggregate |= (arg == "--aggregate");
+    if(arg == "--yaml")
+    {
+      options.schema_format = SchemaFormat::Yaml;
+    }
+  }
+  auto ros2_sink = ROS2PublisherSink::create(node, "test", options);
   ChannelsRegistry::Global().addDefaultSink(ros2_sink);
 
   // Create (or get) a channel using the global registry (singleton)

@@ -1,0 +1,28 @@
+### version: 5
+### hash: 8022624192411902335
+### channel_name: nested test
+
+float64 arm/joint_1/position
+float64 arm/joint_1/velocity
+float64 arm/joint_2/position
+float64 arm/joint_2/velocity
+uint8 arm/mode
+uint8 state
+float64 arm/late
+float64 single/x
+uint8 dup
+float64 dup/a
+float64 dup/b
+uint8 on
+float64 7up/x
+float64 7up/y
+Pose cart/pose
+===========================================================
+MSG: Point3D
+float64 x
+float64 y
+float64 z
+===========================================================
+MSG: Pose
+Point3D position
+uint32 stamp
