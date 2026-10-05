@@ -1,0 +1,28 @@
+version: 6
+hash: 11691003255120904065
+channel_name: wire_test
+fields:
+  flag: bool
+  letter: char
+  i8: int8
+  u8: uint8
+  i16: int16
+  u16: uint16
+  i32: int32
+  u32: uint32
+  i64: int64
+  u64: uint64
+  f32: float32
+  f64: float64
+  vec: float64[]
+  arr: int32[4]
+  pose: Pose
+  points: Point3D[]
+types:
+  Point3D:
+    x: float64
+    "y": float64
+    z: float64
+  Pose:
+    position: Point3D
+    stamp: uint32

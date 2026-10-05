@@ -7,6 +7,33 @@ Unreleased
 * ROS 2: export the ``Threads`` dependency, so that ``find_package(data_tamer_cpp)``
   works from a fresh CMake cache (``Threads::Threads`` is in the public link
   interface).
+* ``ROS2PublisherSink`` can aggregate snapshots: pass ``ROS2PublisherOptions``
+  with ``aggregate = true`` to publish ``data_tamer_msgs/SnapshotBatch`` on
+  ``<prefix>/data_batch`` instead of one ``Snapshot`` per sample on
+  ``<prefix>/data``. A batch is sent when it reaches ``max_batch_size``
+  snapshots, when a snapshot arrives ``max_batch_delay`` after the first one of
+  the batch, on ``flush()`` and when the sink is destroyed. ``embed_schemas``
+  (default on) puts the schemas of the batch's snapshots in the message, so it
+  decodes without the ``schemas`` topic. Schema texts are now serialized once,
+  in ``onSchema()``, instead of on every republish.
+* Parser helpers to decode the ROS messages without depending on ROS (templates
+  on the message type): ``DataTamerParser::SchemaRegistry`` (schemas by hash,
+  filled from ``Schemas`` or embedded batch schemas), ``ToSnapshotView()`` and
+  ``ForEachSnapshotInBatch()``. Python equivalents in ``data_tamer_parser.py``:
+  ``SchemaRegistry``, ``parse_snapshot_msg()`` and ``iter_snapshot_batch()``.
+* YAML schema rendering (wire format version 6, section 2.1): ``ToYaml(schema)``
+  writes the same schema as YAML, nesting fields whose names share a
+  ``/``-separated prefix, which is shorter for path-like names (the hash is
+  unchanged). ``RenderSchema(schema, SchemaFormat)`` picks either rendering;
+  opt in for ROS with ``ROS2PublisherOptions::schema_format =
+  SchemaFormat::Yaml``.
+  ``BuildSchemaFromText()`` and the Python ``parse_schema()`` detect and read
+  both renderings without dependencies, and verify a YAML schema's hash via
+  ``ToText()`` / ``to_text()``. The parser's ``Schema`` gains
+  ``custom_schemas`` (opaque types, filled from YAML).
+* Examples: ``ros2_publisher`` takes ``--aggregate`` and ``--yaml``;
+  ``python/ros2_subscriber.py`` decodes ``Snapshot`` and ``SnapshotBatch``
+  topics with the Python decoder.
 * **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
 
   - ``RegistrationID`` is an opaque handle (no public ``first_index`` /

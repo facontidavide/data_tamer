@@ -214,6 +214,32 @@ int main()
 }
 ```
 
+## Publishing on ROS 2
+
+`ROS2PublisherSink` publishes the schemas (latched) on `<prefix>/schemas` and, by
+default, one `data_tamer_msgs/Snapshot` per sample on `<prefix>/data`. To publish
+fewer messages, aggregate the snapshots into `data_tamer_msgs/SnapshotBatch`
+messages on `<prefix>/data_batch`:
+
+```cpp
+#include "data_tamer/sinks/ros2_publisher_sink.hpp"
+
+DataTamer::ROS2PublisherOptions options;
+options.aggregate = true;
+options.max_batch_size = 100;                             // snapshots per message...
+options.max_batch_delay = std::chrono::milliseconds(100);  // ...or this old, checked per snapshot
+options.embed_schemas = true;  // each batch carries its schemas: self-contained
+options.schema_format = DataTamer::SchemaFormat::Yaml;  // optional: shorter schemas, docs/wire_format.md 2.1
+
+auto sink = DataTamer::ROS2PublisherSink::create(node, "/robot", options);
+channel->addDataSink(sink);
+// a partial batch is published by the next snapshot, by flush() or when the sink is destroyed:
+sink->as<DataTamer::ROS2PublisherSink>().flush();
+```
+
+[ros2_publisher](data_tamer_cpp/examples/ros2_publisher.cpp) (`--aggregate`, `--yaml`) and
+[python/ros2_subscriber.py](python/ros2_subscriber.py) show both ends.
+
 # Compilation
 
 ## Compiling with ROS2
@@ -254,3 +280,24 @@ Two reference decoders implement it:
   [data_tamer_parser.hpp](data_tamer_cpp/include/data_tamer_parser/data_tamer_parser.hpp),
   used in [mcap_reader](data_tamer_cpp/examples/mcap_reader.cpp).
 - Python, standard library only: [python/data_tamer_parser.py](python/data_tamer_parser.py).
+
+Both read either schema rendering (the line format and YAML) and include helpers for the
+ROS 2 messages that need no ROS dependency, since they only read message fields:
+
+```cpp
+DataTamerParser::SchemaRegistry registry;  // registry.addSchemas(schemas_msg) for /schemas
+DataTamerParser::ForEachSnapshotInBatch(registry, batch_msg,
+    [](const DataTamerParser::Schema& schema, const DataTamerParser::SnapshotView& snapshot) {
+      DataTamerParser::ParseSnapshot(schema, snapshot, [&](const std::string& name,
+                                                          const DataTamerParser::VarNumber& value) {
+        // ...
+      });
+    });
+// a single data_tamer_msgs/Snapshot: ParseSnapshot(schema, ToSnapshotView(msg), ...)
+```
+
+```python
+registry = data_tamer_parser.SchemaRegistry()   # registry.add_schemas(schemas_msg) for /schemas
+for schema, timestamp_nsec, values in data_tamer_parser.iter_snapshot_batch(registry, batch_msg):
+    print(schema.channel_name, timestamp_nsec, values)   # values: {"pose/position/x": 1.0, ...}
+```

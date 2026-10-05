@@ -1,0 +1,31 @@
+version: 6
+hash: 8022624192411902335
+channel_name: "nested test"
+fields:
+  arm:
+    joint_1:
+      position: float64
+      velocity: float64
+    joint_2:
+      position: float64
+      velocity: float64
+    mode: uint8
+  state: uint8
+  arm/late: float64
+  single/x: float64
+  dup: uint8
+  dup/a: float64
+  dup/b: float64
+  "on": uint8
+  "7up":
+    x: float64
+    "y": float64
+  cart/pose: Pose
+types:
+  Point3D:
+    x: float64
+    "y": float64
+    z: float64
+  Pose:
+    position: Point3D
+    stamp: uint32
