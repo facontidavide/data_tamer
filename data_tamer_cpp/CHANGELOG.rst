@@ -4,6 +4,9 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* ROS 2: export the ``Threads`` dependency, so that ``find_package(data_tamer_cpp)``
+  works from a fresh CMake cache (``Threads::Threads`` is in the public link
+  interface).
 * **Breaking, channel API cleanup** (2.0 review items 20-24, 33):
 
   - ``RegistrationID`` is an opaque handle (no public ``first_index`` /
