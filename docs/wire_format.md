@@ -301,19 +301,24 @@ A file from a process that was killed has no footer; recover it with
 
 Topics under a user-chosen prefix:
 
-- `<prefix>/schemas`, type `data_tamer_msgs/msg/Schemas`, reliable and
-  transient-local, republished whenever a schema is added. Each entry carries
-  `uint64 hash`, `string channel_name`, `string schema_text` (section 2).
-- `<prefix>/data`, type `data_tamer_msgs/msg/Snapshot`: `uint64 timestamp_nsec`,
+- `<prefix>/schemas`, type `data_tamer_msgs/msg/Schemas`, reliable,
+  transient-local, `KeepLast(1)`. Each message is the complete catalog (every
+  schema the sink knows), republished as soon as a schema is added (when a
+  channel is prepared), so a late subscriber receives the latest catalog only
+  and needs nothing older. Each entry carries `uint64 hash`,
+  `string channel_name`, `string schema_text` (section 2).
+- `<prefix>/data`, type `data_tamer_msgs/msg/Snapshot`, with
+  `ROS2PublisherOptions::data_qos` (default reliable, volatile,
+  `KeepLast(100)`): `uint64 timestamp_nsec`,
   `uint64 schema_hash`, `uint8[] active_mask`, `uint8[] payload`.
 - `<prefix>/data_batch`, type `data_tamer_msgs/msg/SnapshotBatch`, instead of
-  `<prefix>/data` when `ROS2PublisherOptions::aggregate` is set:
+  `<prefix>/data` when `ROS2PublisherOptions::aggregate` is set (same QoS):
   `Schema[] schemas`, `Snapshot[] snapshots`. Snapshots are in the order the
   sink received them: the snapshots of one channel are in the order they were
   taken, but snapshots of different channels may interleave out of
-  `timestamp_nsec` order. When `embed_schemas` is set (the default), `schemas` holds the
-  schema of every snapshot in the batch, each once, so a batch decodes on its
-  own; otherwise it is empty and the `schemas` topic is needed.
+  `timestamp_nsec` order. When `embed_schemas` is set (the default), `schemas`
+  holds the schema of every snapshot in the batch, each once, so a batch
+  decodes on its own; otherwise it is empty and the `schemas` topic is needed.
 - With `schema_format = SchemaFormat::Yaml`, every `schema_text` (on both
   topics) is the YAML rendering of section 2.1.
 
