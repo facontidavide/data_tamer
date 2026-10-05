@@ -9,6 +9,7 @@ endfunction()
 CompileExample(T01_basic_example)
 CompileExample(T02_custom_types)
 CompileExample(T03_mcap_writer)
+CompileExample(T04_flight_recorder)
 CompileExample(mcap_1m_per_sec)
 
 CompileExample(mcap_reader)

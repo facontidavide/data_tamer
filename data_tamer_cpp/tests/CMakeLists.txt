@@ -21,6 +21,7 @@ set(DATATAMER_TEST_SOURCES
     locked_reference_tests.cpp
     serialize_me_tests.cpp
     mcap_encoding_tests.cpp
+    mcap_ring_sink_tests.cpp
     wire_format_tests.cpp
     name_tests.cpp)
 
