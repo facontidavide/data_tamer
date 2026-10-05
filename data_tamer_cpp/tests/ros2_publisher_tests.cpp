@@ -1,6 +1,8 @@
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/ros2_publisher_sink.hpp"
 
+#include "data_tamer_msgs/msg/schemas.hpp"
 #include "data_tamer_msgs/msg/snapshot_batch.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"
 
@@ -8,6 +10,7 @@
 
 #include <chrono>
 #include <optional>
+#include <set>
 #include <thread>
 #include <string>
 
@@ -343,6 +346,128 @@ TEST(DataTamerROS2Publisher, AggregateWithYamlSchemas)
             2u);
   EXPECT_EQ(names.size(), 4u);
   EXPECT_EQ(names.front(), "robot/arm/value");
+}
+
+namespace
+{
+// Subscribes late to `<prefix>/schemas` with a KeepAll transient-local reader, so
+// that every sample the writer retains is delivered, and collects messages
+// until 300 ms after the first one.
+std::vector<data_tamer_msgs::msg::Schemas> receiveRetainedSchemas(
+    const std::shared_ptr<rclcpp::Node>& node, const std::string& prefix)
+{
+  rclcpp::QoS latched{ rclcpp::KeepAll() };
+  latched.reliable();
+  latched.transient_local();
+  std::vector<data_tamer_msgs::msg::Schemas> received;
+  auto sub = node->create_subscription<data_tamer_msgs::msg::Schemas>(
+      prefix + "/schemas", latched,
+      [&](const data_tamer_msgs::msg::Schemas& msg) { received.push_back(msg); });
+
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(node);
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  bool first_seen = false;
+  while(std::chrono::steady_clock::now() < deadline)
+  {
+    executor.spin_some(std::chrono::milliseconds(20));
+    if(!first_seen && !received.empty())
+    {
+      first_seen = true;
+      deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+    }
+  }
+  return received;
+}
+
+std::set<uint64_t> hashesOf(const data_tamer_msgs::msg::Schemas& msg)
+{
+  std::set<uint64_t> hashes;
+  for(const auto& schema : msg.schemas)
+  {
+    hashes.insert(schema.hash);
+    EXPECT_FALSE(schema.schema_text.empty());
+  }
+  return hashes;
+}
+}  // namespace
+
+TEST(DataTamerROS2Publisher, SchemasPublishedOnPrepareForLateJoiners)
+{
+  auto node = std::make_shared<rclcpp::Node>("test_datatamer_schemas_late");
+  auto ros2_sink = ROS2PublisherSink::create(node, "test_schemas_late");
+
+  // two channels, prepared without taking any snapshot: two catalogs published
+  auto channel_a = LogChannel::create("channel_schemas_late_a");
+  auto channel_b = LogChannel::create("channel_schemas_late_b");
+  double const value = 1.;
+  channel_a->registerValue("a", &value);
+  channel_b->registerValue("b", &value);
+  channel_a->addDataSink(ros2_sink);
+  channel_b->addDataSink(ros2_sink);
+  channel_a->prepare();
+  channel_b->prepare();
+
+  // the writer keeps only the latest one, which is the complete catalog
+  const auto received = receiveRetainedSchemas(node, "test_schemas_late");
+  ASSERT_EQ(received.size(), 1u);
+  EXPECT_EQ(hashesOf(received[0]), (std::set<uint64_t>{ channel_a->getSchema().hash,
+                                                        channel_b->getSchema().hash }));
+}
+
+TEST(DataTamerROS2Publisher, SchemasPublishedOnAddDataSinkToPreparedChannel)
+{
+  auto node = std::make_shared<rclcpp::Node>("test_datatamer_schemas_add_sink");
+  auto ros2_sink = ROS2PublisherSink::create(node, "test_schemas_add_sink");
+
+  auto channel = LogChannel::create("channel_schemas_add_sink");
+  double const value = 1.;
+  channel->registerValue("value", &value);
+  channel->addDataSink(DummySink::create());
+  channel->prepare();
+  channel->addDataSink(ros2_sink);  // announced now; no snapshot is taken
+
+  const auto received = receiveRetainedSchemas(node, "test_schemas_add_sink");
+  ASSERT_EQ(received.size(), 1u);
+  EXPECT_EQ(hashesOf(received[0]), (std::set<uint64_t>{ channel->getSchema().hash }));
+}
+
+TEST(DataTamerROS2Publisher, QoS)
+{
+  auto node = std::make_shared<rclcpp::Node>("test_datatamer_qos");
+  ROS2PublisherOptions options;
+  options.data_qos = rclcpp::QoS(rclcpp::KeepLast(5)).best_effort();
+  auto ros2_sink = ROS2PublisherSink::create(node, "test_qos", options);
+
+  // the depth is not part of discovery data: check the policies that are
+  auto info_of = [&](const std::string& topic) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto info = node->get_publishers_info_by_topic(topic);
+    while(info.empty() && std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      info = node->get_publishers_info_by_topic(topic);
+    }
+    return info;
+  };
+  auto data_info = info_of("test_qos/data");
+  ASSERT_EQ(data_info.size(), 1u);
+  EXPECT_EQ(data_info[0].qos_profile().reliability(),
+            rclcpp::ReliabilityPolicy::BestEffort);
+  EXPECT_EQ(data_info[0].qos_profile().durability(), rclcpp::DurabilityPolicy::Volatile);
+
+  auto schemas_info = info_of("test_qos/schemas");
+  ASSERT_EQ(schemas_info.size(), 1u);
+  EXPECT_EQ(schemas_info[0].qos_profile().reliability(),
+            rclcpp::ReliabilityPolicy::Reliable);
+  EXPECT_EQ(schemas_info[0].qos_profile().durability(),
+            rclcpp::DurabilityPolicy::TransientLocal);
+
+  // default data QoS: reliable, bounded history
+  const ROS2PublisherOptions defaults;
+  EXPECT_EQ(defaults.data_qos.reliability(), rclcpp::ReliabilityPolicy::Reliable);
+  EXPECT_EQ(defaults.data_qos.history(), rclcpp::HistoryPolicy::KeepLast);
+  EXPECT_EQ(defaults.data_qos.depth(), 100u);
 }
 
 int main(int argc, char** argv)

@@ -295,6 +295,16 @@ channel->addDataSink(sink);
 sink->as<DataTamer::ROS2PublisherSink>().flush();
 ```
 
+Each message on `<prefix>/schemas` is the complete schema catalog, published as soon as a
+channel is prepared (reliable, transient-local, depth 1: late subscribers get the latest
+catalog). Call `channel->prepare()` before the control loop: otherwise the first
+`takeSnapshot()` prepares the channel and does that DDS write. The data topic is reliable with
+a bounded history, `KeepLast(100)` by default, so a slow subscriber cannot make the publishing
+process grow without bound; change it with `options.data_qos`, e.g.
+`rclcpp::QoS(rclcpp::KeepLast(10)).best_effort()`. A best-effort publisher does not match
+reliable subscribers, so they must use best effort too (a best-effort subscriber, as in
+`ros2_subscriber.py`, matches either).
+
 [ros2_publisher](data_tamer_cpp/examples/ros2_publisher.cpp) (`--aggregate`, `--yaml`) and
 [python/ros2_subscriber.py](python/ros2_subscriber.py) show both ends.
 
