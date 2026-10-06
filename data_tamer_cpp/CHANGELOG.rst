@@ -4,6 +4,12 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* New ``data_tamer/fwd.hpp``, a forward-declaration header like ``<iosfwd>``: it
+  declares ``ChannelsRegistry``, ``DataSink``, ``LogChannel``, ``RegistrationID``,
+  ``SinkWorker``, ``SnapshotRef``, ``Schema``, ``Snapshot`` and
+  ``LoggedValue<T>``, so that headers that only name these types need not
+  declare them by hand. It has no includes and can be combined with the full
+  headers in any order; compile tests cover it alone and in both orders.
 * New ``MCAPRingSink`` (``data_tamer/sinks/mcap_ring_sink.hpp``, #95), a flight
   recorder: it keeps the last ``window`` of every attached channel in a
   preallocated RAM ring (evicted by age and by ``capacity_bytes``) and writes

@@ -1,3 +1,4 @@
+#include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"

@@ -1,8 +1,7 @@
 #pragma once
 
-#include "data_tamer/types.hpp"
-
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -21,6 +20,7 @@ class LogChannel;
 class SinkWorker;
 class SnapshotPool;
 struct PoolSlot;
+struct Schema;
 
 using ActiveMask = std::vector<uint8_t>;
 using PayloadVector = std::vector<uint8_t>;
