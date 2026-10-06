@@ -63,10 +63,16 @@ target_compile_features(datatamer_test PRIVATE cxx_std_20)
 target_compile_definitions(datatamer_test PRIVATE
     DATA_TAMER_WIRE_FORMAT_DIR="${PROJECT_SOURCE_DIR}/../docs/wire_format")
 
+# Resolve the package directory first: when it is a symlink (workspaces that
+# link each package into src/), "<link>/../python" names a directory next to
+# the link, not next to the real package, and Python normalizes ".." textually.
+get_filename_component(DATA_TAMER_CPP_REAL_DIR "${PROJECT_SOURCE_DIR}" REALPATH)
+get_filename_component(DATA_TAMER_REPO_DIR "${DATA_TAMER_CPP_REAL_DIR}" DIRECTORY)
+set(DATA_TAMER_PYTHON_DIR "${DATA_TAMER_REPO_DIR}/python")
 find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_FOUND)
+if(Python3_FOUND AND EXISTS "${DATA_TAMER_PYTHON_DIR}")
     add_test(NAME python_reference_decoder
-        COMMAND Python3::Interpreter -m unittest discover -s ${PROJECT_SOURCE_DIR}/../python -p "test_*.py")
+        COMMAND Python3::Interpreter -m unittest discover -s ${DATA_TAMER_PYTHON_DIR} -p "test_*.py")
 endif()
 
 # Every installed header must compile as strict C++17: the library itself is
