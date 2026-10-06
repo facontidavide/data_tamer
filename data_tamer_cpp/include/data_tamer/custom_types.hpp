@@ -1,6 +1,6 @@
 #pragma once
 
-#include <mutex>
+#include <memory>
 #include <optional>
 
 #include "data_tamer/types.hpp"
@@ -58,6 +58,15 @@ private:
 class TypesRegistry
 {
 public:
+  // The state lives behind a Pimpl, which does not allow default special members.
+  TypesRegistry();
+  ~TypesRegistry();
+
+  TypesRegistry(const TypesRegistry&) = delete;
+  TypesRegistry& operator=(const TypesRegistry&) = delete;
+  TypesRegistry(TypesRegistry&&) = delete;
+  TypesRegistry& operator=(TypesRegistry&&) = delete;
+
   template <typename T>
   CustomSerializer::Ptr addType(const std::string& type_name,
                                 bool skip_if_present = false);
@@ -66,8 +75,22 @@ public:
   [[nodiscard]] CustomSerializer::Ptr getSerializer();
 
 private:
-  std::unordered_map<std::string, CustomSerializer::Ptr> _types;
-  std::recursive_mutex _mutex;
+  // Builds the CustomSerializerT<T> of a type; the registry stores the result.
+  using MakeSerializer = CustomSerializer::Ptr (*)(const std::string& type_name);
+
+  template <typename T>
+  static CustomSerializer::Ptr makeSerializer(const std::string& type_name);
+
+  // Both lock the registry and call make while holding the lock.
+  // Returns the stored serializer, creating it first when missing.
+  CustomSerializer::Ptr findOrCreate(const std::string& type_name, MakeSerializer make);
+  // Stores a new serializer, replacing a previous one. Returns {} without touching
+  // the registry when skip_if_present is set and the type is already there.
+  CustomSerializer::Ptr replace(const std::string& type_name, MakeSerializer make,
+                                bool skip_if_present);
+
+  struct Impl;
+  std::unique_ptr<Impl> _impl;
 };
 
 //------------------------------------------------------------------
@@ -226,22 +249,19 @@ inline void CustomSerializerT<T>::serialize(const void* src_instance,
 }
 
 template <typename T>
+inline CustomSerializer::Ptr TypesRegistry::makeSerializer(const std::string& type_name)
+{
+  return std::make_shared<CustomSerializerT<T>>(type_name);
+}
+
+template <typename T>
 inline CustomSerializer::Ptr TypesRegistry::getSerializer()
 {
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
-  std::scoped_lock lk(_mutex);
   const std::string type_name(CustomTypeName<T>::get());
-  auto it = _types.find(type_name);
-
-  if(it == _types.end())
-  {
-    CustomSerializer::Ptr serializer = std::make_shared<CustomSerializerT<T>>(type_name);
-    _types[type_name] = serializer;
-    return serializer;
-  }
-  return it->second;
+  return findOrCreate(type_name, &makeSerializer<T>);
 }
 
 template <typename T>
@@ -251,14 +271,7 @@ inline CustomSerializer::Ptr TypesRegistry::addType(const std::string& type_name
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
-  std::scoped_lock lk(_mutex);
-  if(skip_if_present && _types.count(type_name) != 0)
-  {
-    return {};
-  }
-  CustomSerializer::Ptr serializer = std::make_shared<CustomSerializerT<T>>(type_name);
-  _types[type_name] = serializer;
-  return serializer;
+  return replace(type_name, &makeSerializer<T>, skip_if_present);
 }
 
 }  // namespace DataTamer

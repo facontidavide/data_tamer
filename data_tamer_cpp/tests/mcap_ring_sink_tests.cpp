@@ -1,4 +1,5 @@
 // MCAPRingSink (#95): RAM ring of recent snapshots, written to MCAP on request.
+#include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"

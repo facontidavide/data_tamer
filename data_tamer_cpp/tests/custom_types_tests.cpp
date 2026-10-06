@@ -345,3 +345,25 @@ TEST(DataTamerCustom, FixedSizeOfNestedFixedArraysMatchesPayload)
   const size_t expected = 4 * (3 * sizeof(double) + 2 * sizeof(int32_t)) + sizeof(double);
   EXPECT_EQ(sink->latestPayloadSize(), expected);
 }
+
+TEST(DataTamerCustom, TypesRegistryReturnsTheStoredSerializer)
+{
+  TypesRegistry registry;
+  auto first = registry.getSerializer<Point3D>();
+  ASSERT_TRUE(first);
+  EXPECT_EQ(registry.getSerializer<Point3D>(), first);
+  EXPECT_EQ(registry.getSerializer<Quaternion>()->typeName(), "Quaternion");
+}
+
+TEST(DataTamerCustom, TypesRegistryAddTypeReplacesUnlessSkipped)
+{
+  TypesRegistry registry;
+  auto first = registry.addType<Point3D>("point");
+  ASSERT_TRUE(first);
+  EXPECT_EQ(first->typeName(), "point");
+  EXPECT_FALSE(registry.addType<Point3D>("point", true));
+  auto second = registry.addType<Point3D>("point");
+  EXPECT_TRUE(second);
+  EXPECT_NE(second, first);
+  EXPECT_TRUE(registry.addType<Point3D>("other_point", true));
+}

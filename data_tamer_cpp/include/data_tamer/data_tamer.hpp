@@ -1,6 +1,12 @@
 #pragma once
 
-#include "data_tamer/channel.hpp"
+#include <memory>
+#include <string>
+
+#include "data_tamer/fwd.hpp"
+
+// ChannelsRegistry only names LogChannel and SinkWorker through std::shared_ptr.
+// Include data_tamer/channel.hpp to use a channel, data_tamer/data_sink.hpp for a sink.
 
 namespace DataTamer
 {

@@ -1,10 +1,12 @@
 #include "data_tamer/types.hpp"
+#include "data_tamer/custom_types.hpp"
 #include <array>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <map>
 #include <locale>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <string_view>
@@ -500,6 +502,44 @@ std::string ToYaml(const Schema& schema)
     }
   }
   return os.str();
+}
+
+//------------------------------------------------------------------
+// TypesRegistry
+
+struct TypesRegistry::Impl
+{
+  std::unordered_map<std::string, CustomSerializer::Ptr> types;
+  std::recursive_mutex mutex;
+};
+
+TypesRegistry::TypesRegistry() : _impl(std::make_unique<Impl>()) {}
+
+TypesRegistry::~TypesRegistry() = default;
+
+CustomSerializer::Ptr TypesRegistry::findOrCreate(const std::string& type_name,
+                                                  MakeSerializer make)
+{
+  std::scoped_lock lk(_impl->mutex);
+  auto it = _impl->types.find(type_name);
+  if(it == _impl->types.end())
+  {
+    it = _impl->types.emplace(type_name, make(type_name)).first;
+  }
+  return it->second;
+}
+
+CustomSerializer::Ptr TypesRegistry::replace(const std::string& type_name,
+                                             MakeSerializer make, bool skip_if_present)
+{
+  std::scoped_lock lk(_impl->mutex);
+  if(skip_if_present && _impl->types.count(type_name) != 0)
+  {
+    return {};
+  }
+  CustomSerializer::Ptr serializer = make(type_name);
+  _impl->types[type_name] = serializer;
+  return serializer;
 }
 
 }  // namespace DataTamer

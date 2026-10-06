@@ -87,3 +87,24 @@ target_include_directories(public_headers_cxx17 PRIVATE ${PROJECT_SOURCE_DIR}/in
 target_link_libraries(public_headers_cxx17 PRIVATE ${DATA_TAMER_MCAP_TARGET})
 set_target_properties(public_headers_cxx17 PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# include/data_tamer/fwd.hpp must declare the types exactly as the full headers
+# define them, and work alone and in either include order. Object libraries only:
+# nothing is linked. -Wmismatched-tags (a wrong class/struct key) is added where
+# the compiler has it.
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-Wmismatched-tags DATA_TAMER_HAS_WMISMATCHED_TAGS)
+foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
+    string(TOLOWER ${variant} variant_name)
+    set(target fwd_header_${variant_name})
+    add_library(${target} OBJECT fwd_header_tests.cpp)
+    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_definitions(${target} PRIVATE ${variant})
+    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>
+        $<$<BOOL:${DATA_TAMER_HAS_WMISMATCHED_TAGS}>:-Wmismatched-tags>)
+endforeach()

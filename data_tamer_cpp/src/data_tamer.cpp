@@ -1,4 +1,5 @@
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/channel.hpp"
 
 #include <memory>
 #include <stdexcept>

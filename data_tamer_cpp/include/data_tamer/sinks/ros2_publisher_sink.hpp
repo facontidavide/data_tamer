@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data_tamer/data_sink.hpp"
+#include "data_tamer/types.hpp"
 
 #include <chrono>
 #include <cstddef>
