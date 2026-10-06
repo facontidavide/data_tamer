@@ -4,6 +4,7 @@
 //
 // Regenerate the fixtures with DATA_TAMER_UPDATE_GOLDEN=1, then review the diff
 // and update expected.json by hand.
+#include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"

@@ -38,6 +38,11 @@ You can easily create your own, specialized sinks: implement `DataTamer::DataSin
 (two callbacks, `onSchema` and `onSnapshot`) and wrap it with `SinkWorker::create<MySink>()`,
 which owns the delivery queue and thread. See `data_tamer/sinks/dummy_sink.hpp` for a small one.
 
+Headers that only name DataTamer types (a `LogChannel&` parameter, a `std::shared_ptr<SinkWorker>`
+member, ...) can include `data_tamer/fwd.hpp` instead of the full headers. Like `<iosfwd>`, it
+forward-declares `LogChannel`, `ChannelsRegistry`, `SinkWorker`, `DataSink`, `Schema`, `Snapshot`,
+`SnapshotRef`, `RegistrationID` and `LoggedValue<T>`, and has no includes.
+
 Use [PlotJuggler](https://github.com/facontidavide/PlotJuggler) to
 visualize your logs offline or in real-time.
 

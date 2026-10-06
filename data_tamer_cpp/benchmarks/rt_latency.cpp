@@ -5,6 +5,7 @@
 // usage: rt_latency [--values N] [--sinks K] [--writers W] [--seconds S]
 //                   [--rate HZ] [--mcap PATH] [--fifo] [--transactions]
 //                   [--vector-writer]
+#include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"

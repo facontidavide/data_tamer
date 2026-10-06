@@ -1,14 +1,11 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
+#include <iosfwd>
 #include <memory>
-
-#include <ostream>
 #include <string>
 #include <string_view>
 #include <map>
-#include <unordered_map>
 #include <vector>
 #include <variant>
 
