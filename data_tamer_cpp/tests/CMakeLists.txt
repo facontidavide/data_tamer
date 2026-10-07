@@ -11,6 +11,7 @@ set(DATATAMER_TEST_SOURCES
     write_mutex_tests.cpp
     snapshot_pool_tests.cpp
     sink_queue_tests.cpp
+    sink_lifecycle_tests.cpp
     value_ptr_tests.cpp
     logged_value_tests.cpp
     shared_state_tests.cpp

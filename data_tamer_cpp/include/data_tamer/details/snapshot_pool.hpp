@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 namespace DataTamer
 {
@@ -69,6 +70,13 @@ public:
     }
     exhausted_.fetch_add(1, std::memory_order_relaxed);
     return nullptr;
+  }
+
+  /// Wrap one reference already taken on `slot` (by tryAcquire() or addRef())
+  /// in a SnapshotRef that releases it. Library internal.
+  static SnapshotRef adopt(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot)
+  {
+    return SnapshotRef(std::move(pool), slot);
   }
 
   static void addRef(PoolSlot* slot)

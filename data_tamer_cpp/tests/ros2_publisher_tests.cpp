@@ -221,33 +221,48 @@ TEST(DataTamerROS2Publisher, AggregateBySize)
   }
 }
 
-TEST(DataTamerROS2Publisher, AggregateFlushWithoutSchemas)
+// A batch below max_batch_size goes out on flush() after drain(), and on
+// SinkWorker::stop() (DataSink::onStop()); without embedded schemas.
+TEST(DataTamerROS2Publisher, AggregatePartialBatchOnFlushOrStop)
 {
-  auto node = std::make_shared<rclcpp::Node>("test_datatamer_aggregate_flush");
-  ROS2PublisherOptions options;
-  options.aggregate = true;
-  options.max_batch_size = 1000;
-  options.max_batch_delay = std::chrono::milliseconds(0);
-  options.embed_schemas = false;
-  auto ros2_sink = ROS2PublisherSink::create(node, "test_aggregate_flush", options);
+  for(const bool by_stop : { false, true })
+  {
+    const std::string tag = by_stop ? "stop" : "flush";
+    auto node = std::make_shared<rclcpp::Node>("test_datatamer_aggregate_" + tag);
+    ROS2PublisherOptions options;
+    options.aggregate = true;
+    options.max_batch_size = 1000;
+    options.max_batch_delay = std::chrono::milliseconds(0);
+    options.embed_schemas = false;
+    auto ros2_sink = ROS2PublisherSink::create(node, "test_aggregate_" + tag, options);
 
-  auto channel = ChannelsRegistry::Global().getChannel("channel_aggregate_flush");
-  channel->addDataSink(ros2_sink);
-  double const value = 1.;
-  channel->registerValue("value", &value);
+    auto channel = ChannelsRegistry::Global().getChannel("channel_aggregate_" + tag);
+    channel->addDataSink(ros2_sink);
+    double const value = 1.;
+    channel->registerValue("value", &value);
 
-  auto batch = receiveBatch(node, "test_aggregate_flush", [&] {
-    for(int i = 0; i < 3; i++)
-    {
-      ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-    }
-    ros2_sink->drain();
-    ros2_sink->as<ROS2PublisherSink>().flush();
-  });
+    auto batch = receiveBatch(node, "test_aggregate_" + tag, [&] {
+      for(int i = 0; i < 3; i++)
+      {
+        ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+      }
+      if(by_stop)
+      {
+        ros2_sink->stop();  // delivers the 3, then publishes them as one batch
+        ros2_sink->start();
+      }
+      else
+      {
+        ros2_sink->drain();
+        ros2_sink->as<ROS2PublisherSink>().flush();
+      }
+    });
 
-  ASSERT_TRUE(batch.has_value());
-  EXPECT_EQ(batch->snapshots.size(), 3u);
-  EXPECT_TRUE(batch->schemas.empty());
+    ASSERT_TRUE(batch.has_value()) << tag;
+    EXPECT_EQ(batch->snapshots.size(), 3u) << tag;
+    EXPECT_TRUE(batch->schemas.empty()) << tag;
+    EXPECT_EQ(ros2_sink->errors(), 0u) << tag;
+  }
 }
 
 TEST(DataTamerROS2Publisher, AggregateByDelay)

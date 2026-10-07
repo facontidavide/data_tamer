@@ -4,6 +4,72 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Sinks finish themselves**: new ``virtual void DataSink::onStop()`` and
+  ``onStart()``, empty by default. ``SinkWorker::stop()`` calls ``onStop()`` on
+  the stopping thread after the last delivery, serialized with the other
+  callbacks, once per stop (a second ``stop()`` without ``start()`` does not
+  call it again; the destructor of a running worker does). ``start()`` after
+  such a stop calls ``onStart()`` before accepting snapshots again. A throw
+  from either is counted in ``errors()``. ``MCAPSink`` closes its file in
+  ``onStop()`` (**behaviour change**: ``stop()`` now ends the file) and
+  ``start()`` continues in its next numbered file, unless
+  ``restartRecording()`` opened one; ``MCAPRingSink`` writes a pending dump
+  (``flushPendingDump()``), ``ROS2PublisherSink`` publishes its partial batch
+  (``flush()``). The "call ``stopRecording()`` / ``flushPendingDump()`` /
+  ``flush()`` after ``stop()``" rules are gone.
+* **ABI**: ``onStop()`` and ``onStart()`` append two slots to the ``DataSink``
+  vtable, so sinks compiled against an earlier build must be rebuilt. From 2.0 on, the
+  ``DataSink`` and ``CustomSerializer`` vtables are frozen for 2.x (noted in
+  their headers); ``tests/abi_tests.cpp`` pins ``sizeof(DataSink)`` and
+  ``sizeof(ChannelDefaults)``.
+* ``ChannelsRegistry::stopAll()`` stops, once each, every default sink and
+  every sink attached to a channel the registry created.
+* ``ChannelsRegistry::addDefaultSink()`` also attaches the sink to the
+  channels that exist already (a prepared one announces its schema at once,
+  without the registry lock held), so it no longer has to come before
+  ``getChannel()``. If a channel refuses the sink, the call is undone and the
+  exception propagates.
+* **Breaking, API**: ``LogChannel::addDataSink()`` returns ``bool``: ``true``
+  if the call attached the sink, ``false`` if the channel held it already.
+* ``ChannelsRegistry::setChannelDefaults(ChannelDefaults)``: pool capacity (as
+  a count or in time) and payload capacity applied by ``getChannel()`` to the
+  channels it creates afterwards, before the default sinks are attached.
+  Existing channels are not changed. ``clear()`` resets them. The values are
+  validated when set, by the new ``ChannelDefaults::resolve()``.
+* **Breaking, sinks**: the shared sink queue is gone, and with it
+  ``SinkWorker::kDefaultQueueCapacity`` and the ``queue_capacity`` constructor
+  argument: the constructor is ``SinkWorker(std::unique_ptr<DataSink>,
+  Delivery = Delivery::Threaded)``. Each channel attached to a worker publishes
+  into a single-producer single-consumer ring of its own, holding exactly as
+  many snapshots as the channel's pool and allocated with the pool
+  (``prepare()``, or ``addDataSink()`` on a prepared channel). A queued
+  snapshot holds a pool slot, so the ring can't fill while the pool has a free
+  slot. Before, a channel's snapshots could be ``rejected`` with free slots once
+  the moodycamel blocks of the shared queue were taken by other channels; now
+  ``partial`` and ``rejected`` mean only a stopped worker. The worker serves its
+  channels in turn. When idle it polls about 20 us, then sleeps: a push wakes a
+  sleeping worker with one futex wake, pushes while it polls cost none.
+  Per-channel order now holds across ``removeDataSink()`` and
+  ``addDataSink()`` too: what the old attachment had queued is delivered
+  first, then its ring is freed. The
+  vendored moodycamel ConcurrentQueue and its ThreadSanitizer suppression are
+  removed, and no public header names a moodycamel type.
+* ``LogChannel::setPoolCapacity(stall_tolerance, snapshot_period)`` sizes the
+  pool in time: ``ceil(stall_tolerance / snapshot_period)`` slots, both
+  positive, overflow-checked.
+* ``prepare()`` reserves per slot exactly the payload with every value enabled
+  when all registered values are fixed-size (scalars, ``std::array``,
+  fixed-size custom types; new ``ValuePtr::isFixedSize()``), instead of
+  ``max(2 x payload, 256)``, which still applies to schemas with a dynamic
+  value. ``setPayloadCapacity()`` stays a floor. This halves the payload
+  memory of a fixed schema larger than 128 bytes.
+* **Breaking, API**: ``LogChannel::getActiveFlags()`` is removed (read the
+  mask from a delivered snapshot), and ``SnapshotRef(pool, slot)`` is private;
+  ``SnapshotPool::adopt()`` (``details/``) builds one.
+* **ABI**: ``SinkWorker`` keeps its sink in the Pimpl (``sink()`` is out of
+  line, the object is one pointer) and ``LogChannel`` its types registry
+  (``sizeof`` drops by one ``TypesRegistry``). ``tests/abi_tests.cpp`` pins
+  both sizes. Downstream binaries must be rebuilt.
 * New ``data_tamer/fwd.hpp``, a forward-declaration header like ``<iosfwd>``: it
   declares ``ChannelsRegistry``, ``DataSink``, ``LogChannel``, ``RegistrationID``,
   ``SinkWorker``, ``SnapshotRef``, ``Schema``, ``Snapshot`` and
@@ -22,8 +88,8 @@ Unreleased
   sink worker never waits for disk; a finished dump that finds the writer busy
   is handed over at the next snapshot. ``flushPendingDump()`` writes the active
   request at once and waits for the file, with the worker running (no need to
-  stop and restart it) or after ``SinkWorker::stop()`` for a request made just
-  before shutdown. Dump ``N`` is written to
+  stop and restart it). ``SinkWorker::stop()`` calls it after the last delivery,
+  so a request made just before shutdown is written too. Dump ``N`` is written to
   ``details::NumberedPath(filepath, N)``, skipping names that exist already.
   The dump callback reports write errors (disk full) and ``truncated`` when
   the ring was too small for the interval, including evictions while a
@@ -192,16 +258,19 @@ Unreleased
   removed (it was ``tryTakeSnapshot()``'s no-growth behaviour); the
   ``droppedOversize()`` counter stays.
 * New ``LogChannel::prepare()`` / ``isPrepared()``: freeze the schema, allocate
-  the pool and announce the schema to the sinks explicitly. A failed
-  ``prepare()`` leaves the channel exactly as it was (schema open, settable
-  capacities) so it can be retried; if the schema changes afterwards, sinks that
-  already heard it are announced again. ``takeSnapshot()`` without sinks now
+  the pool and announce the schema to the sinks explicitly. A ``prepare()``
+  that fails while sizing or announcing leaves the channel exactly as it was
+  (schema open, settable capacities) so it can be retried; if the schema
+  changes afterwards, sinks that already heard it are announced again. Its last
+  step allocates one queue per sink: if that throws (``std::bad_alloc``), the
+  schema stays frozen with its pool, nothing is published, and calling
+  ``prepare()`` again retries the allocation. ``takeSnapshot()`` without sinks now
   returns ``no_sinks`` without freezing anything. Sink ``onSchema`` callbacks run
   with the channel control mutex released, so a sink may query the channel.
 * **Breaking, sinks**: ``DataSinkBase`` is replaced by composition. A sink
   implements ``DataSink`` (``onSchema(const Schema&)``, ``onSnapshot(const
   SnapshotRef&)``; throw to report a failure) and is owned by a ``SinkWorker``,
-  which holds the queue and the delivery thread and is what
+  which holds the queues and the delivery thread and is what
   ``LogChannel::addDataSink`` takes. The worker is always stopped before the
   sink is destroyed, and its destructor delivers what is still queued, so the
   old ``stopThread()``-in-every-destructor rule and the four lifecycle calls
@@ -310,12 +379,9 @@ Unreleased
   accepted references. ``MCAPSink::finishQueueAndStop()`` no longer polls or
   sleeps; explicit restart clears forced-stop state and reopens admission,
   while automatic rollover preserves an existing closure.
-* Explicit producer tokens preserve callback order within one continuous
-  channel/sink attachment. Removing and re-attaching a sink replaces the token;
-  newer work may then run before older queued records from the prior attachment,
-  with no ordering guarantee across that boundary. A sink shared by multiple
-  channels also does not promise global timestamp order; readers that require a
-  merged timeline must sort or merge it.
+* Callbacks of one channel run in snapshot order (see the per-channel rings
+  above). A sink shared by multiple channels does not promise global timestamp
+  order; readers that require a merged timeline must sort or merge it.
 * Build: debug/release/asan/tsan presets, sanitizer CI, allocation-counting
   benchmarks and the ``rt_latency`` harness, including standalone mutex/pool
   measurements and validated CLI inputs. Conan's benchmark option exports and

@@ -71,8 +71,7 @@ void WritingThread(const std::string& channel_name)
 
 int main()
 {
-  // Start defining one or more Sinks that must be added by default.
-  // Do this BEFORE creating a channel.
+  // Sinks added by default reach every channel of the registry.
   auto mcap_sink = MCAPSink::create("test_1M.mcap");
   ChannelsRegistry::Global().addDefaultSink(mcap_sink);
 

@@ -48,8 +48,8 @@ int main()
     std::this_thread::sleep_for(1ms);
   }
 
-  // Write a dump requested just before shutdown, if any, and wait for the writer.
+  // Deliver what is queued, then write a dump requested just before shutdown, if
+  // any, and wait for the writer.
   worker->stop();
-  recorder.flushPendingDump();
   return 0;
 }

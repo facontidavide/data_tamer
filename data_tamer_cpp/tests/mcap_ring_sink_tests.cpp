@@ -552,8 +552,9 @@ TEST(MCAPRingSink, DumpWaitingForTheWriterReportsLaterEvictions)
   EXPECT_TRUE(dumps[1].truncated);
 }
 
-// A request made just before shutdown, with no snapshot left to trigger it.
-TEST(MCAPRingSink, FlushPendingDumpAfterStop)
+// A request made just before shutdown, with no snapshot left to trigger it:
+// SinkWorker::stop() writes it (DataSink::onStop()).
+TEST(MCAPRingSink, StopWritesThePendingDump)
 {
   TempBase base("flush");
   auto worker = MCAPRingSink::create(options(base.path, 100));
@@ -566,14 +567,41 @@ TEST(MCAPRingSink, FlushPendingDumpAfterStop)
   }
   worker->drain();  // every snapshot delivered before the request
   ASSERT_TRUE(sink.requestDump(nanoseconds(1000)));
-  worker->stop();  // no snapshot left to trigger the request
   EXPECT_TRUE(sink.dumpRequested());
-  ASSERT_TRUE(sink.flushPendingDump());
+  worker->stop();  // no snapshot left to trigger the request
   EXPECT_FALSE(sink.dumpRequested());
-  EXPECT_EQ(sink.stats().dumps_written, 1u);
+  EXPECT_EQ(sink.stats().dumps_written, 1u);  // on disk when stop() returns
   // The latest snapshot is the trigger.
   EXPECT_EQ(timestamps(readDump(base.dump(1))), range(200, 300, 10));
   EXPECT_FALSE(sink.flushPendingDump());
+  worker->stop();  // idempotent: no second dump
+  EXPECT_EQ(sink.stats().dumps_written, 1u);
+  EXPECT_EQ(worker->errors(), 0u);
+}
+
+// The snapshots still queued at stop() are delivered before the dump is cut,
+// so they complete it instead of being cut off.
+TEST(MCAPRingSink, StopDeliversQueuedSnapshotsBeforeWritingTheDump)
+{
+  TempBase base("stop_queued");
+  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  MCAPRingDump info;
+  sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
+  Source source("stop_queued", sink);
+  for(int64_t ts = 0; ts <= 50; ts += 10)
+  {
+    source.take(ts);
+  }
+  sink.drain();
+  ASSERT_TRUE(sink->requestDump(nanoseconds(1000)));
+  source.take(60);  // queued, not delivered: the trigger
+  source.take(70);
+  sink.worker->stop();
+  EXPECT_FALSE(sink->dumpRequested());
+  EXPECT_TRUE(info.ok);
+  EXPECT_EQ(info.trigger_time, nanoseconds(60));
+  EXPECT_EQ(info.end, nanoseconds(70));
+  EXPECT_EQ(timestamps(readDump(base.dump(1))), range(0, 70, 10));
 }
 
 TEST(MCAPRingSink, FlushPendingDumpCutsThePostTriggerInterval)
@@ -666,8 +694,7 @@ TEST(MCAPRingSink, RequestFromAnotherThread)
     std::this_thread::sleep_for(std::chrono::microseconds(200));
   }
   producer.join();
-  worker->stop();
-  (void)sink.flushPendingDump();  // a request accepted near the end
+  worker->stop();  // writes a request accepted near the end
   EXPECT_FALSE(sink.dumpRequested());
   EXPECT_GE(accepted, 1);
   EXPECT_EQ(callbacks.load(), accepted);

@@ -28,7 +28,11 @@ std::string NumberedPath(const std::string& path, size_t number);
  * @brief The MCAPSink is a DataSink that saves the data as an MCAP file
  * (https://mcap.dev/). Create it with MCAPSink::create() and pass the returned
  * worker to LogChannel::addDataSink(); reach the methods below through
- * worker->as<MCAPSink>().
+ * worker->as<MCAPSink>(). SinkWorker::stop() (and the worker's destructor)
+ * delivers what is queued and closes the file. SinkWorker::start() after a
+ * stop() records into the next numbered file (details::NumberedPath), even when
+ * resets truncate the same file (setCreateNewFileOnReset(false)), unless
+ * restartRecording() opened one meanwhile.
  */
 class MCAPSink : public DataSink
 {
@@ -78,8 +82,10 @@ public:
   void setCreateNewFileOnReset(bool create_new_file);
 
   /// Stop recording and save the file. Snapshots delivered afterwards are
-  /// dropped until restartRecording(). To also deliver what is still queued,
-  /// call SinkWorker::stop() (or drain()) first.
+  /// dropped until restartRecording() or SinkWorker::start() after a stop().
+  /// SinkWorker::stop() calls it after delivering what is still queued, so
+  /// stopping the worker is enough to get a complete file; call it directly to
+  /// close the file without stopping.
   void stopRecording();
 
   /**
@@ -96,12 +102,17 @@ public:
 protected:
   void onSchema(Schema const& schema) override;
   void onSnapshot(const SnapshotRef& snapshot) override;
+  /// Closes the file, as stopRecording().
+  void onStop() override;
+  /// If the file is closed, records into the next numbered file.
+  void onStart() override;
 
 private:
   struct Pimpl;
   std::unique_ptr<Pimpl> _p;
 
   void openFile(std::string const& filepath, bool do_compression);
+  void openNextNumberedFile();
   void restartRecordingImpl(std::string const& filepath, bool do_compression,
                             bool new_file);
 };

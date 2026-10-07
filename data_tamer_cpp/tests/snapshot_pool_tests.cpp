@@ -78,10 +78,13 @@ TEST(SnapshotRef, IsMoveOnlyAndReleasesOnDestruction)
 {
   static_assert(!std::is_copy_constructible_v<SnapshotRef>);
   static_assert(std::is_nothrow_move_constructible_v<SnapshotRef>);
+  // Only SnapshotPool::adopt() turns a slot into a SnapshotRef.
+  static_assert(
+      !std::is_constructible_v<SnapshotRef, std::shared_ptr<SnapshotPool>, PoolSlot*>);
   auto pool = makePool();
   PoolSlot* s = pool->tryAcquire();
   {
-    SnapshotRef ref(pool, s);
+    SnapshotRef ref = SnapshotPool::adopt(pool, s);
     ASSERT_TRUE(ref);
     ASSERT_EQ(&*ref, &s->snapshot);
     ASSERT_EQ(s->refs.load(), 1u);
@@ -98,7 +101,7 @@ TEST(SnapshotRef, CloneAddsAReference)
 {
   auto pool = makePool();
   PoolSlot* s = pool->tryAcquire();
-  SnapshotRef a(pool, s);
+  SnapshotRef a = SnapshotPool::adopt(pool, s);
   {
     SnapshotRef b = a.clone();
     ASSERT_EQ(s->refs.load(), 2u);
@@ -116,7 +119,7 @@ TEST(SnapshotRef, KeepsPoolAliveAfterOwnerDropsIt)
     auto pool = makePool();
     PoolSlot* s = pool->tryAcquire();
     s->snapshot.payload.assign({ 1, 2, 3 });
-    survivor = SnapshotRef(pool, s);
+    survivor = SnapshotPool::adopt(pool, s);
   }  // pool shared_ptr dropped here; the ref must keep it alive
   ASSERT_TRUE(survivor);
   ASSERT_EQ(survivor->payload.size(), 3u);
@@ -190,7 +193,7 @@ TEST(SnapshotPool, ProducerAndConsumersUnderContention)
     {
       SnapshotPool::addRef(s);
       std::lock_guard lk(mailbox_mutex[c]);
-      mailboxes[c].emplace_back(pool, s);
+      mailboxes[c].push_back(SnapshotPool::adopt(pool, s));
     }
     SnapshotPool::release(s);  // producer's own hold, released last
     produced++;
@@ -208,7 +211,7 @@ TEST(SnapshotPool, ProducerAndConsumersUnderContention)
 TEST(SnapshotPool, ParentPinsSlotBetweenCompletedAndPendingFanout)
 {
   auto pool = std::make_shared<SnapshotPool>(1, 8, 1);
-  SnapshotRef parent(pool, pool->tryAcquire());
+  SnapshotRef parent = SnapshotPool::adopt(pool, pool->tryAcquire());
   auto first = parent.clone();
   first.reset();  // A fast consumer finishes before the next clone is made.
   EXPECT_EQ(pool->tryAcquire(), nullptr);
@@ -216,6 +219,6 @@ TEST(SnapshotPool, ParentPinsSlotBetweenCompletedAndPendingFanout)
   parent.reset();
   EXPECT_EQ(pool->tryAcquire(), nullptr);
   second.reset();
-  SnapshotRef reused(pool, pool->tryAcquire());
+  SnapshotRef reused = SnapshotPool::adopt(pool, pool->tryAcquire());
   EXPECT_TRUE(reused);
 }

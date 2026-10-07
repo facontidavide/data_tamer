@@ -6,6 +6,7 @@
 #include "data_tamer/sinks/mcap_encoding.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"
 #include "alloc_counter.hpp"
+#include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
 
 #include <mcap/reader.hpp>
@@ -20,8 +21,6 @@
 #include <variant>
 #include <vector>
 
-#include <unistd.h>
-
 using namespace DataTamer;
 
 namespace
@@ -31,13 +30,6 @@ std::vector<uint8_t> readVector(const std::string& name)
   std::ifstream file(std::string(DATA_TAMER_WIRE_FORMAT_DIR) + "/vectors/" + name,
                      std::ios::binary);
   return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
-}
-
-std::string tempPath(const std::string& tag)
-{
-  return (std::filesystem::temp_directory_path() /
-          ("data_tamer_" + tag + "_" + std::to_string(::getpid()) + ".mcap"))
-      .string();
 }
 }  // namespace
 
@@ -94,7 +86,7 @@ TEST(McapEncoding, StoredSnapshotsRoundTrip)
   }
   const Schema schema = channel->getSchema();
 
-  const auto path = tempPath("mcap_encoding");
+  const auto path = DataTamerTest::tempPath("mcap_encoding");
   {
     mcap::McapWriter writer;
     ASSERT_TRUE(

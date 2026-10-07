@@ -3,7 +3,10 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
 
+#include <gtest/gtest.h>
+
 #include <memory>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -35,24 +38,48 @@ struct Attached
   T* sink;
 };
 
-/// Worker with an explicit delivery mode and queue capacity. Manual delivery
-/// makes tests deterministic: snapshots are delivered only by drain().
+/// Worker with an explicit delivery mode. Manual delivery makes tests
+/// deterministic: snapshots are delivered only by drain().
 template <typename T, typename... Args>
-Attached<T> attach(DataTamer::SinkWorker::Delivery delivery,
-                   size_t capacity = DataTamer::SinkWorker::kDefaultQueueCapacity,
-                   Args&&... args)
+Attached<T> attach(DataTamer::SinkWorker::Delivery delivery, Args&&... args)
 {
   return Attached<T>(std::make_shared<DataTamer::SinkWorker>(
-      std::make_unique<T>(std::forward<Args>(args)...), capacity, delivery));
+      std::make_unique<T>(std::forward<Args>(args)...), delivery));
 }
 
 template <typename T, typename... Args>
 Attached<T> manual(Args&&... args)
 {
-  return Attached<T>(std::make_shared<DataTamer::SinkWorker>(
-      std::make_unique<T>(std::forward<Args>(args)...),
-      DataTamer::SinkWorker::kDefaultQueueCapacity,
-      DataTamer::SinkWorker::Delivery::Manual));
+  return attach<T>(DataTamer::SinkWorker::Delivery::Manual, std::forward<Args>(args)...);
+}
+
+/// A channel with one registered value, attached to `sink` (not prepared).
+template <typename T>
+std::shared_ptr<DataTamer::LogChannel>
+channelWith(const std::shared_ptr<DataTamer::SinkWorker>& sink, T* value,
+            const std::string& name = "test_channel")
+{
+  auto channel = DataTamer::LogChannel::create(name);
+  channel->registerValue("value", value);
+  channel->addDataSink(sink);
+  return channel;
+}
+
+/// Snapshots a prepared channel accepts until its pool is exhausted. With
+/// nothing delivered meanwhile, that is the pool capacity.
+inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
+{
+  size_t accepted = 0;
+  while(true)
+  {
+    const auto result = channel.tryTakeSnapshot();
+    if(result != DataTamer::SnapshotResult::ok)
+    {
+      EXPECT_EQ(result, DataTamer::SnapshotResult::pool_exhausted);
+      return accepted;
+    }
+    ++accepted;
+  }
 }
 
 /// True while the calling thread (or any other) holds the channel's write mutex:

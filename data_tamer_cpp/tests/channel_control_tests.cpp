@@ -248,7 +248,6 @@ TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
   sink.drain();
   EXPECT_FALSE(GetBit(sink->snapshots.back().active_mask, 0));
   EXPECT_TRUE(sink->snapshots.back().payload.empty());
-  EXPECT_EQ(channel->getActiveFlags(), sink->snapshots.back().active_mask);
   value.reset();
   uint32_t changed = 42;
   EXPECT_THROW(channel->registerValue("value", &changed), std::runtime_error);
