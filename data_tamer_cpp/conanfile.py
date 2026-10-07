@@ -5,7 +5,7 @@ from conan.tools.cmake import CMakeToolchain, CMake, cmake_layout, CMakeDeps
 
 class DataTamerConan(ConanFile):
     name = "data_tamer"
-    version = "0.9.4"
+    version = "2.0.0"
     package_type = "library"
     url = "https://github.com/facontidavide/data_tamer"
     license = "MIT"

@@ -41,8 +41,11 @@ under "Unreleased" in `data_tamer_cpp/CHANGELOG.rst`.
   packaged as `data-tamer-parser`; its tests; `ros2_subscriber.py`.
 - `docs/`: `wire_format.md` and its golden vectors in `wire_format/vectors/`;
   `benchmarks/` and `reviews/` are dated records.
+- `tools/`: `check_versions.py` (every version number agrees), `abi_check.sh` (the
+  libabigail comparison) and `abi_probe.cpp` (the consumer side of that comparison).
 - `.github/workflows/`: plain CMake through conan, one ROS 2 job per distribution
-  (industrial_ci), asan and tsan presets, Python tests and PyPI release.
+  (industrial_ci), asan and tsan presets, Python tests and PyPI release, and the `abi`
+  job (libabigail).
 
 ## Build and test
 
@@ -123,8 +126,8 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
 - LogChannel, ChannelsRegistry, SinkWorker, TypesRegistry, MCAPSink, MCAPRingSink and
   ROS2PublisherSink keep all their state behind a Pimpl (LogChannel's only other base is
   `enable_shared_from_this`). Add members to the Pimpl. `tests/abi_tests.cpp` pins the
-  sizes of the sinks, SinkWorker, LogChannel, SnapshotRef, DataSink and ChannelDefaults.
-  Record any ABI break in the CHANGELOG.
+  size and alignment of every class and struct whose layout is part of the ABI. Record
+  any ABI break in the CHANGELOG. See "Versioning and ABI policy".
 - `LogChannel::stats()`, `SinkWorker::stats()` and `MCAPRingSink::stats()` are inline
   functions in the headers, marked `DATA_TAMER_INLINE_LOCAL` (hidden visibility,
   `details/abi.hpp`): they fill the `Stats` struct from exported scalar getters, one per
@@ -150,6 +153,102 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   `fwd_header_*` targets check it). `data_tamer.hpp` includes only `fwd.hpp`, so code
   using LogChannel includes `channel.hpp`. Keep heavy includes out of public headers.
 - `3rdparty/` is vendored: do not edit it. pre-commit excludes it.
+
+## Versioning and ABI policy
+
+One version number covers the C++ library, the ROS packages and the Python decoder
+(2.0.0 until the 2.0.0 tag). It lives in:
+
+- `data_tamer_cpp/CMakeLists.txt`, `project(... VERSION x.y.z)`. The shared library gets
+  `VERSION x.y.z` and `SOVERSION x` (the major), so it installs as
+  `libdata_tamer.so.x.y.z` with the symlinks `libdata_tamer.so.x` (the SONAME) and
+  `libdata_tamer.so`. The compile definition `DATA_TAMER_VERSION` and the CMake package
+  version file (non-ROS install, `SameMajorVersion`) derive from it;
+- `data_tamer_cpp/package.xml` and `data_tamer_msgs/package.xml`, `<version>`;
+- `data_tamer_cpp/conanfile.py`, `version`;
+- `python/data_tamer_parser.py`, `__version__`;
+- `data_tamer_cpp/CHANGELOG.rst`: the head section is "Unreleased" until the release
+  commit renames it to `x.y.z (date)`.
+
+`tools/check_versions.py` compares them and runs as the ctest case `version_consistency`.
+Change them together.
+
+The SOVERSION is the ABI generation. Within one major version a newer
+`libdata_tamer.so` must keep working with consumers built against any older header of
+that major. That is frozen inside 2.x:
+
+- the exported symbols (name, signature, mangling), including the private back-end
+  functions that inline templates call (`LogChannel::registerValueImpl`,
+  `controlMutex`, `checkValueName`, `schemaFrozen`, `hasCustomType`, `addCustomType`,
+  `sharedState`, `TypesRegistry::findOrCreate` and `replace`) and the lock contract
+  between them;
+- the size, alignment and member offsets of every type in `tests/abi_tests.cpp`:
+  by-value structs (`ChannelDefaults`, `MCAPRingOptions`, `ROS2PublisherOptions`,
+  `Snapshot`, `Schema`, ...), the classes whose inline code runs in consumers
+  (`LoggedValue<T>`, `ChannelSharedState`, `WriteMutex`, `ValuePtr`, `Transaction`) and
+  the Pimpl classes (their pointer members). Pinning `Snapshot`, `MCAPRingDump` and
+  `Schema` completely is deliberate, although a field appended to them would be safe
+  for readers. The exact byte values are for x86_64 only (aarch64 sizes a mutex at 48
+  bytes, not 40); what contains a mutex is pinned by relation on every libstdc++
+  platform. A new pin with a number needs the number measured on x86_64, and a
+  relation if it can differ elsewhere. The `Stats` structs are not on this list: they
+  are built inline from exported getters (see Invariants), so their getters are frozen
+  instead;
+- the vtables of `DataSink` and `CustomSerializer` (see Invariants). abidiff cannot see
+  `CustomSerializer`'s in the library, which is why the check also builds a probe;
+- the inline protocols: the flag word encoding of `ChannelSharedState`, the
+  `Transaction` chain, the `registerValue` templates, the payload encoding and schema
+  text (any wire revision, see Invariants).
+
+Adding a function, an overload, a class or an appended enumerator is compatible. Header
+defaults (member initializers, default arguments) take effect only in rebuilt
+consumers; defaults inside a Pimpl take effect for old binaries too. Say which in the
+CHANGELOG.
+
+Changing anything frozen is a break: bump the major version in all the files above
+(so `SOVERSION` changes) and record it in the CHANGELOG. Put new state behind a Pimpl
+instead of growing a pinned layout. Options structs passed by value are not size-tagged,
+so adding a field to one is a break too.
+
+Before the first 2.0.0 tag, a layout change to a pinned struct or class is allowed in
+the PR that owns it, with the pins in `abi_tests.cpp` updated in the same commit. The
+vtables of `DataSink` and `CustomSerializer` and the inline `Stats` rule (see
+Invariants) are frozen already. Do not change the library's default symbol visibility
+or mark classes `final` outside the planned visibility change.
+
+### Checking the ABI locally
+
+CI (`.github/workflows/abi.yml`, pull requests and pushes to `V2`) builds the library
+from the baseline and from the checkout and compares them with libabigail's `abidiff`,
+restricted to the installed headers (`--drop-private-types`; the Pimpl structs are
+private). A second comparison covers what consumers compile into their own binaries:
+`tools/abi_probe.cpp` derives from `DataSink` and `CustomSerializer`, calls the inline
+`stats()` functions and instantiates the `registerValue`, `LoggedValue` and guard
+templates, so that vtables and inline layouts that the library never defines are in the
+debug info (keep it to the stable API). The check fails when an exported function or
+variable is removed or changed (a vtable, a by-value struct that grew) unless the SONAME
+differs; added ones pass. The baseline is the highest release tag of the same major
+version, or, while there is none (before 2.0.0), the merge base with the base branch
+(the previous commit on a push to `V2`). Locally:
+
+```bash
+sudo apt install abigail-tools libzstd-dev liblz4-dev     # abidiff
+tools/abi_check.sh                         # automatic baseline, as in CI
+tools/abi_check.sh --baseline-ref 2.0.0    # any tag, branch or commit
+tools/abi_check.sh --baseline-dir /path/to/exported/tree
+```
+
+The script builds both sides (plain CMake, shared, Debug, no ROS) in a temporary
+directory and prints the abidiff report. A removed function counts only if the baseline
+library defined it strongly: the weak copies of `std::` and other inline functions
+that the library exports are not API. A change to `tools/abi_probe.cpp` that uses new
+API still gets its consumer-side comparison, with the baseline's own probe. The ROS 2
+sink is not covered: its ABI also follows the rclcpp release, and its pins are in
+`abi_tests.cpp`. Before 2.0.0, a layout change that the PR owns is accepted with
+`--allow-break` locally and the `abi-break` label on the pull request (never for the
+frozen vtables); once a 2.x tag exists the label no longer works and only a major
+version bump passes. The check also runs on pushes to `V2`, against the previous
+commit.
 
 ## Conventions
 

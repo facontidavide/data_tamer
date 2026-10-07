@@ -1,0 +1,49 @@
+name: abi
+
+# Compares libdata_tamer.so against the last release of the same major version (or,
+# before 2.0.0 is tagged, against the merge base) with libabigail. See "Versioning and
+# ABI policy" in CLAUDE.md. A break announced by a SONAME change passes. Before the
+# first 2.0.0 tag, the label `abi-break` accepts a layout change owned by the pull
+# request (never the frozen DataSink and CustomSerializer vtables). A push to V2
+# compares with the previous commit, which catches two pull requests that only break
+# together.
+
+on:
+  push:
+    branches: [V2]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      baseline_ref:
+        description: "Tag, branch or commit to compare against (default: automatic)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  abidiff:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0   # release tags and the merge base
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y abigail-tools libzstd-dev liblz4-dev
+
+    - name: Check versions
+      run: python3 tools/check_versions.py
+
+    - name: Compare the ABI
+      env:
+        ABI_BASE_BRANCH: origin/${{ github.base_ref || 'V2' }}
+        ABI_ALLOW_BREAK: ${{ contains(github.event.pull_request.labels.*.name, 'abi-break') && '1' || '0' }}
+        BASELINE_REF: ${{ github.event.inputs.baseline_ref }}
+      run: |
+        if [ -n "$BASELINE_REF" ]; then
+          tools/abi_check.sh --baseline-ref "$BASELINE_REF"
+        else
+          tools/abi_check.sh
+        fi

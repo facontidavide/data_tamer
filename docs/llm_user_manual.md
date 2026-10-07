@@ -25,6 +25,22 @@ target_link_libraries(my_app PRIVATE data_tamer::data_tamer)
 
 `ROS2PublisherSink` exists only in the ROS 2 build (the build defines `USING_ROS2`).
 
+### Versions and binary compatibility
+
+- `DATA_TAMER_VERSION` (defined by the target) is the library version, `X.Y.Z`. The shared
+  library installs as `libdata_tamer.so.X.Y.Z` with the SONAME `libdata_tamer.so.X`
+  (`libdata_tamer.so.2` for every 2.x release). A binary linked
+  against it loads any later `2.x` library, so a minor or patch update can replace the
+  `.so` without rebuilding. A new major version has a new SONAME: rebuild.
+- Without ROS, `find_package(data_tamer 2 REQUIRED)` accepts any `2.x` and rejects other
+  majors.
+- Code you compile into your binary does not change when the library is updated in place:
+  the header-only parts (`LoggedValue::set`, the `registerValue` templates, default
+  arguments, member initializers of option structs such as `ROS2PublisherOptions`) keep
+  the behaviour of the headers you built with. Rebuild to pick up a changed default.
+- A custom `DataSink` or `CustomSerializer` keeps working across `2.x`: their virtual
+  interfaces are frozen for 2.x.
+
 ## Mental model
 
 ```mermaid

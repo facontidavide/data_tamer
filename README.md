@@ -439,6 +439,18 @@ cmake -S . -B build/Debug -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build/Debug --parallel
 ```
 
+## Versions and binary compatibility
+
+One version number covers the C++ library, the ROS packages and the Python decoder. The
+shared library is installed as `libdata_tamer.so.X.Y.Z`, with the SONAME
+`libdata_tamer.so.X` (the major version, 2 for 2.x): consumers built against any `2.x` header load
+any later `2.x` library, and a new major version has a new SONAME. Without ROS,
+`find_package(data_tamer 2 REQUIRED)` accepts any `2.x`. Header-only code and defaults
+that live in headers take effect when the consumer is rebuilt, not when the library is
+replaced. `tests/abi_tests.cpp` pins the layouts that are part of the ABI and CI compares
+every pull request with libabigail; [CLAUDE.md](CLAUDE.md) states what is frozen and how
+to run the check (`tools/abi_check.sh`).
+
 # How to deserialize data recorded with DataTamer
 
 The wire format is specified in [docs/wire_format.md](docs/wire_format.md), with golden

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(data_tamer_cpp VERSION 1.0.0 LANGUAGES CXX)
+project(data_tamer_cpp VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -54,6 +54,13 @@ add_library(data_tamer
     $<$<BOOL:${DATA_TAMER_BUILD_ROS}>:src/sinks/ros2_publisher_sink.cpp>
 )
 add_library(data_tamer::data_tamer ALIAS data_tamer)
+
+# Versioned shared library: libdata_tamer.so.<major>.<minor>.<patch>, with the
+# SONAME libdata_tamer.so.<major> (the ABI generation). Any ABI-breaking change
+# bumps the major version: see "ABI policy" in CLAUDE.md. Ignored by static builds.
+set_target_properties(data_tamer PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR})
 
 target_compile_options(data_tamer PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>

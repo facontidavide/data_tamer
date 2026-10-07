@@ -77,6 +77,12 @@ if(Python3_FOUND AND EXISTS "${DATA_TAMER_PYTHON_DIR}")
         COMMAND Python3::Interpreter -m unittest discover -s ${DATA_TAMER_PYTHON_DIR} -p "test_*.py")
 endif()
 
+# The version number is kept in several files (tools/check_versions.py lists them).
+if(Python3_FOUND AND EXISTS "${DATA_TAMER_REPO_DIR}/tools/check_versions.py")
+    add_test(NAME version_consistency
+        COMMAND Python3::Interpreter ${DATA_TAMER_REPO_DIR}/tools/check_versions.py)
+endif()
+
 # Every installed header must compile as strict C++17: the library itself is
 # built as C++20, and this object library is what stops a C++20-only construct
 # from leaking into the public interface.
