@@ -1,6 +1,7 @@
 #pragma once
 
 #include "data_tamer/data_sink.hpp"
+#include "data_tamer/details/abi.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"  // details::NumberedPath
 
 #include <chrono>
@@ -195,7 +196,7 @@ public:
   /// so that MCAPRingStats can gain fields without changing the library ABI.
   /// Each field is read separately: while the worker delivers, the fields
   /// may come from slightly different moments.
-  [[nodiscard]] MCAPRingStats stats() const
+  [[nodiscard]] DATA_TAMER_INLINE_LOCAL MCAPRingStats stats() const
   {
     MCAPRingStats stats;
     stats.dumps_written = dumpsWritten();

@@ -270,8 +270,8 @@ int main(int argc, char** argv)
               (unsigned long long)stats.write_lock_contended,
               (unsigned long long)stats.write_lock_wait_max_ns);
   uint64_t attachment_drops = 0;
-  for(const auto& sink : sinks)
-    attachment_drops += channel->droppedSnapshots(sink);
+  for(const auto& entry : stats.dropped_by_sink)
+    attachment_drops += entry.dropped;
   std::printf("pool_exhausted=%llu payload_reallocations=%llu dropped_oversize=%llu "
               "attachment_drops=%llu\n",
               (unsigned long long)stats.pool_exhausted,

@@ -4,6 +4,7 @@
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/logged_value.hpp"
 #include "data_tamer/names.hpp"
+#include "data_tamer/details/abi.hpp"
 #include "data_tamer/details/shared_state.hpp"
 
 #include <chrono>
@@ -56,7 +57,7 @@ enum class SnapshotResult : uint8_t
   /// Captured and accepted by every attached sink.
   ok,
   /// Captured; some sinks accepted it, others refused it because their
-  /// SinkWorker is stopped. droppedSnapshots(sink) tells which.
+  /// SinkWorker is stopped. Stats::dropped_by_sink tells which.
   partial,
   /// Captured, but every attached sink refused it (every SinkWorker stopped).
   rejected,
@@ -354,9 +355,49 @@ public:
   /// tryTakeSnapshot() attempts rejected because the payload outgrew the slot.
   [[nodiscard]] uint64_t droppedOversize() const;
 
+  /// Calls of takeSnapshot() and tryTakeSnapshot() so far, whatever their
+  /// result (a call that throws, e.g. from prepare(), counts too). Without
+  /// such calls, attempts equal the sum of the results: ok + partial + rejected
+  /// + no_sinks + not_prepared + pool_exhausted + oversize + blocked.
+  [[nodiscard]] uint64_t snapshotAttempts() const;
+
+  /// Snapshots at least one attached sink took: the results `ok` and `partial`.
+  /// The acquire load pairs with the release increment so that a read of this
+  /// counter followed by snapshotAttempts() never sees more accepted than
+  /// attempts (stats() reads them in that order). Handing a snapshot to a sink
+  /// is not delivering it: SinkWorker::delivered() counts that.
+  [[nodiscard]] uint64_t snapshotsAccepted() const;
+
+  /// The most sinks a channel holds.
+  static constexpr size_t kMaxSinks = 8;
+
+  /// Building block of Stats::dropped_by_sink. Under one acquisition of the
+  /// control mutex, writes the attached sinks to `sinks` and their drop counts
+  /// to `dropped` (arrays of `capacity` entries each) and returns the number of
+  /// attached sinks; when that is more than `capacity`, only `capacity`
+  /// entries are written. `dropped` counts the publications a sink refused
+  /// because its SinkWorker was stopped. The order is the channel's own, not
+  /// attachment order: tell sinks apart by the pointer, which is only an
+  /// identity (do not dereference it unless you hold the worker; the address of
+  /// a removed worker can be reused by a new one). Not for a real-time thread.
+  [[nodiscard]] size_t sinkDropped(const SinkWorker** sinks, uint64_t* dropped,
+                                   size_t capacity) const;
+
   /// Failed publications to this attachment; zero if sink is not attached.
+  /// Deprecated, kept for one release: read Stats::dropped_by_sink instead.
   [[nodiscard]] uint64_t droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const;
 
+  /// Publications one attached sink refused. See sinkDropped().
+  struct SinkDrops
+  {
+    const SinkWorker* sink = nullptr;
+    uint64_t dropped = 0;
+  };
+
+  /// Every counter of the channel, read one by one (the values are not a
+  /// coherent snapshot of one instant, except that accepted <= attempts holds
+  /// within one Stats). New fields are appended at the end. Holds a vector, so
+  /// it is not trivially copyable.
   struct Stats
   {
     uint64_t write_lock_contended = 0;
@@ -364,9 +405,45 @@ public:
     uint64_t pool_exhausted = 0;
     uint64_t payload_reallocations = 0;
     uint64_t dropped_oversize = 0;
+    /// Calls of takeSnapshot()/tryTakeSnapshot(); see snapshotAttempts().
+    uint64_t attempts = 0;
+    /// Snapshots at least one sink took (ok + partial); see snapshotsAccepted().
+    uint64_t accepted = 0;
+    /// One entry per sink attached at the moment of the read, in no promised
+    /// order; see sinkDropped().
+    std::vector<SinkDrops> dropped_by_sink;
   };
 
-  [[nodiscard]] Stats stats() const;
+  /// Inline on purpose: the struct is built in the caller from the exported
+  /// getters above, so it never crosses the library boundary and can gain
+  /// fields in any release. Hidden (DATA_TAMER_INLINE_LOCAL) so that each
+  /// binary uses the copy built against its own header, whatever other
+  /// versions of this header are loaded in the process. Takes the control mutex
+  /// twice and allocates; not for a real-time thread.
+  ///
+  /// accepted is read before attempts, and the snapshot path increments them in
+  /// the opposite order, so accepted <= attempts within one result. A
+  /// difference between two results, or attempts - accepted over a window, is
+  /// approximate by the calls in flight: clamp it at zero.
+  [[nodiscard]] DATA_TAMER_INLINE_LOCAL Stats stats() const
+  {
+    Stats result;
+    result.write_lock_contended = writeLockContended();
+    result.write_lock_wait_max_ns = writeLockWaitMaxNs();
+    result.pool_exhausted = poolExhausted();
+    result.payload_reallocations = payloadReallocations();
+    result.dropped_oversize = droppedOversize();
+    result.accepted = snapshotsAccepted();
+    result.attempts = snapshotAttempts();
+    const SinkWorker* sinks[kMaxSinks];
+    uint64_t dropped[kMaxSinks];
+    const size_t count = sinkDropped(sinks, dropped, kMaxSinks);
+    for(size_t i = 0; i < count && i < kMaxSinks; ++i)
+    {
+      result.dropped_by_sink.push_back({ sinks[i], dropped[i] });
+    }
+    return result;
+  }
 
 private:
   template <typename T>

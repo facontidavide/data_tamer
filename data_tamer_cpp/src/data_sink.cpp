@@ -199,8 +199,9 @@ struct SinkWorker::Attachment
     return true;
   }
 
-  // Consumer only.
-  bool pop(SnapshotRef& out)
+  // Consumer only. `depth` is the number of entries queued before this pop, as
+  // far as the cached producer position shows.
+  bool pop(SnapshotRef& out, size_t& depth)
   {
     const size_t at = head.load(std::memory_order_relaxed);
     if(at == cached_tail)
@@ -211,6 +212,9 @@ struct SinkWorker::Attachment
         return false;
       }
     }
+    // From the cached tail, refreshed whenever the ring ran empty: no extra
+    // atomic load, and it sees every batch the producer left.
+    depth = cached_tail >= at ? cached_tail - at : cached_tail + size - at;
     out = std::move(entries[at]);
     head.store(advance(at), std::memory_order_release);
     return true;
@@ -262,9 +266,11 @@ struct SinkWorker::Pimpl
 
   void recordError(const char* what)
   {
-    errors.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(error_mutex);
     last_error = what;
+    // After the message: a reader that sees this count finds a message at least
+    // as recent.
+    errors.fetch_add(1, std::memory_order_relaxed);
   }
 
   // Runs a sink callback; a throw is counted (errors(), lastError()) instead of
@@ -286,10 +292,22 @@ struct SinkWorker::Pimpl
     }
   }
 
+  // Caller holds store_mutex, the only writer: a plain load and store do.
+  void noteDepth(size_t depth)
+  {
+    if(depth > queue_high_water.load(std::memory_order_relaxed))
+    {
+      queue_high_water.store(depth, std::memory_order_relaxed);
+    }
+  }
+
   // Caller holds store_mutex.
   void deliver()
   {
-    guarded([this] { sink->onSnapshot(current_ref); });
+    guarded([this] {
+      sink->onSnapshot(current_ref);
+      delivered.fetch_add(1, std::memory_order_relaxed);
+    });
     current_ref.reset();
   }
 
@@ -325,12 +343,14 @@ struct SinkWorker::Pimpl
     // predecessors read as detached here. A queue detached later in this pass
     // has no successor in pass_list, so serving it in the round robin below
     // keeps the order too.
+    size_t depth = 0;
     for(Attachment* attachment : pass_list)
     {
       if(attachment->detached.load(std::memory_order_acquire))
       {
-        while(attachment->pop(current_ref))
+        while(attachment->pop(current_ref, depth))
         {
+          noteDepth(depth);
           deliver();
         }
       }
@@ -349,8 +369,9 @@ struct SinkWorker::Pimpl
       empty_round = true;
       for(Attachment* attachment : pass_list)
       {
-        if(attachment->pop(current_ref))
+        if(attachment->pop(current_ref, depth))
         {
+          noteDepth(depth);
           deliver();
           empty_round = false;
         }
@@ -419,6 +440,8 @@ struct SinkWorker::Pimpl
   // store_mutex: the queues of the current pass, walked without
   // attachments_mutex. Cleared after each pass, its capacity kept.
   std::vector<Attachment*> pass_list;
+  std::atomic<uint64_t> delivered{ 0 };         // onSnapshot() returned
+  std::atomic<uint64_t> queue_high_water{ 0 };  // see SinkWorker::queueHighWater()
   std::atomic<uint64_t> errors{ 0 };
   std::mutex error_mutex;
   std::string last_error;
@@ -552,6 +575,16 @@ void SinkWorker::drain()
   while(!_p->deliverPass().complete)
   {
   }
+}
+
+uint64_t SinkWorker::delivered() const
+{
+  return _p->delivered.load(std::memory_order_relaxed);
+}
+
+uint64_t SinkWorker::queueHighWater() const
+{
+  return _p->queue_high_water.load(std::memory_order_relaxed);
 }
 
 uint64_t SinkWorker::errors() const

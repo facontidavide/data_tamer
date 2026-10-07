@@ -112,8 +112,12 @@ on a real-time thread.
 - Non-scalar values lock automatically. `getMutablePtr()` / `getConstPtr()` guards join a
   `scopedWrite()` on the same thread instead of deadlocking. Keep transactions and guards
   short: the snapshot thread waits on them.
-- Backpressure counters: `poolExhausted()`, `droppedSnapshots(sink)`, `payloadReallocations()`,
-  `droppedOversize()`, or all at once with `stats()`.
+- Monitoring is one struct per channel and one per sink. `channel->stats()` returns
+  `attempts`, `accepted` (snapshots at least one sink took), `pool_exhausted`,
+  `dropped_oversize`, `payload_reallocations`, the write-lock counters and `dropped_by_sink`
+  (what each attached sink refused). `worker->stats()` returns `delivered`, `errors`,
+  `last_error` and `queue_high_water` (per worker, across its channels). Read them from a
+  non real-time thread. `droppedSnapshots(sink)` is deprecated.
 - Registering, unregistering and changing sinks are safe while logging, but call them outside
   `scopedWrite()` and sink callbacks.
 
