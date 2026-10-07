@@ -62,6 +62,8 @@ struct LogChannel::Pimpl
   size_t pool_capacity = SnapshotPool::kDefaultCapacity;
   std::atomic<uint64_t> payload_reallocations{ 0 };
   std::atomic<uint64_t> dropped_oversize{ 0 };
+  std::atomic<uint64_t> attempts{ 0 };  // takeSnapshot()/tryTakeSnapshot() calls
+  std::atomic<uint64_t> accepted{ 0 };  // ... that at least one sink took
   std::shared_ptr<SnapshotPool> pool;
   Schema schema;
   bool schema_frozen = false;  // control_mutex held
@@ -177,7 +179,7 @@ struct LogChannel::Pimpl
     std::atomic<uint64_t> dropped{ 0 };
     bool schema_registered = false;
   };
-  static constexpr size_t kMaxSinks = 8;
+  static constexpr size_t kMaxSinks = LogChannel::kMaxSinks;
   std::array<std::unique_ptr<SinkLink>, kMaxSinks> sinks;
   std::array<std::atomic<SinkLink*>, kMaxSinks> published_sinks{};
   std::atomic<uint64_t> epoch{ 0 };
@@ -499,12 +501,6 @@ uint64_t LogChannel::writeLockWaitMaxNs() const
   return _p->write_lock_wait_max_ns.load(std::memory_order_relaxed);
 }
 
-LogChannel::Stats LogChannel::stats() const
-{
-  return { writeLockContended(), writeLockWaitMaxNs(), poolExhausted(),
-           payloadReallocations(), droppedOversize() };
-}
-
 uint64_t LogChannel::poolExhausted() const
 {
   std::lock_guard const lock(_p->control_mutex);  // pool is created under it
@@ -600,6 +596,32 @@ uint64_t LogChannel::payloadReallocations() const
 uint64_t LogChannel::droppedOversize() const
 {
   return _p->dropped_oversize.load(std::memory_order_relaxed);
+}
+
+uint64_t LogChannel::snapshotAttempts() const
+{
+  return _p->attempts.load(std::memory_order_relaxed);
+}
+
+uint64_t LogChannel::snapshotsAccepted() const
+{
+  return _p->accepted.load(std::memory_order_acquire);
+}
+
+size_t LogChannel::sinkDropped(const SinkWorker** sinks, uint64_t* dropped,
+                               size_t capacity) const
+{
+  std::lock_guard const lock(_p->control_mutex);
+  size_t count = 0;
+  _p->forEachLink([&](const Pimpl::SinkLink& link) {
+    if(count < capacity)
+    {
+      sinks[count] = link.sink.get();
+      dropped[count] = link.dropped.load(std::memory_order_relaxed);
+    }
+    ++count;
+  });
+  return count;
 }
 
 uint64_t LogChannel::droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const
@@ -727,6 +749,7 @@ void LogChannel::prepare()
 
 SnapshotResult LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
 {
+  _p->attempts.fetch_add(1, std::memory_order_relaxed);
   if(!_p->logging_started.load(std::memory_order_acquire))
   {
     if(getNumberOfSinks() == 0)
@@ -740,6 +763,7 @@ SnapshotResult LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
 
 SnapshotResult LogChannel::tryTakeSnapshot(std::chrono::nanoseconds timestamp)
 {
+  _p->attempts.fetch_add(1, std::memory_order_relaxed);
   if(!_p->logging_started.load(std::memory_order_acquire))
   {
     return SnapshotResult::not_prepared;
@@ -859,11 +883,14 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
       link->dropped.fetch_add(1, std::memory_order_relaxed);
     }
   }
-  if(accepted == attached)
+  if(accepted == 0)
   {
-    return SnapshotResult::ok;
+    return SnapshotResult::rejected;
   }
-  return accepted == 0 ? SnapshotResult::rejected : SnapshotResult::partial;
+  // Release: pairs with the acquire in snapshotsAccepted() so that a reader that
+  // sees this increment also sees this call's `attempts` increment.
+  _p->accepted.fetch_add(1, std::memory_order_release);
+  return accepted == attached ? SnapshotResult::ok : SnapshotResult::partial;
 }
 
 }  // namespace DataTamer

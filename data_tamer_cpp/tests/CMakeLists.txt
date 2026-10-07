@@ -12,6 +12,7 @@ set(DATATAMER_TEST_SOURCES
     snapshot_pool_tests.cpp
     sink_queue_tests.cpp
     sink_lifecycle_tests.cpp
+    channel_stats_tests.cpp
     value_ptr_tests.cpp
     logged_value_tests.cpp
     shared_state_tests.cpp
@@ -109,3 +110,21 @@ foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>
         $<$<BOOL:${DATA_TAMER_HAS_WMISMATCHED_TAGS}>:-Wmismatched-tags>)
 endforeach()
+
+# The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
+# a shared object that calls them must not export a copy. The probe is built
+# without optimization so that the calls are not inlined away, and is not
+# linked against the library (the getters stay undefined, which a shared object
+# allows): only its own symbol table matters.
+find_program(DATA_TAMER_NM nm)
+if(UNIX AND NOT APPLE AND DATA_TAMER_NM)
+    add_library(stats_visibility_probe SHARED stats_visibility_probe.cpp)
+    target_include_directories(stats_visibility_probe PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_features(stats_visibility_probe PRIVATE cxx_std_20)
+    target_compile_options(stats_visibility_probe PRIVATE -O0)
+    target_link_libraries(stats_visibility_probe PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    add_test(NAME stats_functions_are_not_exported
+        COMMAND ${CMAKE_COMMAND} -DNM=${DATA_TAMER_NM}
+                -DLIB=$<TARGET_FILE:stats_visibility_probe>
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/check_no_stats_symbol.cmake)
+endif()

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "data_tamer/details/abi.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -207,10 +209,48 @@ public:
     return dynamic_cast<T&>(sink());
   }
 
+  /// Snapshots handed to the sink so far: onSnapshot() calls that returned.
+  /// Cumulative over the worker's life (stop() and start() do not reset it).
+  [[nodiscard]] uint64_t delivered() const;
+
   /// Number of onSnapshot(), onStop() and onStart() calls that threw, and the
   /// message of the last one.
   [[nodiscard]] uint64_t errors() const;
   [[nodiscard]] std::string lastError() const;
+
+  /// The most snapshots the delivery side has found waiting in a queue, taken
+  /// over all the channels attached to this worker (it is per worker, not per
+  /// channel). Compare it with the largest pool capacity among those channels:
+  /// a value near it means the sink nearly made a pool run out. It is a lower
+  /// bound: the deliverer measures a queue from its last look at the producer's
+  /// position, refreshed whenever it runs the queue empty, so a peak built and
+  /// drained between two looks can be under-read. It is updated as soon as it
+  /// rises, on the delivery thread (never on the real-time path), and is zero
+  /// before the first delivery.
+  [[nodiscard]] uint64_t queueHighWater() const;
+
+  /// Everything the worker counts. Cumulative over the worker's life.
+  struct Stats
+  {
+    uint64_t delivered = 0;
+    uint64_t errors = 0;
+    /// Per worker, across all its channels; see queueHighWater().
+    uint64_t queue_high_water = 0;
+    /// The last error is at least as recent as the `errors` count.
+    std::string last_error;
+  };
+
+  /// Inline on purpose: built in the caller from the exported getters above, so
+  /// the struct never crosses the library boundary and can gain fields in any
+  /// release. Hidden (DATA_TAMER_INLINE_LOCAL) so that each binary uses the copy
+  /// built against its own header. The fields are read one by one, not as one
+  /// instant. Not real-time safe: lastError() takes a mutex and copies a string
+  /// (it allocates). On a real-time thread read delivered(), errors() and
+  /// queueHighWater(), which are relaxed atomic loads.
+  [[nodiscard]] DATA_TAMER_INLINE_LOCAL Stats stats() const
+  {
+    return { delivered(), errors(), queueHighWater(), lastError() };
+  }
 
 private:
   friend class LogChannel;

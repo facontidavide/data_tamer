@@ -12,6 +12,7 @@
 #include "data_tamer/types.hpp"
 #include "data_tamer/values.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
+#include "data_tamer/details/abi.hpp"
 #include "data_tamer/details/locked_reference.hpp"
 #include "data_tamer/details/shared_state.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
