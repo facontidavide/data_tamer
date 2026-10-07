@@ -55,23 +55,26 @@ public:
 
   ~MCAPSink() override;
 
-  /// After a certain amount of time, the MCAP file is reset: by default it is
-  /// truncated and overwritten, discarding what was recorded so far (see
-  /// setCreateNewFileOnReset to continue in a new file instead). Default value
-  /// is 600 seconds (10 minutes). To disable this feature, use a time of 0 seconds.
-  /// WARNING: without a reset the file grows for as long as the application runs.
+  /// After a certain amount of time, the MCAP file is reset: by default the
+  /// recording continues in a new numbered file and nothing is lost (see
+  /// setCreateNewFileOnReset to truncate and overwrite the same file instead).
+  /// Default value is 600 seconds (10 minutes). To disable this feature, use a
+  /// time of 0 seconds.
+  /// WARNING: disk usage is unbounded unless the files are truncated on reset
+  /// (setCreateNewFileOnReset(false)): a new file every `reset_time`, for as
+  /// long as the application runs.
   void setMaxTimeBeforeReset(std::chrono::seconds reset_time);
 
   /// What happens on a reset (see `setMaxTimeBeforeReset`).
-  /// If `create_new_file` is false (default), the same file is truncated and
-  /// restarted: everything recorded before the reset is DISCARDED. This bounds
-  /// disk usage, but keeps at most the last `reset_time` of data.
-  /// If true, the recording continues in a new file whose name carries a
-  /// counter, inserted before the extension:
+  /// If `create_new_file` is true (default), the recording continues in a new
+  /// file whose name carries a counter, inserted before the extension:
   /// "run.tamer.mcap" -> "run_1.tamer.mcap", "run_2.tamer.mcap", ...
   /// (see details::NumberedPath). Numbered names that already exist, e.g. from
   /// a previous run with the same path, are skipped, never overwritten.
   /// Nothing is lost, but disk usage is unbounded.
+  /// If false, the same file is truncated and restarted: everything recorded
+  /// before the reset is DISCARDED. This bounds disk usage, but keeps at most
+  /// the last `reset_time` of data.
   void setCreateNewFileOnReset(bool create_new_file);
 
   /// Stop recording and save the file. Snapshots delivered afterwards are

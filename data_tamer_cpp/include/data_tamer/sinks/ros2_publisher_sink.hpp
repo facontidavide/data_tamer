@@ -46,16 +46,16 @@ struct ROS2PublisherOptions
   /// releases) only understand SchemaFormat::Text.
   SchemaFormat schema_format = SchemaFormat::Text;
   /// QoS of `<topic_prefix>/data` (or `<topic_prefix>/data_batch`). The default
-  /// is reliable KeepAll, as in previous releases: nothing is dropped, but a
-  /// slow or stalled subscriber makes the publishing process queue messages
-  /// without limit. In a robot process, prefer a bounded history, e.g.
-  /// `rclcpp::QoS(rclcpp::KeepLast(100)).reliable()`: a subscriber that falls
-  /// behind loses the oldest messages instead. Keep it reliable so that both
+  /// is reliable with a history of the last 100 messages: a slow or stalled
+  /// subscriber loses the oldest messages instead of making the publishing
+  /// process queue messages without limit. Keep it reliable so that both
   /// reliable and best-effort subscribers match. With aggregation each message
-  /// is a batch: size the depth accordingly.
+  /// is a batch: size the depth accordingly. For a lossless stream, at the
+  /// price of unbounded memory behind a slow subscriber, use
+  /// `rclcpp::QoS(rclcpp::KeepAll()).reliable()`.
   /// `<topic_prefix>/schemas` is not affected: it is always reliable,
   /// transient-local, KeepLast(1).
-  rclcpp::QoS data_qos = rclcpp::QoS(rclcpp::KeepAll()).reliable();
+  rclcpp::QoS data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable();
 };
 
 /// Publishes schemas and snapshots on `<topic_prefix>/schemas` and
