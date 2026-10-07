@@ -20,11 +20,19 @@ Unreleased
   completes at the first snapshot stamped after ``T + post_trigger``.
   A writer thread of the sink writes the file from a second buffer, so the
   sink worker never waits for disk; a finished dump that finds the writer busy
-  is handed over at the next snapshot. ``flushPendingDump()`` writes a request
-  made just before ``SinkWorker::stop()``. Dump ``N`` is written to
+  is handed over at the next snapshot. ``flushPendingDump()`` writes the active
+  request at once and waits for the file, with the worker running (no need to
+  stop and restart it) or after ``SinkWorker::stop()`` for a request made just
+  before shutdown. Dump ``N`` is written to
   ``details::NumberedPath(filepath, N)``, skipping names that exist already.
   The dump callback reports write errors (disk full) and ``truncated`` when
-  the ring was too small for the interval. Example ``T04_flight_recorder``.
+  the ring was too small for the interval, including evictions while a
+  complete dump waits for a busy writer. ``stats()`` returns the counters and
+  ``oldest_timestamp``/``newest_timestamp`` of the ring content, so the
+  history the ring holds is one call away. ``stats()`` is inline and built
+  from one exported getter per field (``dumpsWritten()`` ...
+  ``newestTimestamp()``), so ``MCAPRingStats`` can gain fields without an ABI
+  change. Example ``T04_flight_recorder``.
 * ROS 2: export the ``Threads`` dependency, so that ``find_package(data_tamer_cpp)``
   works from a fresh CMake cache (``Threads::Threads`` is in the public link
   interface).
