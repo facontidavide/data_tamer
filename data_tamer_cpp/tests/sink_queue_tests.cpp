@@ -497,7 +497,54 @@ TEST(SinkQueue, McapAutomaticRolloverDoesNotReopenClosedAcceptance)
   std::filesystem::remove_all(directory);
 }
 
-TEST(SinkQueue, McapTruncatesOnResetByDefault)
+namespace
+{
+std::vector<uint32_t> mcapSequences(const std::filesystem::path& path)
+{
+  std::vector<uint32_t> sequences;
+  mcap::McapReader reader;
+  EXPECT_TRUE(reader.open(path.string()).ok()) << path;
+  for(const auto& message : reader.readMessages())
+  {
+    sequences.push_back(message.message.sequence);
+  }
+  return sequences;
+}
+}  // namespace
+
+TEST(SinkQueue, McapRollsOverOnResetByDefault)
+{
+  const auto directory =
+      std::filesystem::temp_directory_path() /
+      ("data_tamer_default_rollover_" + std::to_string(NsecSinceEpoch().count()));
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(std::filesystem::create_directory(directory));
+  uint64_t value = 1;
+  // Rolling over into new files is the default: no setCreateNewFileOnReset().
+  auto sink = manual<MCAPSink>((directory / "default.mcap").string());
+  sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));  // Every callback rolls over.
+  auto channel = channelWith(sink, &value);
+  for(int i = 0; i < 4; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  }
+  sink.worker->stop();
+  sink->stopRecording();
+  size_t count = 0;
+  size_t files = 0;
+  for(const auto& file : std::filesystem::directory_iterator(directory))
+  {
+    count += mcapSequences(file.path()).size();
+    ++files;
+  }
+  EXPECT_EQ(count, 4u);  // nothing was discarded
+  EXPECT_EQ(files, 5u);  // the last rollover leaves an empty file
+  EXPECT_TRUE(std::filesystem::exists(directory / "default.mcap"));
+  EXPECT_TRUE(std::filesystem::exists(directory / "default_4.mcap"));
+  std::filesystem::remove_all(directory);
+}
+
+TEST(SinkQueue, McapTruncatesOnResetWhenRolloverIsDisabled)
 {
   const auto directory =
       std::filesystem::temp_directory_path() /
@@ -505,8 +552,8 @@ TEST(SinkQueue, McapTruncatesOnResetByDefault)
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(std::filesystem::create_directory(directory));
   uint64_t value = 1;
-  // Truncating the same file is the default: no setCreateNewFileOnReset().
   auto sink = manual<MCAPSink>((directory / "truncate.mcap").string());
+  sink->setCreateNewFileOnReset(false);  // opt in to truncating the file
   sink->setMaxTimeBeforeReset(std::chrono::seconds(-1));
   auto channel = channelWith(sink, &value);
   for(int i = 0; i < 4; ++i)
@@ -519,15 +566,8 @@ TEST(SinkQueue, McapTruncatesOnResetByDefault)
   for(const auto& file : std::filesystem::directory_iterator(directory))
   {
     EXPECT_EQ(file.path().filename(), "truncate.mcap");
-    mcap::McapReader reader;
-    ASSERT_TRUE(reader.open(file.path().string()).ok());
-    size_t count = 0;
-    for(const auto& message : reader.readMessages())
-    {
-      (void)message;
-      ++count;
-    }
-    EXPECT_EQ(count, 0u);  // each reset discarded what came before
+    // each reset discarded what came before
+    EXPECT_TRUE(mcapSequences(file.path()).empty());
     ++files;
   }
   EXPECT_EQ(files, 1u);
@@ -588,21 +628,6 @@ TEST(SinkQueue, McapNumberedPathKeepsMultiPartExtension)
   EXPECT_EQ(NumberedPath("log.", 1), "log._1");
   EXPECT_EQ(NumberedPath("run.TAMER.Mcap", 1), "run_1.TAMER.Mcap");
 }
-
-namespace
-{
-std::vector<uint32_t> mcapSequences(const std::filesystem::path& path)
-{
-  std::vector<uint32_t> sequences;
-  mcap::McapReader reader;
-  EXPECT_TRUE(reader.open(path.string()).ok()) << path;
-  for(const auto& message : reader.readMessages())
-  {
-    sequences.push_back(message.message.sequence);
-  }
-  return sequences;
-}
-}  // namespace
 
 TEST(SinkQueue, McapRolloverRestartsSequencePerFile)
 {

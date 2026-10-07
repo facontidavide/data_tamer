@@ -39,10 +39,9 @@ Unreleased
   in ``onSchema()``, instead of on every republish.
 * ``ROS2PublisherSink`` QoS (2.0 review item 18). The data topic (``data`` or
   ``data_batch``) uses the new ``ROS2PublisherOptions::data_qos``. Its default
-  is unchanged, reliable ``KeepAll``, under which a slow or stalled subscriber
-  makes the publishing process queue messages without bound; in robot
-  processes a bounded history is recommended, e.g.
-  ``rclcpp::QoS(rclcpp::KeepLast(100)).reliable()``.
+  is ``rclcpp::QoS(rclcpp::KeepLast(100)).reliable()``: memory stays bounded and
+  a slow or stalled subscriber loses the oldest messages (see the entry on
+  safe defaults below).
   ``schemas`` is reliable, transient-local ``KeepLast(1)``: every message is the
   complete catalog, so a late subscriber still gets all schemas. The catalog is
   published as soon as the sink learns a schema (``prepare()``, or
@@ -106,18 +105,37 @@ Unreleased
   'loco/LF/x' registered twice (unregister() it first)``; the no-spaces check
   runs before any custom type is discovered, so a rejected name leaves the
   channel unchanged.
-* MCAP rollover (#98): the default is unchanged: when ``setMaxTimeBeforeReset``
-  expires (600 s by default), ``MCAPSink`` truncates and restarts the same
-  file, DISCARDING everything recorded before the reset. To keep it, call
-  ``setCreateNewFileOnReset(true)`` (continue in a new numbered file) or
-  ``setMaxTimeBeforeReset(std::chrono::seconds(0))`` (never reset). With
-  rollover enabled, numbered names that already exist (e.g. from a previous run
+* MCAP rollover (#98): when ``setMaxTimeBeforeReset`` expires (600 s by
+  default), ``MCAPSink`` continues in a new numbered file, or truncates the same
+  file if ``setCreateNewFileOnReset(false)`` was called (see the entry on safe
+  defaults below). Numbered names that already exist (e.g. from a previous run
   with the same path) are now skipped instead of overwritten, and the counter
   advances only once the new file is open. The counter is inserted before the
   extension, now the trailing run of alphabetic dot-segments, so multi-part
   extensions survive and dotted stems stay whole: ``run.tamer.mcap`` rolls over
   to ``run_1.tamer.mcap`` (it was ``run.tamer_1.mcap``), ``log_2026.10.05.mcap``
   to ``log_2026.10.05_1.mcap``.
+* Safe defaults. Two defaults changed, because each lost data or grew memory
+  silently in a long-running robot process.
+
+  - ``MCAPSink`` rolls over into new numbered files by default
+    (``setCreateNewFileOnReset`` defaults to ``true``). Before, the file was
+    truncated every ``setMaxTimeBeforeReset`` (600 s), DISCARDING everything
+    recorded before the reset. Nothing is lost now, but disk usage is unbounded:
+    one file per 10 minutes for as long as the process runs. To bound the disk,
+    call ``setCreateNewFileOnReset(false)`` (the old behaviour) or
+    ``setMaxTimeBeforeReset(std::chrono::seconds(0))`` (one file, never reset);
+    delete old files yourself otherwise.
+  - ``ROS2PublisherOptions::data_qos`` defaults to
+    ``rclcpp::QoS(rclcpp::KeepLast(100)).reliable()`` instead of reliable
+    ``KeepAll``. A slow or stalled subscriber no longer makes the publishing
+    process queue messages without bound: it loses the oldest messages instead.
+    With ``aggregate`` each message is a batch, so size the depth accordingly.
+    The QoS stays reliable, so reliable and best-effort subscribers still match.
+    For the old behaviour set ``options.data_qos =
+    rclcpp::QoS(rclcpp::KeepAll()).reliable()``.
+  - Real-time impact: none. Both changes are on the sink worker side;
+    ``tryTakeSnapshot()`` is untouched.
 * MCAP messages carry a per-channel ``sequence`` number (1, 2, 3, ... per MCAP
   channel and file) instead of always 1, so readers can detect gaps (#98).
 * New ``data_tamer/sinks/mcap_encoding.hpp`` (#96): inline helpers

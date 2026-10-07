@@ -136,9 +136,9 @@ int main()
 {
   // Multiple channels can use this sink. Data will be saved in mylog.mcap
   auto mcap_sink = DataTamer::MCAPSink::create("mylog.mcap");
-  // By default the file is truncated every 10 minutes, DISCARDING what was recorded:
-  // continue in mylog_1.mcap, mylog_2.mcap, ... instead (or setMaxTimeBeforeReset(0s)).
-  mcap_sink->as<DataTamer::MCAPSink>().setCreateNewFileOnReset(true);
+  // Every 10 minutes the recording continues in a new file (mylog_1.mcap, mylog_2.mcap,
+  // ...), so nothing is lost. To bound the disk usage instead, keep only the last 10
+  // minutes with setCreateNewFileOnReset(false), or never reset: setMaxTimeBeforeReset(0s).
 
   // Create a channel and attach a sink. A channel can have multiple sinks
   auto channel = DataTamer::LogChannel::create("my_channel");
@@ -322,10 +322,12 @@ Each message on `<prefix>/schemas` is the complete schema catalog, published as 
 channel is prepared (reliable, transient-local, depth 1: late subscribers get the latest
 catalog). Call `channel->prepare()` before the control loop: otherwise the first
 `takeSnapshot()` prepares the channel and does that DDS write. The data topic uses
-`options.data_qos`, by default reliable `KeepAll`: nothing is dropped, but a slow or stalled
-subscriber makes the publishing process queue messages without bound. In a robot process,
-prefer a bounded history, e.g. `options.data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable()`
-(or `rclcpp::QoS(rclcpp::KeepLast(10)).best_effort()`). A best-effort publisher does not match
+`options.data_qos`, by default `rclcpp::QoS(rclcpp::KeepLast(100)).reliable()`: memory is
+bounded, and a slow or stalled subscriber loses the oldest messages instead of making the
+publishing process queue them without bound. Pick another depth, or
+`rclcpp::QoS(rclcpp::KeepLast(10)).best_effort()`, to suit the rate (with aggregation each
+message is a batch), or `rclcpp::QoS(rclcpp::KeepAll()).reliable()` for a lossless stream at
+the price of unbounded memory. A best-effort publisher does not match
 reliable subscribers, so they must use best effort too (a best-effort subscriber, as in
 `ros2_subscriber.py`, matches either).
 
