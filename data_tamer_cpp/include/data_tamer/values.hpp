@@ -88,6 +88,18 @@ public:
 
   [[nodiscard]] size_t getSerializedSize() const;
 
+  /// True when getSerializedSize() never changes: a scalar, a std::array, or a
+  /// custom type whose serializer is fixed-size. False for a dynamic container,
+  /// and for an unregistered (detached) value, whose size is not known.
+  [[nodiscard]] bool isFixedSize() const
+  {
+    if(v_ptr_ == nullptr || (is_vector_ && array_size_ == 0))
+    {
+      return false;
+    }
+    return !serializer_ || serializer_->isFixedSize();
+  }
+
   [[nodiscard]] BasicType type() const { return type_; }
   [[nodiscard]] bool isVector() const { return is_vector_; }
   [[nodiscard]] uint16_t vectorSize() const { return array_size_; }

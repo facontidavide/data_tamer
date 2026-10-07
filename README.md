@@ -35,8 +35,10 @@ a sink may save the information immediately in a file (currently, we support [MC
 or publish it using an inter-process communication, for instance, a ROS2 publisher.
 
 You can easily create your own, specialized sinks: implement `DataTamer::DataSink`
-(two callbacks, `onSchema` and `onSnapshot`) and wrap it with `SinkWorker::create<MySink>()`,
-which owns the delivery queue and thread. See `data_tamer/sinks/dummy_sink.hpp` for a small one.
+(two callbacks, `onSchema` and `onSnapshot`, plus optional `onStop` and `onStart` to finish at
+shutdown and reopen on restart)
+and wrap it with `SinkWorker::create<MySink>()`, which owns the delivery thread and the queues
+of the channels attached to it. See `data_tamer/sinks/dummy_sink.hpp` for a small one.
 
 Headers that only name DataTamer types (a `LogChannel&` parameter, a `std::shared_ptr<SinkWorker>`
 member, ...) can include `data_tamer/fwd.hpp` instead of the full headers. Like `<iosfwd>`, it
@@ -82,8 +84,12 @@ on a real-time thread.
 
 - One thread per channel calls `takeSnapshot()`. `prepare()` freezes the schema, pre-allocates
   a pool of 64 snapshots and announces the schema to the sinks; the first `takeSnapshot()` with
-  sinks attached calls it for you. Tune beforehand with `setPoolCapacity()` and
+  sinks attached calls it for you. Tune beforehand with `setPoolCapacity()`, in slots or in
+  time (`setPoolCapacity(200ms, 1ms)` absorbs a 200 ms sink stall at 1 kHz), and
   `setPayloadCapacity()`.
+- The pool is the only bound on snapshots in flight. Each sink gets one queue per channel,
+  as long as the pool, so a snapshot is refused (`partial`, `rejected`) only by a stopped
+  `SinkWorker`. There is no queue size to configure.
 - `takeSnapshot()` returns a `SnapshotResult` (`ok`, `partial`, `rejected`, `no_sinks`,
   `pool_exhausted`, ...). It may wait for a writer holding the mutex and grows a slot whose
   payload no longer fits. `tryTakeSnapshot()` is the real-time variant: the library does no
@@ -184,6 +190,29 @@ Non-scalar `set()`/`get()` lock automatically and can be called inside
 `scopedWrite()`. Keep transactions short and take snapshots after releasing
 them. Non-scalar pointer proxies also hold the write mutex; release them before
 starting a transaction or taking a snapshot.
+
+## Registry defaults and shutdown
+
+`ChannelsRegistry` creates channels by name, applies default settings to each new channel
+and attaches the default sinks to every channel, including the ones that exist already.
+`SinkWorker::stop()` delivers what is queued and then lets the sink finish itself
+(`DataSink::onStop()`): `MCAPSink` closes its file, `MCAPRingSink` writes a pending dump,
+`ROS2PublisherSink` publishes its partial batch. `stopAll()` does that for every sink of the
+registry, so shutdown needs no ordering rules. `SinkWorker::start()` resumes a stopped sink
+(`DataSink::onStart()`: `MCAPSink` continues in its next numbered file).
+
+```cpp
+using namespace std::chrono_literals;
+auto& registry = DataTamer::ChannelsRegistry::Global();
+DataTamer::ChannelDefaults defaults;
+defaults.pool_stall_tolerance = 200ms;  // pool sized to absorb a 200 ms sink stall
+defaults.pool_snapshot_period = 1ms;    // at 1 kHz: 200 slots per channel
+registry.setChannelDefaults(defaults);  // channels created from now on
+registry.addDefaultSink(DataTamer::MCAPSink::create("run.mcap"));
+auto channel = registry.getChannel("controller");
+// ... register values, prepare(), take snapshots ...
+registry.stopAll();  // every sink stopped once; run.mcap is complete
+```
 
 ## How to register custom types
 
@@ -314,7 +343,7 @@ options.schema_format = DataTamer::SchemaFormat::Yaml;  // optional: shorter sch
 
 auto sink = DataTamer::ROS2PublisherSink::create(node, "/robot", options);
 channel->addDataSink(sink);
-// a partial batch is published by the next snapshot, by flush() or when the sink is destroyed:
+// a partial batch is published by the next snapshot, by flush() or by sink->stop():
 sink->as<DataTamer::ROS2PublisherSink>().flush();
 ```
 
@@ -354,9 +383,8 @@ auto& recorder = worker->as<DataTamer::MCAPRingSink>();
 // From any thread, real-time ones included: one atomic compare-exchange.
 recorder.requestDump(std::chrono::seconds(2));  // also keep 2 s after the event
 
-// At shutdown, write a dump requested just before it.
+// At shutdown, stop() delivers what is queued and writes a dump requested just before it.
 worker->stop();
-recorder.flushPendingDump();
 ```
 
 - The trigger is the first snapshot delivered after the request, and all times are snapshot

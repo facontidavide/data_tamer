@@ -5,6 +5,8 @@
 #include <mutex>
 #include <system_error>
 
+#include "data_tamer/details/spin_pause.hpp"
+
 // Priority inheritance is a POSIX option, not a Linux feature: the same test
 // admits QNX and other POSIX real-time systems. Without it WriteMutex is a plain
 // std::mutex and blocking waits have no priority-inheritance mitigation.
@@ -116,7 +118,7 @@ public:
         {
           return true;
         }
-        spinPause();
+        details::spinPause();
       }
     } while(std::chrono::steady_clock::now() < deadline);
     return false;
@@ -151,15 +153,6 @@ public:
   }
 
 private:
-  static void spinPause()
-  {
-#if defined(__x86_64__) || defined(__i386__)
-    __builtin_ia32_pause();
-#elif defined(__aarch64__)
-    asm volatile("yield" ::: "memory");
-#endif
-  }
-
   details::PlatformWriteMutex mutex_;
 };
 

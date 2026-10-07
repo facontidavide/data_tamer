@@ -34,7 +34,7 @@ struct ROS2PublisherOptions
   /// Aggregation only: a batch is also published when a snapshot arrives and
   /// at least this much time has passed since the first snapshot of the batch
   /// was added. Zero disables the time limit. There is no timer: a partial
-  /// batch waits for the next snapshot, flush() or the sink's destruction.
+  /// batch waits for the next snapshot, flush() or SinkWorker::stop().
   std::chrono::milliseconds max_batch_delay{ 100 };
   /// Aggregation only: copy into each batch the schemas of the snapshots it
   /// contains, so that a batch can be decoded on its own, without
@@ -94,9 +94,11 @@ public:
                                                  topic_prefix, options);
   }
 
-  /// Publishes the pending batch, if any (the destructor does it too), and
-  /// the schema catalog if its last publication failed (also without
-  /// aggregation). Throws if a publication fails.
+  /// Publishes the pending batch, if any, and the schema catalog if its last
+  /// publication failed (also without aggregation). Throws if a publication
+  /// fails. SinkWorker::stop() calls it after the last delivery (a failure is
+  /// then counted by SinkWorker::errors()); the destructor calls it too, as
+  /// the fallback for a sink used without a worker.
   /// Thread-safe: may be called from any thread, e.g.
   /// `worker->as<ROS2PublisherSink>().flush()` after `worker->drain()`.
   void flush();
@@ -106,6 +108,8 @@ public:
 protected:
   void onSchema(const Schema& schema) override;
   void onSnapshot(const SnapshotRef& snapshot) override;
+  /// Publishes the partial batch, as flush().
+  void onStop() override;
 
 private:
   struct Pimpl;

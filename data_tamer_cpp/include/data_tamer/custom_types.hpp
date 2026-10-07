@@ -9,6 +9,15 @@
 namespace DataTamer
 {
 
+/**
+ * @brief Serializes a type the library does not know (registerCustomValue()).
+ *
+ * ABI: the virtual functions below are frozen for 2.x. The library calls them
+ * through vtables compiled into user binaries, so adding, removing or
+ * reordering one breaks every serializer built against an earlier 2.x release.
+ * New behaviour arrives as a separate interface; CustomSerializer keeps no
+ * data members.
+ */
 class CustomSerializer
 {
 public:

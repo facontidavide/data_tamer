@@ -153,17 +153,7 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
   {
     if(_p->create_file_on_reset)
     {
-      // The original path with "_<n>" inserted. Skip the names that exist
-      // already (e.g. from a previous run): opening a file truncates it.
-      size_t counter = _p->file_reset_counter;
-      std::string next;
-      std::error_code ec;
-      do
-      {
-        next = details::NumberedPath(_p->original_filepath, counter++);
-      } while(std::filesystem::exists(next, ec));
-      restartRecordingImpl(next, _p->compression, false);
-      _p->file_reset_counter = counter;  // only once the file is open
+      openNextNumberedFile();
     }
     else
     {
@@ -193,6 +183,38 @@ void MCAPSink::stopRecording()
     _p->writer->close();
     _p->writer.reset();
   }
+}
+
+void MCAPSink::onStop()
+{
+  stopRecording();
+}
+
+void MCAPSink::onStart()
+{
+  std::scoped_lock lk(_p->mutex);
+  if(_p->writer)
+  {
+    return;  // restartRecording() reopened it already
+  }
+  openNextNumberedFile();
+  _p->forced_stop_recording = false;
+}
+
+void MCAPSink::openNextNumberedFile()
+{
+  std::scoped_lock lk(_p->mutex);
+  // The original path with "_<n>" inserted. Skip the names that exist already
+  // (e.g. from a previous run): opening a file truncates it.
+  size_t counter = _p->file_reset_counter;
+  std::string next;
+  std::error_code ec;
+  do
+  {
+    next = details::NumberedPath(_p->original_filepath, counter++);
+  } while(std::filesystem::exists(next, ec));
+  restartRecordingImpl(next, _p->compression, false);
+  _p->file_reset_counter = counter;  // only once the file is open
 }
 
 void MCAPSink::restartRecording(const std::string& filepath, bool do_compression)
