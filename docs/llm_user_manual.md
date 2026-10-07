@@ -415,7 +415,7 @@ Both return a `[[nodiscard]] SnapshotResult`. Cast to `(void)` to ignore it on p
 | Result | Meaning | What to do |
 |---|---|---|
 | `ok` | Captured and queued by every sink. | Nothing. |
-| `partial` | Captured, but some sinks refused it because their `SinkWorker` is stopped. | Check `droppedSnapshots(sink)`; `start()` the worker or detach it. |
+| `partial` | Captured, but some sinks refused it because their `SinkWorker` is stopped. | Check `stats().dropped_by_sink`; `start()` the worker or detach it. |
 | `rejected` | Captured, but every sink refused it (every worker stopped). | Same as `partial`. |
 | `no_sinks` | No sink attached; nothing captured. Before `prepare()` the schema stays open. | Attach a sink. |
 | `not_prepared` | `tryTakeSnapshot()` before `prepare()`; nothing captured. | Call `prepare()` first. |
@@ -455,8 +455,9 @@ methods with `worker->as<T>()`, which throws `std::bad_cast` for the wrong type.
   serves its channels in turn, so snapshots of different channels interleave in no
   guaranteed order. `removeDataSink()` (or destroying the channel) lets the worker
   deliver what that channel had queued, then frees the queue.
-- `SinkWorker::errors()` counts `onSnapshot()`, `onStop()` and `onStart()` calls that threw;
-  `lastError()` returns the last message.
+- `SinkWorker::stats()` returns `delivered`, `errors`, `last_error` and `queue_high_water`;
+  `errors` counts `onSnapshot()`, `onStop()` and `onStart()` calls that threw and
+  `last_error` is the last message (see "Monitoring").
 - `SinkWorker(std::unique_ptr<DataSink>, Delivery::Threaded)` builds a worker by hand, to
   choose `Delivery::Manual` (no thread: you call `drain()`). There is no queue size to
   set.
@@ -823,20 +824,59 @@ bytes of length plus its elements. `prepare()` reserves, per slot:
 at run time past the slot, `tryTakeSnapshot()` returns `oversize` and `takeSnapshot()`
 reallocates the slot. Call `setPayloadCapacity()` with the largest payload you expect.
 
-### Counters to watch
+### Monitoring: one struct per channel, one per sink
 
-Read them periodically from a non real-time thread (`stats()` and `droppedSnapshots()`
-take the channel's control mutex).
+Read both periodically from a non real-time thread: `LogChannel::stats()` takes the
+channel's control mutex and allocates, `SinkWorker::stats()` takes a mutex and copies a
+string. Each struct is built in your code from exported getters, one per field, so it can
+gain fields in a later release without breaking a binary built earlier (each binary uses
+its own copy of `stats()`, compiled against its own header). The fields are read one after
+the other, not as one instant, with one guarantee: within one `LogChannel::Stats`,
+`accepted <= attempts`. `LogChannel::Stats` holds a `std::vector`, so it is not trivially
+copyable.
 
-| Symptom | Counter |
+`channel->stats()` returns a `LogChannel::Stats`:
+
+| Field | Counts |
 |---|---|
-| `pool_exhausted` results | `channel->stats().pool_exhausted` or `poolExhausted()` |
-| `oversize` results | `stats().dropped_oversize` or `droppedOversize()` |
-| `takeSnapshot()` grew a slot | `stats().payload_reallocations` |
+| `attempts` | Every `takeSnapshot()` and `tryTakeSnapshot()` call, whatever it returned |
+| `accepted` | Snapshots at least one sink took: the results `ok` and `partial` |
+| `pool_exhausted` | `pool_exhausted` results (the pool, not a queue, is the bound) |
+| `dropped_oversize` | `oversize` results of `tryTakeSnapshot()` |
+| `payload_reallocations` | Slots `takeSnapshot()` had to grow |
+| `write_lock_contended`, `write_lock_wait_max_ns` | `blocked` results and slow `takeSnapshot()` calls; the longest wait |
+| `dropped_by_sink` | One `{sink, dropped}` entry per sink attached at the read, in no promised order: publications it refused because its worker is stopped. `sink` is the worker's address, only to tell entries apart (a removed worker's address can be reused by a new one) |
+
+`attempts - accepted` is what the channel did not hand to any sink. The rate that matters
+for a control loop is `(attempts - accepted) / attempts` over a window: take two reads and
+subtract. A snapshot in flight at the time of a read is counted in `attempts` before it
+is in `accepted`, so a window's difference is approximate by the calls in flight: clamp
+it at zero before you divide. Without calls that threw, `attempts` is the sum over all
+eight results.
+`droppedSnapshots(worker)` still works for one more release; use `dropped_by_sink`.
+
+`worker->stats()` returns a `SinkWorker::Stats`, cumulative over the worker's life
+(`stop()` and `start()` do not reset it):
+
+| Field | Counts |
+|---|---|
+| `delivered` | `onSnapshot()` calls that returned |
+| `errors`, `last_error` | `onSnapshot()`, `onStop()` and `onStart()` calls that threw, and the last message |
+| `queue_high_water` | Per worker, across all the channels attached to it: the most snapshots found waiting in one queue. A lower bound. Near the largest pool capacity among those channels means the sink nearly exhausted a pool |
+
+| Symptom | Where to look |
+|---|---|
+| Samples lost to a full pool | `stats().pool_exhausted`; raise `setPoolCapacity()` or fix the slow sink (`queue_high_water` shows how close it came) |
+| Samples lost to an outgrown slot | `stats().dropped_oversize`, `stats().payload_reallocations` |
 | Writers delayed snapshots | `stats().write_lock_contended`, `stats().write_lock_wait_max_ns` |
-| `partial` or `rejected` results (stopped worker) | `channel->droppedSnapshots(worker)`, per attached sink |
-| A sink failed to write | `worker->errors()`, `worker->lastError()` |
+| A stopped worker refused snapshots | `stats().dropped_by_sink` |
+| A sink failed to write | `worker->stats().errors`, `.last_error` |
+| A sink fell behind | `worker->stats().queue_high_water`; for a worker that serves one channel and refused nothing, `accepted` against `delivered` |
 | Flight recorder too small | `MCAPRingSink::stats().evicted_by_capacity`, `MCAPRingDump::truncated` |
+
+The two extra counters cost the snapshot path two atomic increments (`attempts` relaxed,
+`accepted` release, which orders it after `attempts` for the reader); the worker counts
+`delivered` and the high-water mark on its own thread.
 
 ## Threading
 
@@ -848,10 +888,12 @@ take the channel's control mutex).
 | non-scalar `LoggedValue::set()`, `get()`, pointer guards | no | Lock the write mutex while a snapshot serializes. |
 | `trySetEnabled()`, `LoggedValue::setEnabled()` | yes | Lock-free. `setEnabled()` can throw. |
 | `MCAPRingSink::requestDump()` | yes | One compare-exchange. |
-| `writeLockContended()`, `payloadReallocations()`, `droppedOversize()` | yes | Relaxed atomic loads. |
+| `writeLockContended()`, `payloadReallocations()`, `droppedOversize()`, `snapshotAttempts()`, `snapshotsAccepted()` | yes | Atomic loads. |
 | `registerValue()`, `createLoggedValue()`, `unregister()`, `LoggedValue` destructor | no | Control mutex; can wait for a snapshot. |
 | `addDataSink()`, `removeDataSink()`, `prepare()` | no | Control mutex; run sink callbacks. |
-| `stats()`, `poolExhausted()`, `droppedSnapshots()`, `getSchema()` | no | Control mutex. |
+| `LogChannel::stats()`, `poolExhausted()`, `droppedSnapshots()`, `sinkDropped()`, `getSchema()` | no | Control mutex. |
+| `SinkWorker::delivered()`, `errors()`, `queueHighWater()` | yes | Relaxed atomic loads. |
+| `SinkWorker::stats()`, `lastError()` | no | Take a mutex and copy a string (allocates). |
 | `SinkWorker::stop()`, `drain()`, `flushPendingDump()`, `ChannelsRegistry::stopAll()` | no | Block until delivery or writing ends; `stop()` runs `onStop()`. |
 
 Control operations must also stay out of `scopedWrite()` scopes, pointer guards, sink

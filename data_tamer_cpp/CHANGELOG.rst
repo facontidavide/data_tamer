@@ -4,6 +4,38 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Counters in one struct per channel and one per sink**:
+  ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and
+  ``tryTakeSnapshot()`` call), ``accepted`` (the calls whose snapshot at least
+  one sink took: ``ok`` and ``partial``) and ``dropped_by_sink`` (one
+  ``{sink, dropped}`` entry per sink attached at the read, the publications it
+  refused because its worker was stopped). The existing five fields keep their
+  meaning and position. Within one ``Stats``, ``accepted <= attempts``; a
+  window's ``attempts - accepted`` is approximate by the calls in flight, so
+  clamp it at zero. New ``SinkWorker::Stats`` returns ``delivered``
+  (``onSnapshot()`` calls that returned), ``errors``, ``last_error`` and
+  ``queue_high_water`` (per worker, across all its channels: a lower bound of
+  the most snapshots found waiting in one queue, kept on the delivery thread,
+  off the real-time path). New getters behind them:
+  ``LogChannel::snapshotAttempts()``, ``snapshotsAccepted()``, ``sinkDropped()``,
+  ``LogChannel::kMaxSinks`` and ``SinkWorker::delivered()``,
+  ``queueHighWater()``. Real-time cost: two atomic increments per snapshot call
+  (``attempts`` on entry, relaxed; ``accepted`` when a sink took the snapshot,
+  release, the same instruction on x86); nothing else is added to the path.
+  **Behaviour change**: ``LogChannel::stats()`` now takes the control mutex
+  twice and allocates, and ``LogChannel::Stats`` is no longer trivially
+  copyable (it holds a vector).
+* **ABI**: ``LogChannel::stats()``, ``SinkWorker::stats()`` and
+  ``MCAPRingSink::stats()`` are inline in their headers and fill the struct from
+  the exported getters, one per field, so a field added later never changes what
+  the library returns across the ABI. They are declared
+  ``DATA_TAMER_INLINE_LOCAL`` (hidden visibility, from the new
+  ``data_tamer/details/abi.hpp``) so that every binary uses the copy built
+  against its own header: an exported weak copy would let the first loaded
+  shared object's older ``stats()`` build the struct in a newer caller's buffer.
+  ``Stats`` itself is not exported.
+* **Deprecated**: ``LogChannel::droppedSnapshots(sink)`` stays for one release;
+  read ``stats().dropped_by_sink``.
 * **Sinks finish themselves**: new ``virtual void DataSink::onStop()`` and
   ``onStart()``, empty by default. ``SinkWorker::stop()`` calls ``onStop()`` on
   the stopping thread after the last delivery, serialized with the other

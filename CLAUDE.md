@@ -125,6 +125,17 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   `enable_shared_from_this`). Add members to the Pimpl. `tests/abi_tests.cpp` pins the
   sizes of the sinks, SinkWorker, LogChannel, SnapshotRef, DataSink and ChannelDefaults.
   Record any ABI break in the CHANGELOG.
+- `LogChannel::stats()`, `SinkWorker::stats()` and `MCAPRingSink::stats()` are inline
+  functions in the headers, marked `DATA_TAMER_INLINE_LOCAL` (hidden visibility,
+  `details/abi.hpp`): they fill the `Stats` struct from exported scalar getters, one per
+  field, so the struct never crosses the library boundary, and each binary keeps its own
+  copy built against its own header (an exported weak copy from an older header would
+  build the struct into a newer caller's buffer). Add a counter as a getter in the `.cpp`
+  plus a line in `stats()`, never as a field the library writes. Read `accepted` before
+  `attempts` in `LogChannel::stats()` (the snapshot path increments them in the opposite
+  order, `accepted` with release). The snapshot path may only gain atomic increments
+  (today `attempts` on entry and `accepted` when a sink took the snapshot); worker-side
+  counters (`delivered`, `queue_high_water`) are kept on the delivery thread.
 - The vtables of `DataSink` and `CustomSerializer` are frozen for 2.x: users derive from
   them and the library calls through vtables compiled into their binaries. Add no virtual
   function and no data member; new behaviour goes into non-virtual functions or a
