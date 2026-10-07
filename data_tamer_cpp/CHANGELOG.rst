@@ -418,6 +418,26 @@ Unreleased
   benchmarks and the ``rt_latency`` harness, including standalone mutex/pool
   measurements and validated CLI inputs. Conan's benchmark option exports and
   builds the benchmark sources. Vendored MCAP builds with GCC 15.
+* Versioning. The release number is 2.0.0 everywhere it is kept: CMake
+  ``project(VERSION)`` (was 1.0.0), both ``package.xml`` files (were 1.0.4),
+  ``conanfile.py`` (was 0.9.4) and the Python decoder; ``tools/check_versions.py``
+  checks that they agree and runs as the ctest case ``version_consistency``.
+  The shared library is versioned: ``libdata_tamer.so.2.0.0`` with the SONAME
+  ``libdata_tamer.so.2`` (``SOVERSION`` is the major version, for the ROS 2 and the
+  plain CMake builds). Consumers built against 1.x must be rebuilt: 1.x had no
+  SONAME, so an old binary (``NEEDED libdata_tamer.so``) still finds the new library
+  through the ``libdata_tamer.so`` link and then fails on missing symbols.
+* ABI policy. ``tests/abi_tests.cpp`` pins the size, alignment and member offsets of
+  every public by-value struct, options struct and class whose layout reaches
+  consumers (exact bytes on x86_64 Linux with libstdc++, relations for what holds a
+  mutex on other libstdc++ platforms); a failing pin means a SONAME bump. The
+  ``Stats`` structs are built inline from exported getters and are not pinned. A new
+  ``abi`` workflow compares the library with the last release of the same major
+  version (the merge base until 2.0.0 is tagged) with libabigail and fails on
+  removed or changed exported functions, changed vtables and layouts; run it locally
+  with ``tools/abi_check.sh``. CLAUDE.md states what is frozen in 2.x and when to bump.
+  Defaults that live in a header (member initializers, default arguments) apply only
+  to rebuilt consumers; defaults inside a Pimpl apply to old binaries too.
 
 1.0.4 (2026-07-26)
 ------------------
