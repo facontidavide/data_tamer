@@ -119,8 +119,8 @@ int main()
   double cycle_time_ms = 0;
 
   auto mcap = DataTamer::MCAPSink::create("control.mcap");
-  // Without this, the file is truncated every 10 minutes.
-  mcap->as<DataTamer::MCAPSink>().setCreateNewFileOnReset(true);
+  // Every 10 minutes the recording continues in control_1.mcap, control_2.mcap, ...
+  // (the default). setCreateNewFileOnReset(false) would truncate control.mcap instead.
 
   auto channel = DataTamer::LogChannel::create("control");
   channel->addDataSink(mcap);
@@ -451,11 +451,12 @@ opens the file in its constructor and throws `std::runtime_error` if it cannot. 
 existing file at that path is overwritten.
 
 - Reset: by default the file is reset after 600 seconds of wall-clock time
-  (`system_clock`, measured from file open). A reset truncates the file and discards
-  what it held, which bounds disk usage to the last 10 minutes.
-- `setCreateNewFileOnReset(true)` continues in numbered files instead (`run.mcap`,
-  `run_1.mcap`, `run_2.mcap`, ...), skipping names that exist. Nothing is lost and disk
-  usage is unbounded. Use it for any recording you intend to keep.
+  (`system_clock`, measured from file open), and the recording continues in numbered
+  files (`run.mcap`, `run_1.mcap`, `run_2.mcap`, ...), skipping names that exist.
+  Nothing is lost and disk usage is unbounded.
+- `setCreateNewFileOnReset(false)` truncates and restarts the same file instead, which
+  discards what it held and bounds disk usage to the last 10 minutes. Use it only for a
+  recording you never keep, such as a rolling debug log.
 - `setMaxTimeBeforeReset(std::chrono::seconds(0))` disables resets: one file that grows
   for as long as the process runs.
 - `do_compression = true` writes zstd chunks. A crash loses more data than with an
@@ -552,12 +553,13 @@ recorder.flushPendingDump();
 | `max_batch_delay` | 100 ms | Also published when a snapshot arrives this long after the batch's first one; 0 disables. |
 | `embed_schemas` | true | Each batch carries the schemas of its snapshots, so it decodes on its own. |
 | `schema_format` | `SchemaFormat::Text` | `SchemaFormat::Yaml` is shorter, but older readers (older PlotJuggler releases) cannot read it. |
-| `data_qos` | reliable `KeepAll` | QoS of the data topic. |
+| `data_qos` | reliable, `KeepLast(100)` | QoS of the data topic. |
 
-Bound `data_qos` in a robot process. With the default, a slow or stalled subscriber makes
-the publisher queue messages without limit. Keep it reliable so that reliable and
-best-effort subscribers both match, and remember that with aggregation each message is a
-batch:
+The default `data_qos` bounds the publisher's memory: a slow or stalled subscriber loses
+the oldest messages. `rclcpp::QoS(rclcpp::KeepAll()).reliable()` is lossless, but a slow
+subscriber then makes the publisher queue messages without limit. Keep it reliable so
+that reliable and best-effort subscribers both match, and remember that with aggregation
+each message is a batch, so size the depth accordingly:
 
 ```cpp
 ROS2PublisherOptions options;
@@ -785,8 +787,8 @@ MCAP file with it.
       channel.
 - [ ] Wrote a `registerValue()` variable from a thread other than the snapshot thread
       without `scopedWrite()`.
-- [ ] Left `MCAPSink` at its default and lost data to the 10 minute truncation: call
-      `setCreateNewFileOnReset(true)` for recordings you keep.
+- [ ] Called `setCreateNewFileOnReset(false)` on an `MCAPSink` whose recording you keep:
+      every reset truncates the file and discards what it held.
 - [ ] Skipped `prepare()`: the first `takeSnapshot()` in the loop then allocates and runs
       sink callbacks (a DDS write for ROS 2), and `tryTakeSnapshot()` returns
       `not_prepared` forever.
@@ -796,7 +798,8 @@ MCAP file with it.
 - [ ] Attached many channels to one sink with the default queue: size it as in
       [Sink queue](#sink-queue-per-sinkworker).
 - [ ] Did slow work or called a mutating channel API inside `onSnapshot()`.
-- [ ] Kept the default reliable `KeepAll` QoS of `ROS2PublisherSink` in a robot process.
+- [ ] Set `data_qos` to `KeepAll` for `ROS2PublisherSink` in a robot process: a slow
+      subscriber then grows the publisher's memory without bound.
 - [ ] Released the last `LoggedValue` `shared_ptr`, or called `unregister()`, on a
       real-time thread.
 - [ ] Called `requestDump()` just before exit without `stop()` and `flushPendingDump()`.
