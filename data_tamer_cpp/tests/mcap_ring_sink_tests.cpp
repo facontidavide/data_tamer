@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <future>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <variant>
@@ -226,6 +227,69 @@ TEST(MCAPRingSink, EvictsByCapacity)
   EXPECT_EQ(tiny->stats().stored_snapshots, 0u);
 }
 
+// stats() reports the timestamps of the first and the last stored record.
+TEST(MCAPRingSink, StatsReportTheStoredInterval)
+{
+  TempBase base("interval");
+  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto stats = sink->stats();
+  EXPECT_EQ(stats.stored_snapshots, 0u);
+  EXPECT_EQ(stats.oldest_timestamp, nanoseconds(0)) << "empty ring";
+  EXPECT_EQ(stats.newest_timestamp, nanoseconds(0)) << "empty ring";
+
+  Source source("interval", sink);
+  source.take(1000);
+  sink.drain();
+  stats = sink->stats();
+  EXPECT_EQ(stats.oldest_timestamp, nanoseconds(1000));
+  EXPECT_EQ(stats.newest_timestamp, nanoseconds(1000));
+
+  for(int64_t ts = 1010; ts <= 1500; ts += 10)
+  {
+    source.take(ts);
+    sink.drain();
+  }
+  stats = sink->stats();  // age eviction keeps [1500 - 100, 1500]
+  EXPECT_EQ(stats.oldest_timestamp, nanoseconds(1400));
+  EXPECT_EQ(stats.newest_timestamp, nanoseconds(1500));
+  // stats() is composed from one getter per field.
+  EXPECT_EQ(sink->oldestTimestamp(), nanoseconds(1400));
+  EXPECT_EQ(sink->newestTimestamp(), nanoseconds(1500));
+  EXPECT_EQ(sink->storedSnapshots(), stats.stored_snapshots);
+  EXPECT_EQ(sink->storedBytes(), stats.stored_bytes);
+  EXPECT_EQ(sink->evictedByCapacity(), 0u);
+  EXPECT_EQ(sink->droppedOversize(), 0u);
+  EXPECT_EQ(sink->writerBusyRetries(), 0u);
+  EXPECT_EQ(sink->dumpsWritten(), 0u);
+  EXPECT_EQ(sink->dumpsFailed(), 0u);
+
+  // Capacity eviction: room for 3 records, so the interval is shorter than
+  // the window.
+  const size_t record = stats.stored_bytes / stats.stored_snapshots;
+  auto small = DataTamerTest::manual<MCAPRingSink>(
+      options(base.path, 1'000'000, 3 * record + record / 2));
+  Source capped("capped", small);
+  for(int64_t ts = 0; ts < 10; ++ts)
+  {
+    capped.take(ts);
+    small.drain();
+  }
+  stats = small->stats();
+  EXPECT_EQ(stats.stored_snapshots, 3u);
+  EXPECT_EQ(stats.evicted_by_capacity, 7u);
+  EXPECT_EQ(stats.oldest_timestamp, nanoseconds(7));
+  EXPECT_EQ(stats.newest_timestamp, nanoseconds(9));
+
+  // Delivery order, not timestamp order: an older snapshot of another channel
+  // delivered last is the newest record.
+  Source late("late", sink);
+  late.take(1450);
+  sink.drain();
+  stats = sink->stats();
+  EXPECT_EQ(stats.oldest_timestamp, nanoseconds(1400));
+  EXPECT_EQ(stats.newest_timestamp, nanoseconds(1450));
+}
+
 // The dump holds [T - window, T + post] around the first snapshot after the
 // request, in snapshot time, and completes at the first snapshot > T + post.
 TEST(MCAPRingSink, DumpCoversPreAndPostWindow)
@@ -410,6 +474,82 @@ TEST(MCAPRingSink, WriterBusyRetriesOnNextSnapshot)
   EXPECT_EQ(timestamps(readDump(base.dump(1))), range(30, 60, 10));
   EXPECT_EQ(timestamps(readDump(base.dump(2))),
             (std::vector<int64_t>{ 40, 50, 60, 65, 70 }));
+}
+
+// A complete dump waiting for a busy writer can lose its whole interval to
+// capacity eviction; it must still report truncated, even though the newest
+// evicted timestamp is past its end.
+TEST(MCAPRingSink, DumpWaitingForTheWriterReportsLaterEvictions)
+{
+  TempBase base("busy_evicted");
+  size_t record = 0;
+  {
+    auto probe = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1000));
+    Source source("busy_evicted", probe);
+    source.take(0);
+    probe.drain();
+    record = probe->storedBytes();
+  }
+  ASSERT_GT(record, 0u);
+  auto sink = DataTamerTest::manual<MCAPRingSink>(
+      options(base.path, 30, 7 * record + record / 2));  // room for 7 records
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  std::mutex dumps_mutex;
+  std::vector<MCAPRingDump> dumps;
+  sink->setDumpCallback([&](const MCAPRingDump& dump) {
+    size_t count = 0;
+    {
+      std::scoped_lock lock(dumps_mutex);
+      dumps.push_back(dump);
+      count = dumps.size();
+    }
+    if(count == 1)
+    {
+      released.wait();  // keep the writer busy with dump 1
+    }
+  });
+  Source source("busy_evicted", sink);
+  for(int64_t ts = 0; ts <= 40; ts += 10)
+  {
+    source.take(ts);
+  }
+  sink.drain();
+  ASSERT_TRUE(sink->requestDump());
+  source.take(50);  // dump 1: [20, 50]
+  source.take(51);
+  sink.drain();
+  ASSERT_TRUE(sink->requestDump());
+  source.take(60);  // dump 2: [30, 60]
+  source.take(61);  // complete, writer busy
+  sink.drain();
+  ASSERT_EQ(sink->writerBusyRetries(), 1u);
+  // Evicts all of [30, 60] and then 61: the newest evicted timestamp is past
+  // the end of dump 2.
+  for(int64_t ts = 70; ts <= 130; ts += 10)
+  {
+    source.take(ts);
+    sink.drain();
+  }
+  EXPECT_EQ(sink->oldestTimestamp(), nanoseconds(70));
+
+  release.set_value();
+  while(sink->dumpsWritten() == 0)
+  {
+    std::this_thread::yield();
+  }
+  sink->waitForWriter();
+  source.take(140);  // hand-off of dump 2
+  sink.drain();
+  sink->waitForWriter();
+
+  std::scoped_lock lock(dumps_mutex);
+  ASSERT_EQ(dumps.size(), 2u);
+  EXPECT_FALSE(dumps[0].truncated);
+  EXPECT_EQ(dumps[1].start, nanoseconds(30));
+  EXPECT_EQ(dumps[1].end, nanoseconds(60));
+  EXPECT_EQ(dumps[1].messages, 0u);
+  EXPECT_TRUE(dumps[1].truncated);
 }
 
 // A request made just before shutdown, with no snapshot left to trigger it.
@@ -644,6 +784,234 @@ TEST(MCAPRingSink, FlushUsesTheNewestTimestamp)
   EXPECT_EQ(info.start, nanoseconds(250));
   EXPECT_EQ(info.end, nanoseconds(300));
   EXPECT_EQ(timestamps(readDump(base.dump(1))), (std::vector<int64_t>{ 300 }));
+}
+
+// flushPendingDump() with the worker running: no stop() and start() around it,
+// and the worker keeps delivering and triggering dumps afterwards.
+TEST(MCAPRingSink, FlushPendingDumpWhileWorkerRuns)
+{
+  TempBase base("flush_live");
+  auto worker = MCAPRingSink::create(options(base.path, 100));
+  auto& sink = worker->as<MCAPRingSink>();
+  std::vector<MCAPRingDump> dumps;
+  std::mutex dumps_mutex;
+  sink.setDumpCallback([&](const MCAPRingDump& dump) {
+    std::scoped_lock lock(dumps_mutex);
+    dumps.push_back(dump);
+  });
+  Source source("flush_live", worker);
+  for(int64_t ts = 0; ts <= 300; ts += 10)
+  {
+    source.take(ts);
+  }
+  worker->drain();
+
+  // Requested, not triggered: the newest snapshot is the trigger.
+  ASSERT_TRUE(sink.requestDump(nanoseconds(1000)));
+  ASSERT_TRUE(sink.flushPendingDump());
+  EXPECT_FALSE(sink.dumpRequested());
+
+  // Triggered and collecting: cut at the newest snapshot.
+  ASSERT_TRUE(sink.requestDump(nanoseconds(1000)));
+  source.take(310);  // trigger
+  source.take(320);
+  worker->drain();
+  ASSERT_TRUE(sink.dumpRequested());
+  ASSERT_TRUE(sink.flushPendingDump());
+  EXPECT_FALSE(sink.dumpRequested());
+
+  // The worker still delivers: a snapshot completes the next dump.
+  ASSERT_TRUE(sink.requestDump());
+  source.take(330);  // trigger
+  source.take(340);  // completes [230, 330]
+  worker->drain();
+  sink.waitForWriter();
+  EXPECT_FALSE(sink.flushPendingDump()) << "nothing left to write";
+  EXPECT_EQ(worker->errors(), 0u);
+
+  std::scoped_lock lock(dumps_mutex);
+  ASSERT_EQ(dumps.size(), 3u);
+  EXPECT_EQ(dumps[0].trigger_time, nanoseconds(300));
+  EXPECT_EQ(dumps[0].end, nanoseconds(300));
+  EXPECT_EQ(dumps[1].trigger_time, nanoseconds(310));
+  EXPECT_EQ(dumps[1].end, nanoseconds(320));
+  EXPECT_EQ(dumps[2].trigger_time, nanoseconds(330));
+  EXPECT_EQ(dumps[2].end, nanoseconds(330));
+  EXPECT_EQ(timestamps(readDump(base.dump(1))), range(200, 300, 10));
+  EXPECT_EQ(timestamps(readDump(base.dump(2))), range(210, 320, 10));
+  EXPECT_EQ(timestamps(readDump(base.dump(3))), range(230, 330, 10));
+}
+
+namespace
+{
+// A threaded MCAPRingSink fed by a producer thread with increasing timestamps,
+// and a dump callback that records every dump and keeps the writer busy for
+// a varying time, so that flushes, hand-offs and requests interleave.
+struct RaceFixture
+{
+  TempBase base;
+  std::shared_ptr<SinkWorker> worker;
+  MCAPRingSink& sink;
+  std::mutex dumps_mutex;
+  std::vector<MCAPRingDump> dumps;
+  std::atomic<int> callbacks{ 0 };
+  Source source;
+  std::atomic<bool> done{ false };
+  std::thread producer;
+
+  explicit RaceFixture(const std::string& tag)
+    : base(tag)
+    , worker(MCAPRingSink::create(options(base.path, 50)))
+    , sink(worker->as<MCAPRingSink>())
+    , source(tag, worker)
+  {
+    sink.setDumpCallback([this](const MCAPRingDump& dump) {
+      size_t count = 0;
+      {
+        std::scoped_lock lock(dumps_mutex);
+        dumps.push_back(dump);
+        count = dumps.size();
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(30 * (count % 4)));
+      ++callbacks;
+    });
+    source.take(0);
+    worker->drain();  // the ring holds a snapshot: every request is flushable
+    producer = std::thread([this] {
+      for(int64_t ts = 1; !done; ++ts)
+      {
+        source.value = ts;
+        while(!done &&
+              source.channel->tryTakeSnapshot(nanoseconds(ts)) != SnapshotResult::ok)
+        {
+          std::this_thread::yield();
+        }
+      }
+    });
+  }
+
+  void finish()
+  {
+    done = true;
+    producer.join();
+    worker->stop();
+  }
+
+  // Every dump written, each interval consistent and non-empty.
+  void check(uint64_t expected)
+  {
+    EXPECT_EQ(worker->errors(), 0u);
+    EXPECT_EQ(sink.stats().dumps_written, expected);
+    EXPECT_EQ(sink.stats().dumps_failed, 0u);
+    std::scoped_lock lock(dumps_mutex);
+    EXPECT_EQ(dumps.size(), expected);
+    for(const auto& dump : dumps)
+    {
+      EXPECT_TRUE(dump.ok) << dump.error;
+      EXPECT_LE(dump.start, dump.trigger_time);
+      EXPECT_LE(dump.trigger_time, dump.end);
+      // A dump that waited long for the writer may have lost its interval to
+      // capacity eviction (the producer is not throttled); it must say so.
+      if(dump.messages == 0)
+      {
+        EXPECT_TRUE(dump.truncated) << dump.path;
+        continue;
+      }
+      EXPECT_GE(dump.first_message, dump.start);
+      EXPECT_LE(dump.last_message, dump.end);
+    }
+  }
+
+  ~RaceFixture()
+  {
+    if(producer.joinable())  // a failed ASSERT skipped finish()
+    {
+      done = true;
+      producer.join();
+    }
+    worker->stop();
+    sink.waitForWriter();                      // the callback uses this fixture
+    for(size_t n = 1; n <= dumps.size(); ++n)  // TempBase removes 10 at most
+    {
+      std::filesystem::remove(base.dump(n));
+    }
+  }
+};
+}  // namespace
+
+// flushPendingDump() racing onSnapshot(): each request is flushed at a varying
+// point of its life (pending, collecting, complete and waiting for a busy
+// writer, or already handed off by a snapshot). Every request is written once,
+// and the flush returns only after it is. Run under ThreadSanitizer too.
+TEST(MCAPRingSink, FlushRacesOnSnapshot)
+{
+  constexpr int kRounds = 300;
+  RaceFixture race("flush_race");
+  auto& sink = race.sink;
+  // 0: completes at the second snapshot; 3: a few snapshots later;
+  // huge: only the flush can finish it.
+  const nanoseconds post_trigger[] = { nanoseconds(0), nanoseconds(3),
+                                       nanoseconds(1'000'000'000) };
+  int requests = 0;
+  for(int round = 0; round < kRounds; ++round)
+  {
+    if(round % 2 == 1)
+    {
+      // A first request completed by the snapshots, so that the writer is
+      // busy while the next one triggers, completes and retries its hand-off.
+      ASSERT_TRUE(sink.requestDump()) << "round " << round;
+      ++requests;
+      while(sink.dumpRequested())
+      {
+        std::this_thread::yield();
+      }
+    }
+    ASSERT_TRUE(sink.requestDump(post_trigger[round % 3])) << "round " << round;
+    ++requests;
+    for(int i = 0; i < (round * 7) % 50; ++i)  // vary where the flush lands
+    {
+      std::this_thread::yield();
+    }
+    (void)sink.flushPendingDump();
+    ASSERT_FALSE(sink.dumpRequested()) << "round " << round;
+    ASSERT_EQ(race.callbacks.load(), requests) << "returned before the dump was written";
+  }
+  race.finish();
+  race.check(uint64_t(requests));
+}
+
+// The same with requestDump() called from another thread, as a real-time
+// thread would, while flushPendingDump() runs: a flush may find the writer
+// taken by a dump handed off after its waitForWriter(), or see its request
+// handed off by a snapshot between two attempts.
+TEST(MCAPRingSink, FlushRacesOnSnapshotAndRequests)
+{
+  RaceFixture race("flush_race_requests");
+  auto& sink = race.sink;
+  std::atomic<bool> stop_requests{ false };
+  std::atomic<uint64_t> accepted{ 0 };
+  std::thread requester([&] {
+    for(int i = 0; !stop_requests; ++i)
+    {
+      if(sink.requestDump(nanoseconds(i % 3 == 0 ? 0 : 2)))
+      {
+        ++accepted;
+      }
+      std::this_thread::yield();
+    }
+  });
+  int flushes = 0;
+  while(accepted < 300 || flushes < 300)
+  {
+    (void)sink.flushPendingDump();
+    ++flushes;
+  }
+  stop_requests = true;
+  requester.join();
+  race.finish();
+  (void)sink.flushPendingDump();  // a request accepted near the end
+  EXPECT_FALSE(sink.dumpRequested());
+  race.check(accepted.load());
 }
 
 // Dumps never overwrite an existing file, e.g. of a previous run.

@@ -120,6 +120,9 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   ROS2PublisherSink keep their state behind a Pimpl. Add members to the Pimpl.
   `tests/abi_tests.cpp` pins the sizes of the sinks, SinkWorker and SnapshotRef. Record
   any ABI break in the CHANGELOG.
+- `MCAPRingStats` never crosses the library boundary: `MCAPRingSink::stats()` is inline
+  and fills it from one exported getter per field. A new field gets a new getter;
+  existing getters stay.
 - Include what you use. Headers that only name data_tamer types include `fwd.hpp`, which
   must declare each type with the same class or struct key as its definition (the
   `fwd_header_*` targets check it). `data_tamer.hpp` includes only `fwd.hpp`, so code
