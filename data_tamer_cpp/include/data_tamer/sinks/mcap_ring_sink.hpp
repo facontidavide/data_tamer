@@ -47,10 +47,11 @@ struct MCAPRingDump
   std::chrono::nanoseconds last_message{ 0 };
   size_t messages = 0;
   /// The ring was full and evicted snapshots of [start, end] before the
-  /// dump was written: the file starts later than `start`. Raise capacity_bytes.
-  /// (Evictions are tracked by their newest timestamp; after snapshot time
-  /// jumps backwards, e.g. a simulation reset, only evictions stamped within
-  /// [start, end] count.)
+  /// dump was written: the file starts later than `start`, or misses part or
+  /// all of the interval when the dump waited long for a busy writer. Raise
+  /// capacity_bytes. (Evictions before the trigger are tracked by their newest
+  /// timestamp; after snapshot time jumps backwards, e.g. a simulation reset,
+  /// only evictions stamped within [start, end] count.)
   bool truncated = false;
   /// False if the file could not be opened or written (disk full, I/O error):
   /// `error` says why. A partially written file is left at `path`.
@@ -58,6 +59,8 @@ struct MCAPRingDump
   std::string error;
 };
 
+/// Counters and ring content of an MCAPRingSink, returned by
+/// MCAPRingSink::stats(). Each field also has its own getter on the sink.
 struct MCAPRingStats
 {
   uint64_t dumps_written = 0;
@@ -72,6 +75,17 @@ struct MCAPRingStats
   /// Current content of the ring.
   size_t stored_snapshots = 0;
   size_t stored_bytes = 0;
+  /// Snapshot timestamps of the first and the last record in the ring, in
+  /// delivery order: the next one to be evicted and the one stored last. Their
+  /// difference is the history the ring holds now. Age eviction keeps it at
+  /// most about `window` (more while a dump is active); if it stays below
+  /// `window` while evicted_by_capacity grows, capacity_bytes is too small.
+  /// Channels are delivered separately, so records of other channels may be
+  /// older or newer by the delivery skew, and newest < oldest after snapshot
+  /// time jumps backwards (simulation reset). Both are 0 when stored_snapshots
+  /// is 0; 0 is also a valid timestamp, so test stored_snapshots.
+  std::chrono::nanoseconds oldest_timestamp{ 0 };
+  std::chrono::nanoseconds newest_timestamp{ 0 };
 };
 
 /**
@@ -109,9 +123,13 @@ struct MCAPRingStats
  * records of [start, end] into the second buffer on the worker thread, a
  * memcpy of up to capacity_bytes.
  *
- * Shutdown. A request made just before shutdown has no snapshot left to
- * trigger it: call flushPendingDump() after SinkWorker::stop(). The destructor
- * finishes the file being written but does not start a pending dump.
+ * Flush. flushPendingDump() writes the active request at once with what the
+ * ring holds, from any thread except the dump callback, whether the worker is
+ * running or not; there is no need to stop the worker. At shutdown a request
+ * made just before it has no snapshot left to trigger it: call
+ * flushPendingDump() after SinkWorker::stop(), so that the snapshots still
+ * queued are in the ring first. The destructor finishes the file being written
+ * but does not start a pending dump.
  */
 class MCAPRingSink : public DataSink
 {
@@ -146,12 +164,21 @@ public:
    * @brief Write the active request, if any, with what the ring holds now,
    * and wait until it is on disk. A request no snapshot has triggered yet uses
    * the newest snapshot timestamp seen as trigger; a dump still waiting for
-   * its post-trigger interval is cut at the newest timestamp seen. Call it after
-   * SinkWorker::stop() (or between drain() calls with manual delivery).
-   * Never call it from the dump callback (std::logic_error).
-   * Returns true if it wrote a dump (see MCAPRingDump::ok for the outcome).
-   * In every case it returns after the writer has finished all dumps handed
-   * to it so far.
+   * its post-trigger interval is cut at the newest timestamp seen. Snapshots
+   * queued but not yet delivered are not in the ring: after SinkWorker::stop()
+   * or drain() they are.
+   *
+   * Safe while the SinkWorker delivers snapshots: the worker keeps storing
+   * them, and a snapshot that completes the request first hands it off itself.
+   * The worker waits for the ring lock while the dump interval is copied into
+   * the writer's buffer (the same copy a snapshot-completed dump makes). Never
+   * call it from the dump callback (std::logic_error).
+   *
+   * Returns true if a request was active when it was called (triggered, or
+   * pending once the sink has received a snapshot); that dump is then on disk
+   * (see MCAPRingDump::ok for the outcome). In every case it returns after the
+   * writer has finished all dumps handed to it so far, so a request accepted
+   * before the call and already handed off is on disk too.
    */
   bool flushPendingDump();
 
@@ -164,7 +191,37 @@ public:
   /// std::logic_error there.
   void setDumpCallback(std::function<void(const MCAPRingDump&)> callback);
 
-  [[nodiscard]] MCAPRingStats stats() const;
+  /// All counters at once. Built here, in the header, from the getters below,
+  /// so that MCAPRingStats can gain fields without changing the library ABI.
+  /// Each field is read separately: while the worker delivers, the fields
+  /// may come from slightly different moments.
+  [[nodiscard]] MCAPRingStats stats() const
+  {
+    MCAPRingStats stats;
+    stats.dumps_written = dumpsWritten();
+    stats.dumps_failed = dumpsFailed();
+    stats.writer_busy_retries = writerBusyRetries();
+    stats.evicted_by_capacity = evictedByCapacity();
+    stats.dropped_oversize = droppedOversize();
+    stats.stored_snapshots = storedSnapshots();
+    stats.stored_bytes = storedBytes();
+    stats.oldest_timestamp = oldestTimestamp();
+    stats.newest_timestamp = newestTimestamp();
+    return stats;
+  }
+
+  /// One getter per MCAPRingStats field, each read under the sink's lock;
+  /// see the field for its meaning. Callable from any thread, including the
+  /// dump callback; not real-time safe (they take a mutex).
+  [[nodiscard]] uint64_t dumpsWritten() const;
+  [[nodiscard]] uint64_t dumpsFailed() const;
+  [[nodiscard]] uint64_t writerBusyRetries() const;
+  [[nodiscard]] uint64_t evictedByCapacity() const;
+  [[nodiscard]] uint64_t droppedOversize() const;
+  [[nodiscard]] size_t storedSnapshots() const;
+  [[nodiscard]] size_t storedBytes() const;
+  [[nodiscard]] std::chrono::nanoseconds oldestTimestamp() const;
+  [[nodiscard]] std::chrono::nanoseconds newestTimestamp() const;
 
 protected:
   void onSchema(const Schema& schema) override;
