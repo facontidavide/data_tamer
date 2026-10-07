@@ -115,12 +115,21 @@ The library is built as C++20; its public headers need only C++17 from consumers
 Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst); measurements in
 [docs/benchmarks](docs/benchmarks/2026-09-12-main-vs-lockfree-frontend.md).
 
+# Documentation
+
+- [docs/llm_user_manual.md](docs/llm_user_manual.md): how to use the library, written for
+  coding agents and useful to humans too (registration rules, sinks, real-time sizing,
+  common mistakes).
+- [CLAUDE.md](CLAUDE.md): how to build, test and contribute.
+- [docs/wire_format.md](docs/wire_format.md): the serialization format.
+
 # Examples
 
 ## Basic example
 
 ```cpp
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 
 int main()
@@ -183,6 +192,7 @@ You can also register a custom type, as shown in the example below.
 
 ```cpp
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "data_tamer/custom_types.hpp"
 
