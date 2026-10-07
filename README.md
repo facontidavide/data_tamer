@@ -371,6 +371,11 @@ recorder.flushPendingDump();
   active (until its dump is handed to the writer) further requests return `false` and are
   ignored. `setDumpCallback()` reports each file (including write errors such as a full disk),
   `stats()` the counters. Dump numbers whose file exists already are skipped.
+- `stats().oldest_timestamp` and `newest_timestamp` give the interval the ring holds now:
+  if it stays shorter than `window` while `evicted_by_capacity` grows, the ring is too small.
+- `flushPendingDump()` writes the active request at once and waits for the file. It works
+  with the worker running; at shutdown, call it after `stop()` so that every queued snapshot
+  is in the ring first.
 
 # Compilation
 

@@ -63,6 +63,8 @@ public:
   size_t capacity() const { return buffer_.size(); }
   size_t used() const { return used_; }
   size_t count() const { return count_; }
+  // Timestamp of the record pushed last; meaningful while count() > 0.
+  int64_t backTimestamp() const { return back_timestamp_; }
 
   RecordHeader front() const
   {
@@ -88,6 +90,7 @@ public:
     write(pos, payload, header.payload_size);
     used_ += header.recordSize();
     ++count_;
+    back_timestamp_ = header.timestamp;
   }
 
   // Copy the records whose timestamp is in [first, last], oldest first, into
@@ -142,6 +145,7 @@ private:
   size_t head_ = 0;
   size_t used_ = 0;
   size_t count_ = 0;
+  int64_t back_timestamp_ = 0;
 };
 
 }  // namespace
@@ -154,7 +158,8 @@ struct MCAPRingSink::Pimpl
     , dump_buffer(options.capacity_bytes)
   {}
 
-  // Ring side: touched by onSnapshot() and flushPendingDump().
+  // Ring side, guarded by ring_mutex: touched by onSnapshot(), flushPendingDump()
+  // and the stats getters, which may run on different threads at the same time.
   enum class Phase
   {
     Idle,        // no request triggered yet
@@ -174,9 +179,15 @@ struct MCAPRingSink::Pimpl
   nanoseconds max_timestamp = kMinTime;
   // Newest timestamp evicted by capacity: a dump starting at or before it lost data.
   nanoseconds capacity_evicted_until = kMinTime;
+  // The active dump lost a record of [dump_start, dump_end] to capacity
+  // eviction after its trigger, e.g. while waiting for a busy writer.
+  bool dump_lost_records = false;
   uint64_t writer_busy_retries = 0;
   uint64_t evicted_by_capacity = 0;
   uint64_t dropped_oversize = 0;
+  // Dumps handed to the writer so far: flushPendingDump() uses it to notice
+  // that a snapshot handed off the request it is flushing.
+  uint64_t handoffs = 0;
 
   // Schemas, inserted by onSchema() and read by the writer thread. Entries are
   // never modified once inserted, so the writer uses them outside the lock.
@@ -239,8 +250,12 @@ void MCAPRingSink::Pimpl::store(const Snapshot& snapshot)
   // Evict by capacity.
   while(ring.used() + size > ring.capacity())
   {
-    capacity_evicted_until =
-        std::max(capacity_evicted_until, nanoseconds(ring.front().timestamp));
+    const nanoseconds evicted(ring.front().timestamp);
+    capacity_evicted_until = std::max(capacity_evicted_until, evicted);
+    if(phase != Phase::Idle && evicted >= dump_start && evicted <= dump_end)
+    {
+      dump_lost_records = true;
+    }
     ring.popFront();
     ++evicted_by_capacity;
   }
@@ -278,14 +293,16 @@ bool MCAPRingSink::Pimpl::tryHandOff()
     job.end = dump_end;
     job.first_message = job.last_message = nanoseconds(0);
     job.messages = 0;
-    job.truncated =
-        capacity_evicted_until >= dump_start && capacity_evicted_until <= dump_end;
+    job.truncated = dump_lost_records || (capacity_evicted_until >= dump_start &&
+                                          capacity_evicted_until <= dump_end);
     job.ok = false;
     writer_busy = true;
   }
   writer_cv.notify_all();
   phase = Phase::Idle;
   retry_counted = false;
+  dump_lost_records = false;
+  ++handoffs;
   request.store(0, std::memory_order_release);
   return true;
 }
@@ -516,27 +533,47 @@ bool MCAPRingSink::flushPendingDump()
 {
   auto& p = *_p;
   p.throwIfWriterThread("flushPendingDump()");
-  bool handed_off = false;
-  while(!handed_off)
+  // The worker may deliver snapshots meanwhile: onSnapshot() can trigger,
+  // complete or hand off the same request between two iterations. All the ring
+  // state is read and written under ring_mutex, and the dump buffer is filled
+  // only by a hand-off while the writer is idle, so each iteration re-reads the
+  // state under the lock.
+  bool active = false;
+  uint64_t target = 0;  // value of `handoffs` once the active request is handed off
+  while(true)
   {
     waitForWriter();  // never wait for the writer while holding ring_mutex
     std::scoped_lock lock(p.ring_mutex);
-    if(p.phase == Pimpl::Phase::Idle)
+    if(!active)
     {
-      if(!p.has_snapshot || !(p.request.load(std::memory_order_acquire) & kPending))
+      active = p.phase != Pimpl::Phase::Idle ||
+               (p.has_snapshot && (p.request.load(std::memory_order_acquire) & kPending));
+      if(!active)
       {
         break;  // nothing to write
       }
+      target = p.handoffs + 1;
+    }
+    if(p.handoffs >= target)
+    {
+      break;  // a snapshot handed it off since the previous iteration
+    }
+    if(p.phase == Pimpl::Phase::Idle)  // requested, not triggered yet
+    {
       p.trigger_time = p.max_timestamp;
       p.dump_start = saturatingSub(p.max_timestamp, p.options.window);
       p.dump_end = p.max_timestamp;
     }
     p.dump_end = std::min(p.dump_end, p.max_timestamp);
     p.phase = Pimpl::Phase::Ready;
-    handed_off = p.tryHandOff();
+    if(p.tryHandOff())
+    {
+      break;
+    }
+    // The writer took another dump between waitForWriter() and the lock.
   }
   waitForWriter();  // our dump, or one handed off earlier
-  return handed_off;
+  return active;
 }
 
 void MCAPRingSink::waitForWriter()
@@ -552,21 +589,58 @@ void MCAPRingSink::setDumpCallback(std::function<void(const MCAPRingDump&)> call
   _p->callback = std::move(callback);
 }
 
-MCAPRingStats MCAPRingSink::stats() const
+uint64_t MCAPRingSink::dumpsWritten() const
 {
-  MCAPRingStats stats;
-  {
-    std::scoped_lock lock(_p->ring_mutex);
-    stats.writer_busy_retries = _p->writer_busy_retries;
-    stats.evicted_by_capacity = _p->evicted_by_capacity;
-    stats.dropped_oversize = _p->dropped_oversize;
-    stats.stored_snapshots = _p->ring.count();
-    stats.stored_bytes = _p->ring.used();
-  }
   std::scoped_lock lock(_p->writer_mutex);
-  stats.dumps_written = _p->dumps_written;
-  stats.dumps_failed = _p->dumps_failed;
-  return stats;
+  return _p->dumps_written;
+}
+
+uint64_t MCAPRingSink::dumpsFailed() const
+{
+  std::scoped_lock lock(_p->writer_mutex);
+  return _p->dumps_failed;
+}
+
+uint64_t MCAPRingSink::writerBusyRetries() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->writer_busy_retries;
+}
+
+uint64_t MCAPRingSink::evictedByCapacity() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->evicted_by_capacity;
+}
+
+uint64_t MCAPRingSink::droppedOversize() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->dropped_oversize;
+}
+
+size_t MCAPRingSink::storedSnapshots() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count();
+}
+
+size_t MCAPRingSink::storedBytes() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.used();
+}
+
+std::chrono::nanoseconds MCAPRingSink::oldestTimestamp() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count() > 0 ? nanoseconds(_p->ring.front().timestamp) : nanoseconds(0);
+}
+
+std::chrono::nanoseconds MCAPRingSink::newestTimestamp() const
+{
+  std::scoped_lock lock(_p->ring_mutex);
+  return _p->ring.count() > 0 ? nanoseconds(_p->ring.backTimestamp()) : nanoseconds(0);
 }
 
 }  // namespace DataTamer

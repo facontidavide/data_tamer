@@ -518,17 +518,31 @@ recorder.flushPendingDump();
   Snapshots of another channel delivered after that one are not included, even if
   stamped earlier.
 - When the ring is full, the oldest snapshots are evicted even if younger than `window`;
-  the dump then reports `truncated = true`. Raise `capacity_bytes`.
+  the dump then reports `truncated = true`. Raise `capacity_bytes`. A complete dump that
+  waits for a busy writer can lose part or all of its interval that way, and reports it
+  the same way.
 - A writer thread writes the files and runs the dump callback. The callback can call
   `stats()`, `dumpRequested()` and `requestDump()`. `waitForWriter()` and
   `flushPendingDump()` throw `std::logic_error` there.
-- `flushPendingDump()` after `SinkWorker::stop()` writes a request that no snapshot has
-  triggered yet, using the newest timestamp seen, and waits for the file. Without it, a
-  request made just before shutdown is lost.
+- `flushPendingDump()` writes the active request now and waits for the file: a request
+  no snapshot has triggered yet uses the newest timestamp seen as trigger, a dump still
+  collecting its post-trigger interval is cut there. It is safe while the worker is
+  running, so there is no need to stop and restart the worker around it; snapshots still
+  queued are not in the ring yet. It returns true if a request was active. At shutdown,
+  call it after `SinkWorker::stop()`, which delivers the queued snapshots first; without
+  it, a request made just before shutdown is lost.
 - `MCAPRingDump::ok` is false on an I/O error (full disk), with `error` set.
   `stats()` returns `dumps_written`, `dumps_failed`, `writer_busy_retries`,
   `evicted_by_capacity`, `dropped_oversize` (snapshots larger than the whole ring),
-  `stored_snapshots` and `stored_bytes`.
+  `stored_snapshots`, `stored_bytes`, and `oldest_timestamp` and `newest_timestamp`,
+  the snapshot times of the first and last record in the ring (both 0 when it is empty).
+  Each field has its own getter (`dumpsWritten()`, ..., `newestTimestamp()`); `stats()`
+  is an inline function that calls them one by one, so with the worker running the
+  fields can come from slightly different moments.
+- Coverage check: `newest_timestamp - oldest_timestamp` is the history the ring holds.
+  If it stays below `window` while `evicted_by_capacity` grows, raise `capacity_bytes`.
+  The records are in delivery order, so with several channels the two values can be off
+  by the delivery skew between channels.
 
 ### ROS2PublisherSink
 
