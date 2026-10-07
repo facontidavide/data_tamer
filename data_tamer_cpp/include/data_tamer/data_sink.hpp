@@ -8,11 +8,6 @@
 #include <typeinfo>
 #include <vector>
 
-namespace moodycamel
-{
-struct ProducerToken;
-}
-
 namespace DataTamer
 {
 
@@ -55,8 +50,6 @@ class SnapshotRef
 {
 public:
   SnapshotRef() = default;
-  /// Takes ownership of one already-counted reference on `slot` (library internal).
-  SnapshotRef(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot);
   SnapshotRef(SnapshotRef&& other) noexcept;
   SnapshotRef& operator=(SnapshotRef&& other) noexcept;
   SnapshotRef(const SnapshotRef&) = delete;
@@ -72,19 +65,34 @@ public:
   explicit operator bool() const { return slot_ != nullptr; }
 
 private:
+  friend class SnapshotPool;  // SnapshotPool::adopt() is the only way to make one
+  /// Takes ownership of one already-counted reference on `slot`.
+  SnapshotRef(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot);
+
   std::shared_ptr<SnapshotPool> pool_;
   PoolSlot* slot_ = nullptr;
 };
 
 /**
- * @brief Interface implemented by a sink. The two callbacks are invoked only by
+ * @brief Interface implemented by a sink. The callbacks are invoked only by
  * the SinkWorker that owns the sink and are serialized with each other, so a
  * sink needs no lock of its own for the state they touch:
  *
  * - onSchema() runs on the thread that attaches the channel to the sink
  *   (addDataSink or the first takeSnapshot), once per channel schema.
- * - onSnapshot() runs on the worker thread, in queue order. Throw to report a
- *   failure: the worker counts it and keeps the message (see SinkWorker).
+ * - onSnapshot() runs on the worker thread (or in drain()), in the order each
+ *   channel took its snapshots. Throw to report a failure: the worker counts
+ *   it and keeps the message (see SinkWorker).
+ * - onStop() runs on the thread calling SinkWorker::stop() (or destroying the
+ *   worker), after the last snapshot has been delivered: the place to close a
+ *   file, publish a partial batch or write a pending dump. It runs once per
+ *   stop: a second stop() without start() in between does not call it again.
+ *   A throw is counted like one from onSnapshot(). The default does nothing.
+ * - onStart() runs on the thread calling SinkWorker::start() after a stop()
+ *   that called onStop(), before the worker accepts snapshots again: the place
+ *   to reopen what onStop() closed. It is not called when the worker is
+ *   constructed. A throw is counted like one from onSnapshot(). The default
+ *   does nothing.
  *
  * Keep onSnapshot() short. Every queued or retained SnapshotRef holds a slot of
  * the channel's snapshot pool, which all sinks of that channel share
@@ -101,6 +109,12 @@ private:
  * A callback may use the channel's const queries (getSchema(), stats(), ...)
  * but must never call anything that changes it (registration, sinks,
  * prepare()): those wait for callbacks to finish and would deadlock.
+ *
+ * ABI: the virtual functions below are frozen for 2.x. The library calls them
+ * through vtables compiled into user binaries, so adding, removing or
+ * reordering one breaks every sink built against an earlier 2.x release.
+ * New behaviour arrives as non-virtual functions of SinkWorker or as a
+ * separate interface; DataSink keeps no data members.
  */
 class DataSink
 {
@@ -111,30 +125,48 @@ protected:
   friend class SinkWorker;
   virtual void onSchema(const Schema& schema) = 0;
   virtual void onSnapshot(const SnapshotRef& snapshot) = 0;
+  virtual void onStop() {}
+  virtual void onStart() {}
 };
 
 /**
- * @brief Owns a DataSink, the queue that channels publish into and the thread
- * that delivers queued snapshots to the sink. It is what LogChannel::addDataSink
- * takes. The worker is stopped before the sink is destroyed, so a sink never
- * receives a callback while it is being torn down.
+ * @brief Owns a DataSink and the thread that delivers snapshots to it. It is
+ * what LogChannel::addDataSink takes. The worker is stopped before the sink is
+ * destroyed, so a sink never receives a callback while it is being torn down.
+ *
+ * Each channel attached to the worker publishes into a queue of its own, which
+ * holds exactly as many snapshots as the channel's pool has slots
+ * (LogChannel::setPoolCapacity) and is allocated with the pool, in prepare(), or
+ * in addDataSink() on a prepared channel. A queued snapshot holds a pool slot,
+ * so the queue cannot fill while the pool has a free slot: the pool is the only
+ * bound, and there is no queue size to configure. Snapshots of one channel are
+ * delivered in the order they were taken; the worker serves the channels in
+ * turn, so snapshots of different channels interleave in no guaranteed order.
+ * A channel detached from the worker (removeDataSink(), channel destroyed) has
+ * its queued snapshots delivered before its queue is freed, and before what it
+ * publishes after attaching to the worker again.
+ *
+ * An idle worker thread polls for about 20 us before it sleeps. A snapshot
+ * pushed while it polls costs the snapshot thread an atomic increment and a
+ * load; one pushed while it sleeps also wakes it (one futex wake on Linux).
  */
 class SinkWorker
 {
 public:
-  static constexpr size_t kDefaultQueueCapacity = 1024;
-
   enum class Delivery : uint8_t
   {
     /// A worker thread delivers queued snapshots as they arrive (default).
     Threaded,
-    /// No thread: the application delivers by calling drain() itself.
+    /// No thread: the application delivers by calling drain() itself. The
+    /// queue of a detached channel is freed by the next drain() (or stop(), or
+    /// destruction), so a loop that detaches and attaches channels, or creates
+    /// and destroys them, without draining keeps (pool slots + 1) x 24 bytes
+    /// per cycle until then. A stopped Threaded worker behaves the same until
+    /// start().
     Manual
   };
 
-  /// `queue_capacity` is preallocated (block-rounded) and shared by all producers.
   explicit SinkWorker(std::unique_ptr<DataSink> sink,
-                      size_t queue_capacity = kDefaultQueueCapacity,
                       Delivery delivery = Delivery::Threaded);
   ~SinkWorker();
   SinkWorker(const SinkWorker&) = delete;
@@ -148,40 +180,54 @@ public:
   }
 
   /// Stop accepting snapshots, wait for the callback in progress, join the
-  /// worker thread and deliver everything still queued. Idempotent. Never call
-  /// it from a callback.
+  /// worker thread, deliver everything still queued, then call the sink's
+  /// onStop() on this thread (MCAPSink closes its file, MCAPRingSink writes a
+  /// pending dump, ROS2PublisherSink publishes its partial batch). Idempotent:
+  /// calling it again before start() does not call onStop() a second time.
+  /// The destructor calls it. Never call it from a callback. stop(), start()
+  /// and the destructor must not run concurrently on the same worker: call
+  /// them from one thread, or serialize them yourself.
   void stop();
-  /// Resume after stop(): reopen admission and restart the worker thread.
+  /// Resume after stop(): call the sink's onStart() on this thread (MCAPSink
+  /// opens its next numbered file), restart the worker thread and accept
+  /// snapshots again. Without a stop() since the last start, it does nothing.
   void start();
   /// Deliver every snapshot queued so far on the calling thread. Returns after
   /// a callback in progress on the worker has finished, so everything taken
   /// before the call has been delivered when it returns.
   void drain();
 
-  DataSink& sink() { return *_sink; }
-  const DataSink& sink() const { return *_sink; }
+  DataSink& sink();
+  const DataSink& sink() const;
   /// Typed access to the owned sink, e.g. worker.as<MCAPSink>().restartRecording(...).
   /// Throws std::bad_cast if the sink is not a T.
   template <typename T>
   T& as()
   {
-    return dynamic_cast<T&>(*_sink);
+    return dynamic_cast<T&>(sink());
   }
 
-  /// Number of onSnapshot() calls that threw, and the message of the last one.
+  /// Number of onSnapshot(), onStop() and onStart() calls that threw, and the
+  /// message of the last one.
   [[nodiscard]] uint64_t errors() const;
   [[nodiscard]] std::string lastError() const;
 
 private:
   friend class LogChannel;
-  std::unique_ptr<moodycamel::ProducerToken> makeProducerToken();
-  bool tryPush(moodycamel::ProducerToken& token, SnapshotRef&& snapshot);
+  /// The queue of one channel on this worker; defined in data_sink.cpp.
+  struct Attachment;
+  /// Allocates a queue of `capacity` snapshots. Control path; may throw.
+  Attachment* attach(size_t capacity);
+  /// Ends an attachment: no push may follow. Its queued snapshots are still
+  /// delivered; the queue is freed by the delivery pass that finds it empty.
+  void detach(Attachment* attachment) noexcept;
+  /// Real-time path: no allocation, no lock. False when the worker is stopped.
+  bool tryPush(Attachment& attachment, SnapshotRef&& snapshot);
   /// Serialized with onSnapshot(); exceptions from onSchema() propagate.
   void addSchema(const Schema& schema);
 
-  struct Pimpl;
+  struct Pimpl;  // holds the sink too: the layout is one pointer
   std::unique_ptr<Pimpl> _p;
-  std::unique_ptr<DataSink> _sink;
 };
 
 //--------------------------------------------------

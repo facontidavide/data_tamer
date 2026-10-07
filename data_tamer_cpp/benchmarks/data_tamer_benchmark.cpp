@@ -235,7 +235,7 @@ static void DT_SnapshotPoolTryAcquire(benchmark::State& state)
 static void DT_SnapshotRefCloneDestroy(benchmark::State& state)
 {
   auto pool = std::make_shared<SnapshotPool>(1, 0, 0);
-  SnapshotRef original(pool, pool->tryAcquire());
+  SnapshotRef original = SnapshotPool::adopt(pool, pool->tryAcquire());
   for(auto _ : state)
   {
     auto clone = original.clone();

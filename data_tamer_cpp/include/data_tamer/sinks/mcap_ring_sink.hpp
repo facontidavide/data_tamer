@@ -125,11 +125,11 @@ struct MCAPRingStats
  *
  * Flush. flushPendingDump() writes the active request at once with what the
  * ring holds, from any thread except the dump callback, whether the worker is
- * running or not; there is no need to stop the worker. At shutdown a request
- * made just before it has no snapshot left to trigger it: call
- * flushPendingDump() after SinkWorker::stop(), so that the snapshots still
- * queued are in the ring first. The destructor finishes the file being written
- * but does not start a pending dump.
+ * running or not; there is no need to stop the worker. At shutdown,
+ * SinkWorker::stop() (and the worker's destructor) calls it from onStop() once
+ * the last snapshot is delivered, and waits for the writer, so a request made
+ * just before shutdown is written. The sink's own destructor finishes the file
+ * being written but does not start a pending dump.
  */
 class MCAPRingSink : public DataSink
 {
@@ -166,7 +166,7 @@ public:
    * the newest snapshot timestamp seen as trigger; a dump still waiting for
    * its post-trigger interval is cut at the newest timestamp seen. Snapshots
    * queued but not yet delivered are not in the ring: after SinkWorker::stop()
-   * or drain() they are.
+   * or drain() they are. SinkWorker::stop() calls it after the last delivery.
    *
    * Safe while the SinkWorker delivers snapshots: the worker keeps storing
    * them, and a snapshot that completes the request first hands it off itself.
@@ -226,6 +226,8 @@ public:
 protected:
   void onSchema(const Schema& schema) override;
   void onSnapshot(const SnapshotRef& snapshot) override;
+  /// Writes a pending dump, as flushPendingDump().
+  void onStop() override;
 
 private:
   struct Pimpl;

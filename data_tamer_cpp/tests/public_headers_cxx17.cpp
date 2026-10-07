@@ -15,6 +15,7 @@
 #include "data_tamer/details/locked_reference.hpp"
 #include "data_tamer/details/shared_state.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
+#include "data_tamer/details/spin_pause.hpp"
 #include "data_tamer/details/write_mutex.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"

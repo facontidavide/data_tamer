@@ -76,7 +76,10 @@ ROS2PublisherSink::ROS2PublisherSink(PublisherNodeInterfaces node_interface,
 
 ROS2PublisherSink::~ROS2PublisherSink()
 {
-  // The SinkWorker is stopped before the sink is destroyed: no concurrent callback.
+  // A sink owned by a SinkWorker was flushed by onStop() already: this flush
+  // is the fallback for a sink used without a worker (and retries what a
+  // failed onStop() left). The worker is stopped before the sink is
+  // destroyed: no concurrent callback.
   try
   {
     flush();
@@ -151,6 +154,11 @@ void ROS2PublisherSink::onSnapshot(const SnapshotRef& ref)
   }
   FillSnapshotMsg(snapshot, _p->data_msg);
   _p->data_publisher->publish(_p->data_msg);
+}
+
+void ROS2PublisherSink::onStop()
+{
+  flush();
 }
 
 void ROS2PublisherSink::flush()

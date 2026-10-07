@@ -7,8 +7,8 @@ int main()
 {
   using namespace DataTamer;
 
-  // start defining one or more Sinks that must be added by default.
-  // Do addDefaultSink BEFORE creating a channel.
+  // Sinks added by default are attached to every channel of the registry,
+  // the existing ones and the ones created later.
   auto dummy_sink = DummySink::create();
   ChannelsRegistry::Global().addDefaultSink(dummy_sink);
 
