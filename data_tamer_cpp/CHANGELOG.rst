@@ -4,6 +4,85 @@ Changelog for package data_tamer
 
 Unreleased
 ----------
+* **Fixed, deadlocks**: ``unregister()``, ``removeDataSink()`` or a ``LoggedValue``
+  destructor inside ``scopedWrite()`` while a snapshot waited; a const query inside
+  ``scopedWrite()`` while another thread ran one of those, or ``startLogging()``;
+  ``startLogging()`` inside ``scopedWrite()``. The snapshot path takes the write mutex
+  before its epoch, and ``startLogging()`` before the control mutex.
+* **Behaviour change**: a snapshot taken by a thread that holds the channel's
+  transaction or a ``LoggedValue`` guard returns ``blocked`` (it hung).
+* **New**: several threads may take snapshots of one channel; they take turns on the
+  write mutex. ``blocked`` now takes precedence over ``pool_exhausted``.
+* **Fixed**: a consumer built with ``-fvisibility=hidden`` against a shared
+  libdata_tamer hung in ``LoggedValue::set()`` inside ``scopedWrite()``;
+  ``ChannelSharedState`` has default visibility.
+* **Behaviour change**: ``SinkWorker::stop()``, ``start()`` and ``drain()`` throw
+  ``std::logic_error`` from a callback of their own sink (they deadlocked, or ``stop()``
+  closed the worker silently). Concurrent ``stop()`` and ``start()``, two ``stopAll()``
+  included, are serialized (they hung). A callback that releases the last reference to
+  its own worker no longer calls ``std::terminate``.
+* **Fixed**: a sink attached during a failing ``startLogging()`` could miss the final
+  schema, and a concurrent ``addDataSink()`` of one worker announced it twice.
+* **Real-time**: no ``notify_all()`` per snapshot or refused push unless a thread waits;
+  each one could be a futex call.
+* **Behaviour change**: names must be non-empty and free of whitespace and control
+  characters (only the space was refused); ``IsCanonicalName()`` agrees. A ninth default
+  sink throws in ``addDefaultSink()`` (it made every later ``getChannel()`` throw).
+* **Fixed**: a registration that throws leaves the channel unchanged (custom types, an
+  allocation failure, ``createLoggedValue()``). Two C++ types that return one custom type
+  name in a channel make ``registerValue()`` throw (the second used the first one's
+  serializer and read past its object). ``ToStr(Schema)`` rethrows allocation failures.
+* **Fixed**: ``long long``, ``unsigned long long``, ``wchar_t``, ``char16_t``,
+  ``char32_t`` and enums over them are recorded by size and signedness; they were
+  recorded as ``other``, which no decoder reads. ``long double`` is a compile error. A
+  class template with two or more type parameters can have a ``TypeDefinition``.
+* **Fixed**: a vector of structs was sized with padding, so ``tryTakeSnapshot()`` could
+  return ``oversize`` for a payload that fit. ``ValuePtr`` checks the room before writing
+  a number and writes little-endian on any host; a custom type without a serializer
+  throws ``std::invalid_argument``.
+* **Fixed, wire**: a ``std::string``, registered or inside a custom type, is written as
+  ``char[]`` (a ``uint32`` count and the characters), as its schema says. It carried a
+  16-bit length that no decoder could read, and a string over 65535 bytes made the
+  snapshot throw.
+* **Fixed**: ``MCAPSink`` reset without rollover and ``restartRecording()`` of the file in
+  use wrote the old footer into the new file; the old writer is now closed first, and a
+  failed reopen of that file stops the sink. A rollover that cannot open its next file
+  is counted once and retried after another reset time.
+* **Fixed**: ``MCAPRingSink::flushPendingDump()`` and ``stop()`` on an untriggered request
+  use the newest timestamp of the current run, so a simulation reset no longer dumps the
+  previous run. ``dumps_written`` and ``dumps_failed`` count a dump before its callback.
+* **Behaviour change**: MCAP sinks reject a negative snapshot timestamp (counted in
+  ``errors()``, not written), and ``mcap_encoding::WriteMessage()`` throws for one.
+* **Parser and Python decoder**: the work of a decode is bounded by the payload (a
+  zero-size element type looped for minutes); a bool is true for any non-zero byte;
+  empty schema text is rejected; ``### key:value`` headers are read; version and hash are
+  strict unsigned decimals; a separator is a whole line of at least 30 ``=``;
+  ``ENCODING:`` sections are opaque types and must follow ``MSG:``; upper-case legacy
+  names are read only without a ``### version:`` line. New ``SplitMcapMessage()`` and
+  ``split_mcap_message()``, used by ``mcap_reader``.
+* **Breaking, parser**: ``ParseSnapshot()`` loses its unused ``callback_custom``
+  parameter; ``SizeOf``, ``kMaxSchemaDepth`` and ``ParseSnapshotRecursive`` move to
+  ``DataTamerParser::detail`` and ``NullCustomCallback`` is removed; the header needs a
+  little endian host and no longer includes ``<iostream>``.
+* **SerializeMe**: bounds checks for byte vectors and 1-byte arrays, exact
+  ``BufferSize()`` for arrays and padded structs, bool decoding, a container of 2^32
+  elements or more throws, an ADL ``TypeDefinition()`` may return ``const char*`` or
+  ``std::string``, ``Span<const T>`` from ``std::array``, and the big endian path
+  compiles for enums and ``std::byte``.
+* **API**: ``[[nodiscard]]`` on ``trySetEnabled()``, ``LogChannel::create()``,
+  ``getNumberOfSinks()``, ``MCAPRingSink::requestDump()``, ``SnapshotPool::tryAcquire()``
+  and ``adopt()``, ``ToStr(Schema)``, ``ToYaml()``, ``RenderSchema()``,
+  ``ParseSnapshot()``, ``BuildSchemaFromText()``, ``BuildSchemaFromYaml()``,
+  ``ToText()`` and ``GetBit()``; ``noexcept`` on ``isEnabled(id)``,
+  ``LoggedValue::setEnabled()`` and ``isEnabled()``, ``requestDump()``,
+  ``dumpRequested()``, ``SinkWorker::delivered()``, ``errors()``, ``queueHighWater()`` and
+  the ``WriteMutex`` try paths. ``droppedSnapshots()`` is ``[[deprecated]]``.
+  ``getConstPtr()`` is ``const``, ``SinkWorker::as<T>()`` has a ``const`` overload,
+  ``logged_value.hpp`` is self-sufficient and ``poolExhausted()`` is lock-free.
+  ``CustomSerializerT(std::string)`` is ``explicit``. Removed: ``getPointerType`` and
+  ``WriteMutex::kPriorityInheritance``. **Source change**: ``mcap_ring_sink.hpp`` no
+  longer includes ``mcap_sink.hpp``.
+* **ABI**: one new private exported function, ``LogChannel::registerValueWithTypes``.
 * **Counters in one struct per channel and one per sink**:
   ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and
   ``tryTakeSnapshot()`` call), ``accepted`` (the calls whose snapshot at least

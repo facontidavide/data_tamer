@@ -71,10 +71,10 @@ enum class SnapshotResult : uint8_t
  * ChannelsRegistry::getChannel(); use one channel per rate or logical group.
  *
  * Register every value (registerValue(), createLoggedValue()) before startLogging(),
- * which the first takeSnapshot() with a sink attached calls. One thread per channel
- * takes the snapshots. Registration, unregister(), sink changes and startLogging()
- * are control operations that can block, some until a snapshot in progress ends:
- * never call them from a serializer, a sink callback or inside scopedWrite().
+ * which the first takeSnapshot() with a sink attached calls. Several threads may take
+ * snapshots; they take turns on the write mutex. Registration, unregister(), sink
+ * changes and startLogging() are control operations that can block, some until a
+ * snapshot in progress ends: never call them from a serializer or a sink callback.
  */
 class LogChannel : public std::enable_shared_from_this<LogChannel>
 {
@@ -100,8 +100,8 @@ public:
    * @brief Registers a variable to be recorded in every snapshot.
    *
    * The channel borrows the pointer: it must stay valid until unregister() has
-   * returned or the channel is destroyed. Threads other than the snapshot thread must
-   * write the variable inside scopedWrite().
+   * returned or the channel is destroyed. Write the variable inside scopedWrite()
+   * whenever another thread may take a snapshot meanwhile.
    *
    * The name must be unique in the channel, non-empty and free of whitespace and
    * control characters; JoinNames() builds hierarchical names. Throws

@@ -47,6 +47,8 @@ A field has a type, a name and an optional container shape.
 | array of structs | `Pose[3] poses` | 3 structs, no count |
 
 There are no strings, no alignment padding, no separators and no per-field tags.
+A C++ `std::string` is registered as `char[]`: a `uint32` count, then that many bytes,
+with no terminator and no charset.
 All multi-byte numbers are **little-endian**.
 
 ### Basic types
@@ -56,7 +58,7 @@ never on the wire.
 
 | id | name | bytes | encoding |
 |---:|---|---:|---|
-| 0 | `bool` | 1 | `0x00` false, `0x01` true |
+| 0 | `bool` | 1 | `0x00` false, `0x01` true; a decoder reads any other value as true |
 | 1 | `char` | 1 | one byte, no charset implied |
 | 2 | `int8` | 1 | two's complement |
 | 3 | `uint8` | 1 | |
@@ -71,12 +73,16 @@ never on the wire.
 
 Type id 12, `other`, denotes a custom struct named in the schema. Enums are
 recorded as their underlying integer type; the schema does not preserve the
-enum name.
+enum name. A C++ integer type is recorded as the wire type of its size and
+signedness (`long long` is `int64`, `char16_t` is `uint16`, `char32_t` is `uint32`,
+`wchar_t` is `int32` or `uint32`). `long double` has no wire type and cannot be
+recorded.
 
 ## 2. Schema text
 
 The schema is UTF-8 text, one item per line, `\n` terminated. Decoders must
-trim spaces and `\r` at both ends of a line and skip empty lines.
+trim spaces and `\r` at both ends of a line and skip empty lines. A text without
+any line is not a schema and is rejected.
 
 ```
 ### version: 5
@@ -102,24 +108,29 @@ uint32 stamp
 (Abridged: the complete text, with its hash, is
 `docs/wire_format/vectors/schema.txt`.)
 
-Grammar, in the order lines appear:
+Grammar, in the order lines appear. A header value is the rest of the line after
+the colon of `### key:`, trimmed; the space after the colon is optional
+(`### hash:7` is valid).
 
-1. `### version: <int>` – 5 for texts written by this version. Decoders must
-   also accept 4, which differs only in how the hash was computed (see section
-   5), and reject anything else.
-2. `### hash: <uint64>` – the schema hash, see section 5.
+1. `### version: <uint>` (digits only) – 5 for texts written by this version.
+   Decoders must also accept 4, which differs only in how the hash was computed
+   (see section 5), and reject anything else.
+2. `### hash: <uint64>` (digits only, at most 2^64-1) – the schema hash, see
+   section 5.
 3. `### channel_name: <text>` – everything after the first space following the
    colon, trimmed. May contain spaces.
 4. Zero or more **field lines**: `<type-spec> <name>`. Exactly one space
-   separates the two; the name is everything after it (trimmed). A name never
-   contains a space. A name may be empty or have empty `/`-separated
-   components (leading, trailing or repeated `/`): writers do not reject them,
-   although names built with `DataTamer::JoinNames()` have none. `type-spec`
+   separates the two; the name is everything after it (trimmed). A name is not
+   empty and contains no whitespace or control character. It may have empty
+   `/`-separated components (leading, trailing or repeated `/`): writers do not
+   reject them, although names built with `DataTamer::JoinNames()` have none. `type-spec`
    is a basic type name or a custom type name, optionally followed by `[]`
    (dynamic vector) or `[N]` (fixed array, decimal N, 1 to 65535). Top-level field order is the mask bit order and the payload
    order.
-5. Zero or more **custom type sections**. Each starts with a line consisting of
-   `=` characters (at least 30; the writer emits 59), then `MSG: <TypeName>`,
+5. Zero or more **custom type sections**. Each starts with a line that consists
+   only of `=` characters (at least 30; the writer emits 59; a field line that
+   merely contains such a run is not a separator), then, after any blank lines,
+   `MSG: <TypeName>`,
    then field lines with the same grammar as above. Sections are emitted sorted
    by type name; decoders must not depend on that, since a type may reference
    another type declared later in the text. Nested fields are not individually
@@ -132,6 +143,10 @@ Grammar, in the order lines appear:
    producers must not emit one. The payload bytes of such a field are produced
    by user code; this document does not define them and generic decoders
    cannot skip them. Producers that need generic decoding must not use them.
+   The `ENCODING:` line must directly follow the `MSG:` line, and its value is
+   trimmed. The foreign schema text is everything after that line, less one
+   final `\n` (the writer ends the section with one), so a parsed schema
+   renders back to the same text.
 
 ### 2.1 YAML rendering (version 6)
 
@@ -220,8 +235,8 @@ reference decoders do this (`ToText()`, `to_text()`).
 ### Legacy
 
 Legacy files (version < 4, before 2023) used upper-case type names (`DOUBLE`,
-`INT32`, ...) with the name first; the C++ parser still accepts them, new
-decoders may ignore that.
+`INT32`, ...) with the name first; the C++ parser still accepts them in a text
+that has no `### version:` line, new decoders may ignore that.
 
 ## 3. Snapshot
 
@@ -257,8 +272,13 @@ decode_field(field):
 
 After the loop `pos` must equal the payload length; otherwise the schema and
 the payload do not belong together. Decoders must check every read against the
-remaining payload before performing it, reject a dynamic count larger than the
-remaining bytes allow, and bound the nesting depth of custom types (the reference
+remaining payload before performing it, reject, before decoding any element, a
+dynamic count or a fixed array length larger than the remaining bytes divided by
+the fewest bytes one element takes (a basic type: its size; a dynamic vector: its
+4 byte count; a fixed array: its length times its element's; a custom type: the
+sum over its fields). An element that takes 0 bytes (a type without fields) holds
+no value however large the count, and decoders must not iterate over it. They
+also bound the nesting depth of custom types (the reference
 decoders use 64) so that a malformed or cyclic schema cannot recurse forever.
 
 Flattened series names, as produced by the reference decoders and PlotJuggler:
@@ -302,7 +322,8 @@ uint32 payload_length     little-endian
 uint8  payload[payload_length]
 ```
 
-  The body ends exactly after the payload. `snapshot_full.mcap_message` in the
+  The body ends exactly after the payload. A decoder rejects a body shorter than
+  its two lengths declare, as well as one with bytes after the payload. `snapshot_full.mcap_message` in the
   vectors directory is one such body.
 
 A file from a process that was killed has no footer; recover it with
@@ -416,8 +437,7 @@ directory the way `python/test_data_tamer_parser.py` does: parse `schema.txt`
 and recompute its hash,
 parse `schema.yaml` and `schema_nested.yaml` (if it reads version 6) to the
 same schemas as `schema.txt` and `schema_nested.txt`, hashes included (neither
-has an opaque type: the C++ line-format parser does not read those, while
-both YAML readers do),
+has an opaque type),
 decode both snapshots from mask and payload (disabled fields absent, not zero;
 floats compared bit-exactly), split both `.mcap_message` bodies into the same
 mask and payload bytes, and reject a payload with trailing bytes or a schema

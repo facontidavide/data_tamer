@@ -48,7 +48,7 @@ inline constexpr bool is_atomic_scalar_v = details::is_atomic_scalar<T>::value;
  * struct, or inside a LogChannel::scopedWrite() transaction.
  *
  * The destructor unregisters, which waits for a snapshot in progress: never release
- * the last shared_ptr on a real-time thread or inside scopedWrite().
+ * the last shared_ptr on a real-time thread.
  */
 template <typename T>
 class LoggedValue

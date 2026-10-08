@@ -35,7 +35,10 @@ under "Unreleased" in `data_tamer_cpp/CHANGELOG.rst`.
   - `include/data_tamer_parser/data_tamer_parser.hpp`: standalone C++ decoder, no
     dependency on the library.
   - `src/`: implementation; `src/sinks/` for MCAPSink, MCAPRingSink, ROS2PublisherSink.
-  - `tests/`: one gtest binary, `datatamer_test`, plus compile-only targets.
+  - `tests/`: the gtest binary `datatamer_test`; `datatamer_fault_test`, the
+    allocation-failure tests, a program of its own because it replaces `operator new`;
+    `serialize_me_big_endian_test`, SerializeMe built as for a big endian host;
+    compile-only targets; compile-fail probes in `tests/compile_fail/`.
   - `examples/`: T01 to T04, `mcap_1m_per_sec`, `mcap_reader`, `ros2_publisher` (ROS only).
   - `benchmarks/`: built only when Google Benchmark is found.
   - `3rdparty/`: vendored MCAP.
@@ -110,17 +113,34 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
 - The real-time path allocates nothing, takes no blocking lock, does no I/O and does not
   throw. It covers `tryTakeSnapshot()` and what it reaches (`SnapshotPool::tryAcquire`,
   `WriteMutex::tryLockWithSpin`, `ValuePtr` serialization, `SinkWorker::tryPush` and
-  its per-channel single-producer queue),
+  its per-channel queue, filled by one producer at a time under the channel's write
+  mutex),
   scalar `LoggedValue::set()`/`get()`, `trySetEnabled()` and
   `MCAPRingSink::requestDump()`. Tests assert it with `AllocCounter::Scope`
   (`tests/alloc_counter.hpp`): add one when you touch these paths. `takeSnapshot()` may
-  block and grow a slot; keep the two variants distinct.
+  block and grow a slot; keep the two variants distinct. The real-time path makes no
+  futex call unless a control operation or a `stop()` registered as waiting
+  (`tests/rt_syscall_tests.cpp`). `WriteMutex::try_lock()`, `unlock()` and
+  `tryLockWithSpin()` are `noexcept`.
 - `onSchema()`/`onSnapshot()`/`onStop()`/`onStart()` are serialized by the SinkWorker,
   and control operations (registration, sinks, `startLogging()`) wait for them. Never call a
-  control operation from a sink callback, a serializer or inside `scopedWrite()`.
+  control operation from a sink callback or a serializer; inside `scopedWrite()` they are
+  safe. Lock order: write mutex, then `start_mutex`, then `control_mutex`, then the
+  snapshot epoch; the snapshot path takes the write mutex before the epoch. `stop()`,
+  `start()` and `drain()` throw `std::logic_error` from a callback of their own worker.
   `stop()` runs `onStop()` once per stop, after the last delivery, and `start()` after a
   stop runs `onStart()`: a sink that needs to finish (close, flush, dump) or reopen does
   it there.
+- `ChannelSharedState` has default visibility (`DATA_TAMER_SHARED_STATE_VISIBILITY`), so
+  the thread-local transaction chain of `Transaction::active()` is one per process, also
+  in consumers built with `-fvisibility=hidden`; `tests/visibility_tests.cpp` checks it
+  in shared builds.
+- A registration changes the channel in one step, in `registerValueWithTypes()`:
+  everything that can throw runs first and `addSeries()` is the last change; the
+  templates only collect custom types (`discoverTypes()`, which also checks that a
+  type name belongs to one C++ type). `registration_fault_tests.cpp` fails each
+  allocation in turn. `poolExhausted()` relies on the pool being created before
+  `logging_started` and never replaced.
 - A change to the schema text, the payload encoding, the schema hash or the MCAP and ROS
   message layout is a format revision. Update `docs/wire_format.md`, regenerate the
   vectors, update `python/data_tamer_parser.py` and `data_tamer_parser.hpp`, and bump
@@ -182,6 +202,7 @@ that major. That is frozen inside 2.x:
 
 - the exported symbols (name, signature, mangling), including the private back-end
   functions that inline templates call (`LogChannel::registerValueImpl`,
+  `registerValueWithTypes`,
   `controlMutex`, `checkValueName`, `schemaFrozen`, `hasCustomType`, `addCustomType`,
   `sharedState`, `TypesRegistry::findOrCreate` and `replace`) and the lock contract
   between them;
@@ -262,8 +283,17 @@ commit.
 - Tests: gtest, `TEST(Suite, BehaviourInCamelCase)`, new files listed in
   `DATATAMER_TEST_SOURCES` (`tests/CMakeLists.txt`). Helpers live in
   `tests/test_sinks.hpp` (`Attached<T>`, `channelWith`, `acceptedUntilExhausted`) and
-  `tests/mcap_test_utils.hpp` (`tempPath`, `countMessages`). Wait for delivery with `SinkWorker::drain()` or
-  `Delivery::Manual`, never with sleeps.
+  `tests/mcap_test_utils.hpp` (`tempPath`, `ScratchDir`, `countMessages`,
+  `summaryMessageCount`, `logTimes`). Wait for delivery with `SinkWorker::drain()` or
+  `Delivery::Manual`, never with sleeps. A test that could hang runs in a death-test
+  child with a watchdog (`tests/hang_watchdog.hpp`); `tests/observed_thread.hpp` waits
+  until a thread blocks and `tests/gate.hpp` parks one. Out-of-bounds tests read from
+  or write into `tests/guarded_buffer.hpp`, which ends at an inaccessible page.
+- Code that must not compile gets a probe in `tests/compile_fail/` and a
+  `data_tamer_compile_fail_test()` call in `tests/CMakeLists.txt`: the probe compiles as
+  written (the `_control` target), a `DT_` macro breaks it, and the test passes when that
+  build fails, with `REGEX` matched against the diagnostic. `parser_header_warnings`
+  compiles the standalone parser as strict C++17 with `-Werror`.
 - Commits: short imperative subject, optionally prefixed by the component
   (`MCAPSink: roll over into new files by default`). The body says why, and what was
   tested.

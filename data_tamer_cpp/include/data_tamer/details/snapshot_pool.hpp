@@ -11,10 +11,10 @@
 namespace DataTamer
 {
 
-/// One pre-allocated snapshot plus its reference count (0 means free). Only the
-/// snapshot thread moves refs from 0 to 1 and writes the snapshot, while it holds the
-/// only reference; sinks read it and release. refs has its own cache line, so sink
-/// traffic does not touch the snapshot data.
+/// One pre-allocated snapshot plus its reference count (0 means free). Only a snapshot
+/// holding the channel's write mutex moves refs from 0 to 1 and writes the snapshot,
+/// while it holds the only reference; sinks read it and release. refs has its own cache
+/// line, so sink traffic does not touch the snapshot data.
 struct PoolSlot
 {
   Snapshot snapshot;
@@ -44,7 +44,8 @@ public:
   SnapshotPool& operator=(const SnapshotPool&) = delete;
 
   /**
-   * @brief Takes a free slot with one reference. Snapshot thread only; real-time safe.
+   * @brief Takes a free slot with one reference. The caller holds the channel's write
+   * mutex; real-time safe.
    * @return the slot, or nullptr (counted in exhausted()) if every slot is in use.
    */
   [[nodiscard]] PoolSlot* tryAcquire()
@@ -105,7 +106,7 @@ public:
 private:
   const size_t capacity_;
   std::unique_ptr<PoolSlot[]> slots_;
-  size_t scan_from_ = 0;  // snapshot thread only
+  size_t scan_from_ = 0;  // under the channel's write mutex
   std::atomic<uint64_t> exhausted_{ 0 };
 };
 

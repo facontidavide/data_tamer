@@ -32,9 +32,10 @@ the [FAQ](#faq) collects short answers that fit nowhere else.
 
 ### What you can register
 
-`registerValue(name, &variable)` accepts arithmetic types, `bool`, `char`, enums,
-`std::atomic` of those, `std::vector`, `std::array` and your own types (see
-[custom types](#custom-types)). It returns a `RegistrationID`. The wire format has no
+`registerValue(name, &variable)` accepts integers, `float`, `double`, `bool`, `char`,
+enums, `std::atomic` of those, `std::vector`, `std::array` and your own types (see
+[custom types](#custom-types)). It returns a `RegistrationID`. Integers are recorded by
+size and signedness, so `long long` works; `long double` is not supported, use `double`. The wire format has no
 string type, so don't log text: a `std::string` would be recorded as one number per
 character.
 
@@ -67,7 +68,9 @@ The `LoggedValue` destructor waits for a snapshot in progress, so don't drop the
 
 ### Names
 
-Names are unique per channel and contain no spaces. Use `/` to build a hierarchy, which
+Names are unique per channel, not empty, and contain no whitespace or control character.
+A registration that throws changes nothing, so you can catch the exception and carry on.
+Use `/` to build a hierarchy, which
 PlotJuggler shows as a tree. `DataTamer::JoinNames()` drops empty components, so you don't
 end up with `loco//LF/x`:
 
@@ -114,7 +117,8 @@ struct DataTamer::TypeDefinitionTrait<Eigen::Vector3d>
 ```
 
 The specialization must be visible wherever the type is registered. If a type has both a
-trait and a `TypeDefinition()`, the trait wins.
+trait and a `TypeDefinition()`, the trait wins. Give each type its own name: two types
+with one name in a channel make `registerValue()` throw.
 
 ## Writing values from other threads
 
@@ -165,7 +169,8 @@ if(result != DataTamer::SnapshotResult::ok)
 
 Where `takeSnapshot()` would wait for a writer or grow a slot, `tryTakeSnapshot()` gives up
 and returns `blocked` or `oversize`. It reports every failure as a `SnapshotResult` and
-doesn't throw. Only one thread per channel may take snapshots.
+doesn't throw. Several threads may take snapshots of one channel: they take turns on its
+write mutex, and `tryTakeSnapshot()` returns `blocked` while another snapshot holds it.
 
 The pool has 64 slots by default, which is 64 ms at 1 kHz. If a sink stalls longer than
 that (a disk flush can take 200 ms), new snapshots are dropped with `pool_exhausted`.
@@ -199,7 +204,8 @@ sink.setMaxTimeBeforeReset(std::chrono::seconds(0));  // one file, never reset
 ```
 
 `setCreateNewFileOnReset(false)` overwrites the file at every reset, so use it only for a
-recording you don't keep.
+recording you don't keep. If the next file cannot be opened at a reset, the failure is
+counted once in `worker->errors()` and the current file keeps recording.
 
 ### Flight recorder
 
@@ -217,12 +223,12 @@ auto worker = DataTamer::MCAPRingSink::create(options);
 channel->addDataSink(worker);
 
 // from any thread, real-time ones included: keep also 2 s after the trigger
-worker->as<DataTamer::MCAPRingSink>().requestDump(std::chrono::seconds(2));
+(void)worker->as<DataTamer::MCAPRingSink>().requestDump(std::chrono::seconds(2));
 ```
 
 The dump covers `[trigger - window, trigger + post_trigger]` in snapshot time, so it
 behaves the same in simulation, in a replay and on the robot. `requestDump()` returns false
-while an earlier dump is still in progress. `setDumpCallback()` reports every file written
+while an earlier dump is still in progress (the result is `[[nodiscard]]`). `setDumpCallback()` reports every file written
 or failed. [T04_flight_recorder.cpp](../data_tamer_cpp/examples/T04_flight_recorder.cpp)
 is a complete example.
 
@@ -328,7 +334,8 @@ files one after the other.
 In C++, copy the single header
 [data_tamer_parser.hpp](../data_tamer_cpp/include/data_tamer_parser/data_tamer_parser.hpp)
 into your project: it has no dependencies.
-[mcap_reader.cpp](../data_tamer_cpp/examples/mcap_reader.cpp) shows how to use it. The
+[mcap_reader.cpp](../data_tamer_cpp/examples/mcap_reader.cpp) shows how to use it,
+including `SplitMcapMessage()` and the checks on a corrupt message. The
 format is specified in [wire_format.md](wire_format.md).
 
 ## Building and linking
@@ -355,7 +362,7 @@ Check what `takeSnapshot()` or `tryTakeSnapshot()` returns:
 | `partial`, `rejected` | Some or all sinks are stopped. | `start()` the worker, or detach it. |
 | `no_sinks` | No sink is attached. | Attach one. |
 | `oversize` | A vector outgrew the slot (`tryTakeSnapshot()` only). | Raise `setPayloadCapacity()`. |
-| `blocked` | A writer held the write mutex too long (`tryTakeSnapshot()` only). | Shorten `scopedWrite()` scopes. |
+| `blocked` | A writer or another snapshot held the write mutex too long (`tryTakeSnapshot()`), or the calling thread holds it itself (both). | Shorten `scopedWrite()` scopes; release guards before a snapshot. |
 | `not_started` | `startLogging()` was not called (`tryTakeSnapshot()` only). | Call it before the loop. |
 
 For totals over time, read the counters from a non real-time thread:
@@ -445,7 +452,7 @@ Yes. Attach the same worker to each channel, and every channel's schema reaches 
 
 ### Can I add or remove sinks while logging?
 
-Yes, but not from inside a `scopedWrite()` or a sink callback.
+Yes, but not from a sink callback or a custom serializer.
 
 ### Is there a more detailed reference?
 

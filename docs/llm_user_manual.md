@@ -77,6 +77,7 @@ flowchart LR
 | You need | Include |
 |---|---|
 | `LogChannel`, `LoggedValue`, `JoinNames`, `SnapshotResult` | `data_tamer/channel.hpp` |
+| The accessors of a `LoggedValue` you already hold | `data_tamer/logged_value.hpp` (creating one needs `channel.hpp`) |
 | `ChannelsRegistry` | `data_tamer/data_tamer.hpp` (plus `channel.hpp` to use a channel) |
 | `DataSink`, `SinkWorker`, `Snapshot`, `SnapshotRef` | `data_tamer/data_sink.hpp` |
 | `Schema`, `ToStr(schema)`, `SchemaFormat` | `data_tamer/types.hpp` |
@@ -207,8 +208,8 @@ The recorded names are `joints/LF/position`, `joints/LF/velocity`, ...,
 
 `LogChannel` (`data_tamer/channel.hpp`) offers:
 
-- `registerValue(name, const T* ptr)` for arithmetic types, `bool`, `char`, enums
-  (recorded as their underlying type), `std::atomic<T>` of those (read with a relaxed
+- `registerValue(name, const T* ptr)` for integers, `float`, `double`, `bool`, `char`,
+  enums (recorded as their underlying type), `std::atomic<T>` of those (read with a relaxed
   load), `std::vector<T>`, `std::array<T, N>` (N from 1 to 65535) and custom types (see
   [Custom types](#custom-types)). Returns a `RegistrationID`.
 - `createLoggedValue<T>(name, initial_value = T{})` returns a
@@ -218,15 +219,24 @@ The recorded names are `joints/LF/position`, `joints/LF/velocity`, ...,
   serialization. Generic decoders may not be able to read the result: prefer a custom
   type.
 
-The wire format has no string type. A `std::string` registers as `char[]`, a vector of
-`char`, and decoders produce one numeric field per character. Do not log text.
+An integer is recorded by size and signedness, so `long long`, `unsigned long long`,
+`char16_t` and `char32_t` work like `int64_t`, `uint64_t`, `uint16_t` and `uint32_t`, and
+`wchar_t` like the integer of its size and signedness. `long double` has no wire type: it
+is a compile error ("numeric type has no wire type"), use `double`.
+
+The wire format has no string type. A `std::string` registers as `char[]` (a `uint32`
+count and the characters, whatever the length), and decoders produce one numeric field
+per character. Do not log text.
 
 ### Names
 
 - A name must be unique in its channel. Registering a name that is already registered
   throws `std::runtime_error` ("registered twice").
-- A name must not contain a space (`std::runtime_error`). A failed registration leaves the
-  channel unchanged.
+- A name must be non-empty and contain no whitespace or control character (any byte up
+  to the space, and DEL; bytes above 0x7f, as in UTF-8, are fine): `std::runtime_error`,
+  with the channel and the name in the message.
+- A registration that throws leaves the channel unchanged (schema, hash and
+  registrations), an allocation failure and `createLoggedValue()` included.
 - Registration accepts empty `/`-separated components (`"/loco//x/"`), but PlotJuggler
   shows them as empty path elements. Build hierarchical names with
   `DataTamer::JoinNames(parts...)` (`data_tamer/names.hpp`), which drops empty components:
@@ -272,9 +282,11 @@ destroyed, and dereferences it at every snapshot. A dangling pointer is not dete
 - `setEnabled(id, bool)` is lock-free and allocation-free and throws
   `std::invalid_argument` for a stale or invalid id.
 - `trySetEnabled(id, bool)` is `noexcept` and returns false instead: use it on real-time
-  threads.
-- `isEnabled(id)` is false after `unregister()`.
-- `LoggedValue::setEnabled(bool)` and `isEnabled()` work even after the channel is gone.
+  threads. The result is `[[nodiscard]]`: false means the id was stale and nothing
+  changed.
+- `isEnabled(id)` is lock-free and `noexcept`, and false after `unregister()`.
+- `LoggedValue::setEnabled(bool)` and `isEnabled()` are lock-free and `noexcept`, and work
+  even after the channel is gone.
 - A disabled value costs one bit of the snapshot's active mask and no payload.
   `LoggedValue::set()` does not re-enable a disabled value.
 
@@ -312,11 +324,13 @@ from it), write them in one transaction:
 Keep transactions and pointer guards short and free of blocking calls. `takeSnapshot()`
 spins for 2 microseconds (`WriteMutex::kLockSpinNs`) and then blocks on the mutex, with
 priority inheritance where POSIX provides it. `tryTakeSnapshot()` returns `blocked`
-instead. Release guards before taking a snapshot on the same thread.
+instead. A snapshot taken by a thread that holds the transaction or a guard itself
+returns `blocked` at once, from either variant, and captures nothing: release guards
+first.
 
 The `LoggedValue` destructor unregisters, which locks and waits for a snapshot in
-progress: never release the last `shared_ptr` on a real-time thread or inside a
-`scopedWrite()`.
+progress: never release the last `shared_ptr` on a real-time thread. Inside
+`scopedWrite()` it is safe.
 
 ## Custom types
 
@@ -392,7 +406,11 @@ Rules:
 - If both a trait and a `TypeDefinition()` exist, the trait is used. A trait whose
   `define()` cannot be called as `define(T&, AddField&)` is a compile error.
 - The specialization must be visible wherever the type is registered.
-- The channel keys custom types by the returned name: give each C++ type its own name.
+- The channel keys custom types by the returned name: give each C++ type its own name. A
+  second C++ type that returns a name the channel already holds makes `registerValue()`
+  throw `std::runtime_error`.
+- A class template with two or more type parameters (`Pair<A, B>`) can have a trait or a
+  `TypeDefinition()`: it is then a custom type, not a container.
 
 ## Starting to log
 
@@ -417,7 +435,11 @@ callbacks, which is why an explicit `startLogging()` belongs outside the control
 
 ## Taking snapshots
 
-Only one thread per channel may call `takeSnapshot()` or `tryTakeSnapshot()`.
+Several threads may call `takeSnapshot()` and `tryTakeSnapshot()` on one channel. They
+take turns on the channel's write mutex from the pool slot to the last push, so each
+sink receives snapshots in the order they were serialized. `tryTakeSnapshot()` checks the
+mutex before the pool: a held mutex reports `blocked` even when the pool is also
+exhausted.
 
 `tryTakeSnapshot()` exists to be lock-free: it never blocks on a lock and never allocates,
 and reports every failure as a `SnapshotResult` instead of throwing. Use it on real-time
@@ -426,7 +448,8 @@ threads; `takeSnapshot()` waits and allocates where `tryTakeSnapshot()` gives up
 | | `takeSnapshot()` | `tryTakeSnapshot()` |
 |---|---|---|
 | Before `startLogging()` | calls `startLogging()` if a sink is attached | returns `not_started` |
-| Write mutex held by a writer | spins 2 us, then blocks | spins 2 us, then returns `blocked` |
+| Write mutex held by a writer or another snapshot | spins 2 us, then blocks | spins 2 us, then returns `blocked` |
+| Write mutex held by the calling thread | returns `blocked` | returns `blocked` |
 | Payload larger than the slot | grows the slot (allocates) | returns `oversize` |
 | Use from a real-time thread | no | yes |
 
@@ -441,7 +464,7 @@ Both return a `[[nodiscard]] SnapshotResult`. Cast to `(void)` to ignore it on p
 | `not_started` | `tryTakeSnapshot()` before `startLogging()`; nothing captured. | Call `startLogging()` first. |
 | `pool_exhausted` | Sinks still hold every pool slot; the sample is lost for every sink. | Raise `setPoolCapacity()`, or fix the slow sink. |
 | `oversize` | `tryTakeSnapshot()`: the payload outgrew the slot. | Raise `setPayloadCapacity()`. |
-| `blocked` | `tryTakeSnapshot()`: a writer held the write mutex past the spin budget. | Shorten `scopedWrite()` scopes and pointer guards. |
+| `blocked` | `tryTakeSnapshot()`: a writer or another snapshot held the write mutex past the spin budget. Either variant: the calling thread holds it. | Shorten `scopedWrite()` scopes and pointer guards; release them before a snapshot. |
 
 On a real-time thread, count these outcomes and report them from another thread. Do not
 log, allocate or retry inside the loop.
@@ -452,7 +475,10 @@ The timestamp argument defaults to `DataTamer::NsecSinceEpoch()`: `std::chrono::
 in nanoseconds since the epoch. Pass your own `std::chrono::nanoseconds` (simulation
 time, sensor time) when it is the time that matters. The timestamp becomes the MCAP log
 and publish time, `timestamp_nsec` in ROS messages, and the time base of the
-`MCAPRingSink` window. Use one clock for all channels that end up in one file.
+`MCAPRingSink` window. Use one clock for all channels that end up in one file. MCAP
+times are unsigned: `MCAPSink` and `MCAPRingSink` reject a snapshot with a negative
+timestamp (counted in the worker's `errors()`, neither written nor stored). A timestamp of
+0 is valid.
 
 ## Sinks
 
@@ -468,7 +494,9 @@ methods with `worker->as<T>()`, which throws `std::bad_cast` for the wrong type.
   See [Registry](#registry).
 - `SinkWorker::stop()` stops accepting snapshots, waits for the callback in progress,
   delivers everything still queued and then finishes the sink (`DataSink::onStop()`):
-  see [Shutdown](#shutdown). It is idempotent and never callable from a callback.
+  see [Shutdown](#shutdown). It is idempotent, and calls from several threads are
+  serialized. From a callback of the worker's own sink, `stop()`, `start()` and
+  `drain()` throw `std::logic_error` and change nothing.
   `start()` resumes, and first lets the sink reopen (`DataSink::onStart()`). `drain()`
   delivers the queues on the calling thread.
 - Each channel's snapshots reach `onSnapshot()` in the order they were taken. The worker
@@ -497,7 +525,9 @@ calling thread, serialized with the other callbacks. Each sink finishes itself t
 - `onStop()` runs once per stop. A second `stop()` without `start()` in between does not
   call it again.
 - Destroying a worker that is still running calls `stop()`, so the sink is finished then
-  too.
+  too. If the last reference is released inside a callback of the worker's own sink (a
+  sink holding a `weak_ptr` to its channel can end up owning it), the stop completes on a
+  thread of its own once the callback returns.
 - A throw from `onStop()` is counted in `errors()` and does not leave `stop()`.
 - `start()` after a stop calls the sink's `onStart()` on the calling thread, before the
   worker accepts snapshots again: `MCAPSink` records into its next numbered file (unless
@@ -529,6 +559,8 @@ channels it creates, their default sinks and their default settings.
   without the registry lock, so `onSchema()` may use the registry; a channel that
   `getChannel()` creates meanwhile gets the sink and keeps it. Default sinks can be added before
   or after the channels exist.
+- A registry holds at most eight default sinks, the most a channel holds: a ninth throws
+  `std::runtime_error`, also when no channel exists yet.
 - `setChannelDefaults(ChannelDefaults{...})` sets what `getChannel()` applies to the
   channels it creates from then on (table below). Existing channels are not changed:
   their owner may have configured them, and their sizes freeze at `startLogging()`. A field
@@ -571,19 +603,26 @@ existing file at that path is overwritten.
   (`system_clock`, measured from file open), and the recording continues in numbered
   files (`run.mcap`, `run_1.mcap`, `run_2.mcap`, ...), skipping names that exist.
   Nothing is lost and disk usage is unbounded.
+- A rollover that cannot open its next file (full disk, unwritable directory) is counted
+  once in `worker->errors()`. The current file keeps recording and the next attempt comes
+  after another reset time.
 - `setCreateNewFileOnReset(false)` truncates and restarts the same file instead, which
   discards what it held and bounds disk usage to the last 10 minutes. Use it only for a
-  recording you never keep, such as a rolling debug log.
+  recording you never keep, such as a rolling debug log. The recording stops if the file
+  cannot be opened again.
 - `setMaxTimeBeforeReset(std::chrono::seconds(0))` disables resets: one file that grows
-  for as long as the process runs.
+  for as long as the process runs. A negative time resets after every snapshot.
 - `do_compression = true` writes zstd chunks. A crash loses more data than with an
   uncompressed file.
 - `worker->stop()` delivers what is queued and closes the file (see
   [Shutdown](#shutdown)); so does destroying the worker.
 - `stopRecording()` closes the file without stopping the worker and drops later
   snapshots; `restartRecording(filepath, do_compression = false)` opens a new file and
-  rewrites the known schemas into it. `start()` after `stop()` records into the next
-  numbered file (as a reset does), unless `restartRecording()` opened a file meanwhile.
+  rewrites the known schemas into it. If the new file cannot be opened, it throws and the
+  current recording goes on, except for the file in use (the same path, or a link to
+  it): that one is closed first, because opening it truncates it, so a failed open
+  leaves the sink stopped. `start()` after `stop()` records into the next numbered file
+  (as a reset does), unless `restartRecording()` opened a file meanwhile.
 - A failed write throws from `onSnapshot()` and shows in `worker->errors()`.
 
 `data_tamer/sinks/mcap_encoding.hpp` exposes the same encoding (`AddChannel()`,
@@ -614,7 +653,7 @@ recorder.setDumpCallback([](const MCAPRingDump& dump) {
 });
 channel->addDataSink(ring);
 // ... in the loop, from any thread, real-time ones included:
-recorder.requestDump(10ms);  // also keep 10 ms after the trigger
+(void)recorder.requestDump(10ms);  // also keep 10 ms after the trigger
 // ... at shutdown: delivers what is queued, then writes a pending request
 ring->stop();
 ```
@@ -623,10 +662,11 @@ ring->stop();
   both allocated in the constructor: about `2 x capacity_bytes`. Each stored snapshot
   takes 24 bytes plus its mask and payload. Size the ring for
   `snapshot rate x (window + post_trigger) x record size`, summed over channels.
-- `requestDump(post_trigger = 0)` is one compare-exchange: lock-free, allocation-free.
+- `requestDump(post_trigger = 0)` is `noexcept` and one compare-exchange: lock-free,
+  allocation-free.
   It returns false, and the request is ignored, while an earlier request is active (from
   its `requestDump()` until its dump is handed to the writer thread). Requests are not
-  merged.
+  merged. The result is `[[nodiscard]]`: cast it to `void` to ignore it on purpose.
 - Trigger: the first snapshot the sink receives after the request, with time `T`. The
   file holds the stored snapshots of all channels stamped in
   `[T - window, T + post_trigger]`. Delivery runs behind the producer when the queues are
@@ -641,10 +681,13 @@ ring->stop();
   the same way.
 - A writer thread writes the files and runs the dump callback. The callback can call
   `stats()`, `dumpRequested()` and `requestDump()`. `waitForWriter()` and
-  `flushPendingDump()` throw `std::logic_error` there.
+  `flushPendingDump()` throw `std::logic_error` there. `stats()` called from the callback
+  already counts the dump being reported.
 - `flushPendingDump()` writes the active request now and waits for the file: a request
-  no snapshot has triggered yet uses the newest timestamp seen as trigger, a dump still
-  collecting its post-trigger interval is cut there. It is safe while the worker is
+  no snapshot has triggered yet uses the newest timestamp of the current run as trigger
+  (a new run starts when the snapshot clock of a channel steps back, as in a simulation
+  reset), a dump still collecting its post-trigger interval is cut at the newest
+  timestamp seen. It is safe while the worker is
   running, so there is no need to stop and restart the worker around it; snapshots still
   queued are not in the ring yet. It returns true if a request was active.
 - `SinkWorker::stop()` calls `flushPendingDump()` after the last delivery, so a request
@@ -722,7 +765,8 @@ Derive from `DataTamer::DataSink` and implement the two protected callbacks, plu
 `onStop()` and `onStart()` if the sink has something to finish and reopen:
 
 - `onSchema(const Schema&)` runs on the thread that starts logging or attaches the
-  sink, once per channel schema.
+  sink, once per channel schema, and again after the worker is detached and attached
+  again: tolerate a schema you already know.
 - `onSnapshot(const SnapshotRef&)` runs on the worker thread, in the order each channel
   took its snapshots.
 - `onStop()` (optional, default empty) runs on the thread calling `stop()`, after the
@@ -741,7 +785,8 @@ Derive from `DataTamer::DataSink` and implement the two protected callbacks, plu
   copy to your own thread and return.
 - Callbacks may call the channel's const queries (`getSchema()`, `stats()`), never
   anything that changes it (registration, sinks, `startLogging()`): those wait for callbacks
-  and deadlock.
+  and deadlock. `stop()`, `start()` and `drain()` of the sink's own worker throw
+  `std::logic_error`.
 
 ```cpp
 class SlowSink : public DataTamer::DataSink
@@ -873,7 +918,8 @@ subtract. A snapshot in flight at the time of a read is counted in `attempts` be
 is in `accepted`, so a window's difference is approximate by the calls in flight: clamp
 it at zero before you divide. Without calls that threw, `attempts` is the sum over all
 eight results.
-`droppedSnapshots(worker)` still works for one more release; use `dropped_by_sink`.
+`droppedSnapshots(worker)` still works for one more release, but it is `[[deprecated]]`:
+use `dropped_by_sink`.
 
 `worker->stats()` returns a `SinkWorker::Stats`, cumulative over the worker's life
 (`stop()` and `start()` do not reset it):
@@ -906,22 +952,22 @@ The two extra counters cost the snapshot path two atomic increments (`attempts` 
 | `takeSnapshot()` | no | Can block on the write mutex, grow a slot, or call `startLogging()`. |
 | scalar `LoggedValue::set()`, `get()` | yes | Wait-free. |
 | non-scalar `LoggedValue::set()`, `get()`, pointer guards | no | Lock the write mutex while a snapshot serializes. |
-| `trySetEnabled()`, `LoggedValue::setEnabled()` | yes | Lock-free. `setEnabled()` can throw. |
-| `MCAPRingSink::requestDump()` | yes | One compare-exchange. |
-| `writeLockContended()`, `payloadReallocations()`, `droppedOversize()`, `snapshotAttempts()`, `snapshotsAccepted()` | yes | Atomic loads. |
+| `trySetEnabled()`, `LogChannel::isEnabled()`, `LoggedValue::setEnabled()`, `LoggedValue::isEnabled()` | yes | Lock-free, `noexcept`. `LogChannel::setEnabled()` can throw. |
+| `MCAPRingSink::requestDump()` | yes | One compare-exchange; `noexcept`. |
+| `writeLockContended()`, `payloadReallocations()`, `droppedOversize()`, `snapshotAttempts()`, `snapshotsAccepted()`, `poolExhausted()` | yes | Atomic loads. |
 | `registerValue()`, `createLoggedValue()`, `unregister()`, `LoggedValue` destructor | no | Control mutex; can wait for a snapshot. |
 | `addDataSink()`, `removeDataSink()`, `startLogging()` | no | Control mutex; run sink callbacks. |
-| `LogChannel::stats()`, `poolExhausted()`, `droppedSnapshots()`, `sinkDropped()`, `getSchema()` | no | Control mutex. |
-| `SinkWorker::delivered()`, `errors()`, `queueHighWater()` | yes | Relaxed atomic loads. |
+| `LogChannel::stats()`, `droppedSnapshots()`, `sinkDropped()`, `getSchema()` | no | Control mutex. |
+| `SinkWorker::delivered()`, `errors()`, `queueHighWater()` | yes | Relaxed atomic loads; `noexcept`. |
 | `SinkWorker::stats()`, `lastError()` | no | Take a mutex and copy a string (allocates). |
 | `SinkWorker::stop()`, `drain()`, `flushPendingDump()`, `ChannelsRegistry::stopAll()` | no | Block until delivery or writing ends; `stop()` runs `onStop()`. |
 
-Control operations must also stay out of `scopedWrite()` scopes, pointer guards, sink
-callbacks and custom serializers.
+Control operations must stay out of sink callbacks and custom serializers; inside
+`scopedWrite()` scopes and pointer guards they are safe.
 
 Threads involved:
 
-- your snapshot thread: serializes values and pushes references, one thread per channel;
+- your snapshot threads: serialize values and push references, one at a time per channel;
 - one worker thread per `SinkWorker`: runs `onSnapshot()` (MCAP writes, ROS publishes);
 - the thread calling `startLogging()` or `addDataSink()`: runs `onSchema()`;
 - the `MCAPRingSink` writer thread: writes dump files and runs the dump callback.
@@ -948,8 +994,12 @@ use `dt.SchemaRegistry`, `dt.parse_snapshot_msg()` and `dt.iter_snapshot_batch()
 `python/README.md`).
 
 In C++, `data_tamer_parser/data_tamer_parser.hpp` is a single header with no dependency
-on the library. `DataTamerParser::BuildSchemaFromText()` reads both schema renderings and
-`ParseSnapshot()` visits each value. `data_tamer_cpp/examples/mcap_reader.cpp` reads an
+on the library. `DataTamerParser::BuildSchemaFromText()` reads both schema renderings.
+`ParseSnapshot()` visits each value and returns false for a snapshot of another schema or
+with bytes left over; its result is `[[nodiscard]]`. `SplitMcapMessage()` splits an MCAP
+message body into mask and payload and throws `std::runtime_error` if the body does not
+match its two lengths. Malformed input throws `std::runtime_error` (`ValueError` in
+Python). `data_tamer_cpp/examples/mcap_reader.cpp` reads an
 MCAP file with it.
 
 `docs/wire_format.md` specifies the format, with golden byte vectors in
