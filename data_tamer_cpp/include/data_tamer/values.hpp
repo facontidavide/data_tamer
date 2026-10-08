@@ -119,15 +119,6 @@ private:
   bool is_vector_ = false;
   uint16_t array_size_ = 0;
 
-  // GetBasicType<T>(), but a numeric T must have a wire type.
-  template <typename T>
-  static constexpr BasicType wireType()
-  {
-    constexpr bool valid = !IsNumericType<T>() || GetBasicType<T>() != BasicType::OTHER;
-    static_assert(valid, "numeric type has no wire type: use int, float or double");
-    return GetBasicType<T>();
-  }
-
   // ---- the type-erased implementations ----
   static void serializeNone(const void*, const CustomSerializer*, SerializeMe::SpanBytes&)
   {}
@@ -242,7 +233,7 @@ inline ValuePtr::ValuePtr(const T* pointer, CustomSerializer::Ptr type_info)
   : v_ptr_(pointer)
   , serializer_(std::move(type_info))
   , type_index_(typeid(T))
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(false)
 {
   if(serializer_)
@@ -267,7 +258,7 @@ inline ValuePtr::ValuePtr(const std::atomic<T>* pointer)
   , serialize_fn_(&ValuePtr::serializeAtomic<T>)
   , size_fn_(&ValuePtr::sizeNumeric<T>)
   , type_index_(typeid(T))  // same identity as the plain T
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(false)
 {
   static_assert(std::atomic<T>::is_always_lock_free, "atomic scalar must be lock-free");
@@ -280,7 +271,7 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect)
   , serialize_fn_(&ValuePtr::serializeContainer<Container<T, TArgs...>>)
   , size_fn_(&ValuePtr::sizeContainer<Container<T, TArgs...>>)
   , type_index_(typeid(Container<T, TArgs...>))
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(true)
 {}
 
@@ -293,7 +284,7 @@ inline ValuePtr::ValuePtr(const Container<T, TArgs...>* vect,
   , size_fn_(&ValuePtr::sizeContainerCustom<Container<T, TArgs...>>)
   , serializer_(std::move(type_info))
   , type_index_(typeid(Container<T, TArgs...>))
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(true)
 {}
 
@@ -304,7 +295,7 @@ inline ValuePtr::ValuePtr(const std::array<T, N>* array)
   , serialize_fn_(&ValuePtr::serializeContainer<std::array<T, N>>)
   , size_fn_(&ValuePtr::sizeContainer<std::array<T, N>>)
   , type_index_(typeid(std::array<T, N>))
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(true)
   , array_size_(N)
 {
@@ -320,7 +311,7 @@ inline ValuePtr::ValuePtr(const std::array<T, N>* array, CustomSerializer::Ptr t
   , size_fn_(&ValuePtr::sizeArrayCustom<std::array<T, N>>)
   , serializer_(std::move(type_info))
   , type_index_(typeid(std::array<T, N>))
-  , type_(wireType<T>())
+  , type_(details::WireType<T>())
   , is_vector_(true)
   , array_size_(N)
 {

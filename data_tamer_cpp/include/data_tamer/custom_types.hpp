@@ -119,6 +119,24 @@ private:
 //------------------------------------------------------------------
 //------------------------------------------------------------------
 
+namespace details
+{
+/// GetBasicType<T>() for a recorded type. The one check, at compile time, that a numeric
+/// type has a wire type (long double has none): every registration path reaches it.
+template <typename T>
+constexpr BasicType WireType()
+{
+  static_assert(!IsNumericType<T>() || GetBasicType<T>() != BasicType::OTHER, "numeric "
+                                                                              "type has "
+                                                                              "no wire "
+                                                                              "type: use "
+                                                                              "int, "
+                                                                              "float or "
+                                                                              "double");
+  return GetBasicType<T>();
+}
+}  // namespace details
+
 // Name of a custom type as written in the schema: TypeDefinitionTrait<T>::name() if
 // provided, else the value returned by the definition of T. A std::string_view or
 // const char* must outlive the program (a string literal). An owning string is cached
@@ -128,8 +146,8 @@ struct CustomTypeName
 {
   static std::string_view get()
   {
-    static_assert(!IsNumericType<T>(), "numeric type has no wire type: use int, float "
-                                       "or double");
+    // Only a numeric type without a wire type gets here, and WireType() refuses it.
+    (void)details::WireType<T>();
     static_assert(SerializeMe::has_TypeDefinition<T>(), "Missing TypeDefinition");
     if constexpr(SerializeMe::has_TypeDefinitionTrait<T>::value &&
                  SerializeMe::has_TypeDefinitionTraitName<T>::value)
