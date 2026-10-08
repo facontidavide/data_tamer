@@ -2,6 +2,7 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
+#include "data_tamer/sinks/mcap_sink.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"
 #include "alloc_counter.hpp"
 #include "test_sinks.hpp"

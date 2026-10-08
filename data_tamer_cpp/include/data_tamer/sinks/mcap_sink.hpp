@@ -57,10 +57,10 @@ public:
 
   /// Reset the file at the next snapshot once it is older than `reset_time` (wall clock,
   /// since it was opened). See setCreateNewFileOnReset() for what a reset does.
-  /// The default is 600 seconds, and 0 disables resets. Disk usage is unbounded unless
-  /// the files are truncated on reset. A rollover that fails is counted in
-  /// SinkWorker::errors() and tried again after another `reset_time`, while the current
-  /// file keeps recording.
+  /// The default is 600 seconds, 0 disables resets, and a negative time resets after
+  /// every snapshot. Disk usage is unbounded unless the files are truncated on reset.
+  /// A rollover that fails is counted in SinkWorker::errors() and tried again after
+  /// another `reset_time`, while the current file keeps recording.
   void setMaxTimeBeforeReset(std::chrono::seconds reset_time);
 
   /// What a reset does. true (default): continue in a new numbered file, e.g.

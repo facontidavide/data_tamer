@@ -2,7 +2,6 @@
 
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/details/abi.hpp"
-#include "data_tamer/sinks/mcap_sink.hpp"  // details::NumberedPath
 
 #include <chrono>
 #include <cstddef>

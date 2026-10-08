@@ -2,6 +2,7 @@
 
 // The MCAP implementation is compiled in mcap_sink.cpp.
 #include "data_tamer/sinks/mcap_encoding.hpp"
+#include "data_tamer/sinks/mcap_sink.hpp"  // details::NumberedPath
 
 #include <algorithm>
 #include <atomic>
