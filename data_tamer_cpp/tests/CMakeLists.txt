@@ -106,6 +106,44 @@ else()
 endif()
 target_compile_features(datatamer_fault_test PRIVATE cxx_std_20)
 
+# SerializeMe's byte-swapping path, built as for a big endian host. It is its own
+# executable: SerializeMe's inline functions differ from the ones in datatamer_test.
+if(DATA_TAMER_BUILD_ROS AND gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
+    ament_add_gtest(serialize_me_big_endian_test serialize_me_big_endian_tests.cpp)
+else()
+    add_executable(serialize_me_big_endian_test serialize_me_big_endian_tests.cpp)
+    target_link_libraries(serialize_me_big_endian_test PRIVATE GTest::gtest_main)
+    gtest_discover_tests(serialize_me_big_endian_test DISCOVERY_MODE PRE_TEST)
+endif()
+target_compile_definitions(serialize_me_big_endian_test PRIVATE SERIALIZE_LITTLEENDIAN=0)
+target_include_directories(serialize_me_big_endian_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+set_target_properties(serialize_me_big_endian_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+
+# Sources that must not compile. SOURCE holds a block under `#ifdef FAIL_CASE`. The
+# check is two tests: SOURCE without the block compiles (so a typo cannot pass for the
+# failure) and with the block the build fails. Extra arguments are compile options.
+function(data_tamer_compile_fail NAME SOURCE)
+    foreach(case compiles rejected)
+        set(target ${NAME}_${case})
+        add_library(${target} OBJECT EXCLUDE_FROM_ALL ${SOURCE})
+        target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+        target_compile_options(${target} PRIVATE ${ARGN})
+        set_target_properties(${target} PROPERTIES
+            CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+        add_test(NAME ${target}
+            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
+                    --target ${target})
+        # one build at a time: the tests would race on the shared build tree
+        set_tests_properties(${target} PROPERTIES RESOURCE_LOCK data_tamer_compile_fail)
+    endforeach()
+    target_compile_definitions(${NAME}_rejected PRIVATE FAIL_CASE)
+    set_tests_properties(${NAME}_rejected PROPERTIES WILL_FAIL TRUE)
+endfunction()
+
+data_tamer_compile_fail(endian_swap_size compile_fail_endian_swap.cpp
+    -DSERIALIZE_LITTLEENDIAN=0)
+
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
     DATA_TAMER_WIRE_FORMAT_DIR="${PROJECT_SOURCE_DIR}/../docs/wire_format")

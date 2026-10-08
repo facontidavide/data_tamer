@@ -331,9 +331,17 @@ inline void Span<T>::trimFront(size_t offset)
 #endif  // !defined(SERIALIZE_LITTLEENDIAN)
 
 template <typename T>
+inline constexpr bool is_number()
+{
+  return std::is_arithmetic_v<T> || std::is_same_v<T, std::byte> || std::is_enum_v<T>;
+}
+
+template <typename T>
 inline T EndianSwap(T t)
 {
-  static_assert(std::is_arithmetic<T>::value, "This function accepts only numeric types");
+  static_assert(is_number<T>(), "This function accepts only numeric types");
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                "This function accepts only 1, 2, 4 and 8 byte types");
 #if defined(_MSC_VER)
 #define DESERIALIZE_ME_BYTESWAP16 _byteswap_ushort
 #define DESERIALIZE_ME_BYTESWAP32 _byteswap_ulong
@@ -375,7 +383,7 @@ inline T EndianSwap(T t)
     u.i = DESERIALIZE_ME_BYTESWAP32(u.i);
     return u.t;
   }
-  else if(sizeof(T) == 8)
+  else
   {
     union
     {
@@ -386,15 +394,6 @@ inline T EndianSwap(T t)
     u.i = DESERIALIZE_ME_BYTESWAP64(u.i);
     return u.t;
   }
-  else
-  {
-    std::runtime_error("Problem with IndianSwap");
-  }
-}
-template <typename T>
-inline constexpr bool is_number()
-{
-  return std::is_arithmetic_v<T> || std::is_same_v<T, std::byte> || std::is_enum_v<T>;
 }
 
 template <typename _Tp, bool _is_container, int _size>
