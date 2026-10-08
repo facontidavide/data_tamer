@@ -207,19 +207,13 @@ inline void GetFixedSize(bool& is_fixed_size, size_t& fixed_size)
     }
     else if(is_fixed_size)
     {
-      if constexpr(has_TypeDefinition<T>())
-      {
-        auto funcA = [&](const char*, auto const* member) {
-          using MemberType = std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
-          GetFixedSize<MemberType>(is_fixed_size, fixed_size);
-        };
-        T dummy;
-        InvokeTypeDefinition(dummy, funcA);
-      }
-      else
-      {
-        throw std::logic_error("Missing TypeDefinition");
-      }
+      static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
+      auto funcA = [&](const char*, auto const* member) {
+        using MemberType = std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
+        GetFixedSize<MemberType>(is_fixed_size, fixed_size);
+      };
+      T dummy;
+      InvokeTypeDefinition(dummy, funcA);
     }
   }
 }

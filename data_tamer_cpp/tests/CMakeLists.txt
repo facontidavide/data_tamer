@@ -164,6 +164,8 @@ data_tamer_compile_fail_test(pool_adopt_result_is_nodiscard
 
 data_tamer_compile_fail_test(atomic_word_table_const_is_read_only
     atomic_word_table_const.cpp DT_WRITE_THROUGH_CONST)
+data_tamer_compile_fail_test(fixed_size_of_an_undescribed_type_is_rejected
+    get_fixed_size.cpp DT_UNDESCRIBED_TYPE)
 
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)
