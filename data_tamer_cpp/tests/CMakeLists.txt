@@ -21,6 +21,7 @@ set(DATATAMER_TEST_SOURCES
     value_ptr_bounds_tests.cpp
     basic_type_tests.cpp
     logged_value_tests.cpp
+    logged_value_api_tests.cpp
     shared_state_tests.cpp
     channel_control_tests.cpp
     channel_capacity_tests.cpp

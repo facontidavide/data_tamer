@@ -90,7 +90,7 @@ public:
   [[nodiscard]] MutablePtr<T> getMutablePtr();
 
   /// Read-only counterpart of getMutablePtr(), for non-scalar values.
-  [[nodiscard]] ConstPtr<T> getConstPtr();
+  [[nodiscard]] ConstPtr<T> getConstPtr() const;
 
   /// Includes or excludes the value from the snapshots. Lock-free; callable from any
   /// thread, even after the channel is destroyed.

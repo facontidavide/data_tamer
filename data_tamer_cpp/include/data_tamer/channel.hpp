@@ -635,7 +635,7 @@ inline MutablePtr<T> LoggedValue<T>::getMutablePtr()
 }
 
 template <typename T>
-inline ConstPtr<T> LoggedValue<T>::getConstPtr()
+inline ConstPtr<T> LoggedValue<T>::getConstPtr() const
 {
   static_assert(!kAtomic, "scalar LoggedValues are atomic: use set()/get()");
   return ConstPtr<T>(&value_, *state_);
