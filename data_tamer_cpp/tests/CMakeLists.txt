@@ -213,6 +213,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Werror=deprecated-declarations deprecated)
 endif()
 
+# logged_value.hpp must work on its own. The program includes nothing else, so it links
+# only if the header defines the members it calls; a test builds it on demand.
+add_executable(logged_value_alone EXCLUDE_FROM_ALL logged_value_alone.cpp)
+target_link_libraries(logged_value_alone PRIVATE data_tamer)
+set_target_properties(logged_value_alone PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+add_test(NAME logged_value_header_alone
+    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target logged_value_alone)
+set_tests_properties(logged_value_header_alone PROPERTIES RESOURCE_LOCK build_tree)
+
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built
 # without optimization so that the calls are not inlined away, and is not

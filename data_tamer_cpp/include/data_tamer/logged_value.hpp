@@ -38,8 +38,8 @@ inline constexpr bool is_atomic_scalar_v = details::is_atomic_scalar<T>::value;
 
 /**
  * @brief A variable that registers itself in a LogChannel when created and
- * unregisters when destroyed. Create it with LogChannel::createLoggedValue(). Its
- * member functions are defined in channel.hpp: include that to use a LoggedValue.
+ * unregisters when destroyed. Create it with LogChannel::createLoggedValue()
+ * (channel.hpp, which also defines the constructor and the destructor).
  *
  * Scalars (see is_atomic_scalar_v) are stored in a std::atomic: set() and get() are
  * wait-free. Other types are accessed under the channel's write mutex, like
@@ -104,5 +104,59 @@ private:
   Storage value_;
   RegistrationID id_;
 };
+
+template <typename T>
+inline void LoggedValue<T>::setEnabled(bool enabled) noexcept
+{
+  state_->setEnabled(id_.index_, enabled);  // own registration: never stale
+}
+
+template <typename T>
+inline bool LoggedValue<T>::isEnabled() const noexcept
+{
+  return state_->isEnabled(id_.index_);
+}
+
+template <typename T>
+inline void LoggedValue<T>::set(const T& val)
+{
+  if constexpr(kAtomic)
+  {
+    value_.store(val, std::memory_order_relaxed);
+  }
+  else
+  {
+    ChannelSharedState::Transaction transaction(*state_);
+    value_ = val;
+  }
+}
+
+template <typename T>
+inline T LoggedValue<T>::get() const
+{
+  if constexpr(kAtomic)
+  {
+    return value_.load(std::memory_order_relaxed);
+  }
+  else
+  {
+    ChannelSharedState::Transaction transaction(*state_);
+    return value_;
+  }
+}
+
+template <typename T>
+inline MutablePtr<T> LoggedValue<T>::getMutablePtr()
+{
+  static_assert(!kAtomic, "scalar LoggedValues are atomic: use set()/get()");
+  return MutablePtr<T>(&value_, *state_);
+}
+
+template <typename T>
+inline ConstPtr<T> LoggedValue<T>::getConstPtr() const
+{
+  static_assert(!kAtomic, "scalar LoggedValues are atomic: use set()/get()");
+  return ConstPtr<T>(&value_, *state_);
+}
 
 }  // namespace DataTamer
