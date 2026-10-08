@@ -35,10 +35,10 @@ under "Unreleased" in `data_tamer_cpp/CHANGELOG.rst`.
   - `include/data_tamer_parser/data_tamer_parser.hpp`: standalone C++ decoder, no
     dependency on the library.
   - `src/`: implementation; `src/sinks/` for MCAPSink, MCAPRingSink, ROS2PublisherSink.
-  - `tests/`: the gtest binary `datatamer_test`; `datatamer_fault_test`, the
-    allocation-failure tests, a program of its own because it replaces `operator new`;
-    `serialize_me_big_endian_test`, SerializeMe built as for a big endian host;
-    compile-only targets; compile-fail probes in `tests/compile_fail/`.
+  - `tests/`: the gtest binary `datatamer_test`; `serialize_me_big_endian_test`,
+    SerializeMe built as for a big endian host; compile-only targets; compile-fail
+    probes in `tests/compile_fail/`. Both gtest programs come from
+    `data_tamer_add_gtest()`.
   - `examples/`: T01 to T04, `mcap_1m_per_sec`, `mcap_reader`, `ros2_publisher` (ROS only).
   - `benchmarks/`: built only when Google Benchmark is found.
   - `3rdparty/`: vendored MCAP.
@@ -139,7 +139,7 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   everything that can throw runs first and `addSeries()` is the last change; the
   templates only collect custom types (`discoverTypes()`, which also checks that a
   type name belongs to one C++ type). `registration_fault_tests.cpp` fails each
-  allocation in turn. `poolExhausted()` relies on the pool being created before
+  allocation in turn (`AllocCounter::FailNth`). `poolExhausted()` relies on the pool being created before
   `logging_started` and never replaced.
 - A change to the schema text, the payload encoding, the schema hash or the MCAP and ROS
   message layout is a format revision. Update `docs/wire_format.md`, regenerate the
@@ -291,8 +291,9 @@ commit.
   or write into `tests/guarded_buffer.hpp`, which ends at an inaccessible page.
 - Code that must not compile gets a probe in `tests/compile_fail/` and a
   `data_tamer_compile_fail_test()` call in `tests/CMakeLists.txt`: the probe compiles as
-  written (the `_control` target), a `DT_` macro breaks it, and the test passes when that
-  build fails, with `REGEX` matched against the diagnostic. `parser_header_warnings`
+  written (the `_control` target), a `DT_` macro breaks it, and the test passes when the
+  build output matches the required `REGEX`, the diagnostic the user gets.
+  `parser_header_warnings`
   compiles the standalone parser as strict C++17 with `-Werror`.
 - Commits: short imperative subject, optionally prefixed by the component
   (`MCAPSink: roll over into new files by default`). The body says why, and what was
