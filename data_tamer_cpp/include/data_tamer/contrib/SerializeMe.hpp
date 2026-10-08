@@ -479,9 +479,21 @@ inline size_t BufferSize(const std::string& str)
 
 template <class T, size_t N,
           std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
-inline size_t BufferSize(const std::array<T, N>&)
+inline size_t BufferSize([[maybe_unused]] const std::array<T, N>& vect)
 {
-  return BufferSize(T{}) * N;
+  if constexpr(is_number<T>())
+  {
+    return sizeof(T) * N;
+  }
+  else
+  {
+    size_t total = 0;
+    for(const auto& v : vect)
+    {
+      total += BufferSize(v);
+    }
+    return total;
+  }
 }
 
 template <template <class, class> class Container, class T, class... TArgs,
