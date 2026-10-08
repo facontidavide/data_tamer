@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -204,6 +205,10 @@ struct LogChannel::Pimpl
   static constexpr size_t kMaxSinks = LogChannel::kMaxSinks;
   std::array<std::unique_ptr<SinkLink>, kMaxSinks> sinks;
   std::array<std::atomic<SinkLink*>, kMaxSinks> published_sinks{};
+  // Workers addDataSink() is announcing to with control_mutex released: another
+  // addDataSink() of one of them waits on `announced` (with control_mutex).
+  std::vector<const SinkWorker*> announcing;
+  std::condition_variable announced;
   std::atomic<uint64_t> epoch{ 0 };
 
   // Caller holds control_mutex (or owns the channel exclusively).
@@ -231,6 +236,12 @@ struct LogChannel::Pimpl
       }
     }
     return kMaxSinks;
+  }
+
+  // Caller holds control_mutex.
+  [[nodiscard]] bool isAnnouncing(const SinkWorker* worker) const
+  {
+    return std::find(announcing.begin(), announcing.end(), worker) != announcing.end();
   }
 
   // Gives sinks[i] its queue on the worker, as many entries as the pool has
@@ -469,6 +480,9 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
     throw std::invalid_argument("Can't add a null sink");
   }
   std::unique_lock lock(_p->control_mutex);
+  // One announcement per worker: a concurrent addDataSink() of the same worker
+  // waits for it, then finds the worker attached.
+  _p->announced.wait(lock, [&] { return !_p->isAnnouncing(sink.get()); });
   // Duplicate check and free slot; repeated after an unlocked announcement.
   const auto find_slot = [&]() -> std::optional<size_t> {
     if(_p->findLink(sink) != Pimpl::kMaxSinks)
@@ -490,6 +504,23 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
   auto link = std::make_unique<Pimpl::SinkLink>(sink);
   if(_p->schema_frozen)
   {
+    _p->announcing.push_back(sink.get());
+    // Ends the announcement on every path, with control_mutex held.
+    struct Announcing
+    {
+      ~Announcing()
+      {
+        if(!lock.owns_lock())
+        {
+          lock.lock();
+        }
+        p.announcing.erase(std::find(p.announcing.begin(), p.announcing.end(), worker));
+        p.announced.notify_all();
+      }
+      Pimpl& p;
+      std::unique_lock<std::mutex>& lock;
+      const SinkWorker* worker;
+    } announcing{ *_p, lock, sink.get() };
     // Same protocol as startLogging(): the sink hears a copy of the final schema
     // with the control mutex released, so it may query the channel. A failing
     // startLogging() can reopen the schema meanwhile and a registration change it:

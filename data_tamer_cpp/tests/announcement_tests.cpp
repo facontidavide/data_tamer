@@ -2,6 +2,7 @@
 // another thread attaches the same sink.
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
+#include "observed_thread.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -12,6 +13,7 @@
 #include <condition_variable>
 #include <future>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -150,3 +152,33 @@ TEST(Announcement, SinkAttachedDuringAFailedStartLoggingHearsTheFinalSchema)
     EXPECT_EQ(late->unknownSnapshots(), 0);
   }
 }
+
+#if defined(__linux__)
+// Two threads attach the same worker to a started channel at once: its sink hears
+// the schema once, one call attaches it and the other returns false.
+TEST(Announcement, ConcurrentAttachmentsOfOneWorkerAnnounceOnce)
+{
+  auto channel = LogChannel::create("announcement");
+  double a = 1;
+  channel->registerValue("a", &a);
+  channel->startLogging();
+  Gate gate;
+  auto sink = DataTamerTest::manual<AnnouncedSink>();
+  sink->gate = &gate;
+  std::atomic<int> attached{ 0 };
+  std::optional<DataTamerTest::ObservedThread> first, second;
+  first.emplace([&] { attached += channel->addDataSink(sink); });
+  ASSERT_TRUE(gate.waitEntered());  // the first announcement is under way
+  second.emplace([&] { attached += channel->addDataSink(sink); });
+  EXPECT_TRUE(second->sleeps());  // it waits for the first announcement
+  gate.release();
+  first.reset();
+  second.reset();
+  EXPECT_EQ(attached, 1);
+  EXPECT_EQ(sink->schemas().size(), 1u);
+  EXPECT_EQ(channel->getNumberOfSinks(), 1u);
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  EXPECT_EQ(sink->snapshots(), 1);
+}
+#endif
