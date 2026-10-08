@@ -117,6 +117,40 @@ foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
         $<$<BOOL:${DATA_TAMER_HAS_WMISMATCHED_TAGS}>:-Wmismatched-tags>)
 endforeach()
 
+# Compile-fail checks. A probe in tests/compile_fail/ compiles as written
+# (<stem>_control, part of the default build). The test defines a macro that breaks
+# the probe: <name>_fail is left out of the default build, and the test passes when
+# building it fails. Both variants share the flags, so the macro is the only cause.
+function(data_tamer_add_probe target source)
+    add_library(${target} OBJECT ${ARGN} compile_fail/${source})
+    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    target_compile_options(${target} PRIVATE
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>)
+endfunction()
+
+function(data_tamer_compile_fail_test name source definition)
+    get_filename_component(stem ${source} NAME_WE)
+    if(NOT TARGET ${stem}_control)
+        data_tamer_add_probe(${stem}_control ${source})
+    endif()
+    data_tamer_add_probe(${name}_fail ${source} EXCLUDE_FROM_ALL)
+    target_compile_definitions(${name}_fail PRIVATE ${definition})
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${name}_fail)
+    # The nested builds share one build directory: run them one at a time.
+    set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE
+        RESOURCE_LOCK data_tamer_compile_fail)
+endfunction()
+
+data_tamer_compile_fail_test(pool_try_acquire_result_is_nodiscard
+    snapshot_pool_nodiscard.cpp DT_IGNORE_TRY_ACQUIRE)
+data_tamer_compile_fail_test(pool_adopt_result_is_nodiscard
+    snapshot_pool_nodiscard.cpp DT_IGNORE_ADOPT)
+
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built
 # without optimization so that the calls are not inlined away, and is not

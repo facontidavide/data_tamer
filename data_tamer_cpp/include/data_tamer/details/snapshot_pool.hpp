@@ -47,7 +47,7 @@ public:
    * @brief Takes a free slot with one reference. Snapshot thread only; real-time safe.
    * @return the slot, or nullptr (counted in exhausted()) if every slot is in use.
    */
-  PoolSlot* tryAcquire()
+  [[nodiscard]] PoolSlot* tryAcquire()
   {
     for(size_t n = 0; n < capacity_; n++)
     {
@@ -68,7 +68,8 @@ public:
   }
 
   /// Wraps a reference already taken on `slot` in a SnapshotRef. Library internal.
-  static SnapshotRef adopt(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot)
+  [[nodiscard]] static SnapshotRef adopt(std::shared_ptr<SnapshotPool> pool,
+                                         PoolSlot* slot)
   {
     return SnapshotRef(std::move(pool), slot);
   }
