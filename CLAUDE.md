@@ -202,10 +202,11 @@ that major. That is frozen inside 2.x:
 
 - the exported symbols (name, signature, mangling), including the private back-end
   functions that inline templates call (`LogChannel::registerValueImpl`,
-  `registerValueWithTypes`,
-  `controlMutex`, `checkValueName`, `schemaFrozen`, `hasCustomType`, `addCustomType`,
-  `sharedState`, `TypesRegistry::findOrCreate` and `replace`) and the lock contract
-  between them;
+  `registerValueWithTypes`, `typeRegistry`, `controlMutex`, `checkValueName`,
+  `schemaFrozen`, `hasCustomType`, `addCustomType`, `sharedState`,
+  `TypesRegistry::findOrCreate` and `replace`) and the lock contract between them.
+  Nothing in the tree calls `addCustomType` any more: it stays for binaries built
+  against older headers, whose `registerValue` templates call it;
 - the size, alignment and member offsets of every type in `tests/abi_tests.cpp`:
   by-value structs (`ChannelDefaults`, `MCAPRingOptions`, `ROS2PublisherOptions`,
   `Snapshot`, `Schema`, ...), the classes whose inline code runs in consumers
