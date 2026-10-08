@@ -80,7 +80,7 @@ struct LogChannel::Pimpl
   std::shared_ptr<ChannelSharedState> shared = std::make_shared<ChannelSharedState>();
   std::atomic<uint64_t> write_lock_contended{ 0 };
   std::atomic<uint64_t> write_lock_wait_max_ns{ 0 };
-  ActiveMask active_mask;  // Snapshot-thread-owned, independent of retained slots.
+  ActiveMask active_mask;  // write mutex held; independent of retained slots
   size_t payload_capacity = 0;
   size_t pool_capacity = SnapshotPool::kDefaultCapacity;
   std::atomic<uint64_t> payload_reallocations{ 0 };
@@ -939,14 +939,6 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     return SnapshotResult::no_sinks;
   }
 
-  auto* slot = _p->pool->tryAcquire();  // counts exhaustion itself
-  if(!slot)
-  {
-    return SnapshotResult::pool_exhausted;
-  }
-  SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
-  auto& snapshot = slot->snapshot;
-
   // This thread holds the write mutex (scopedWrite() or a guard): it would wait for
   // itself.
   if(_p->shared->inTransactionOnThisThread())
@@ -971,7 +963,9 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   {
     blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
   }
-  std::unique_lock<WriteMutex> write_lock(write_mutex, std::adopt_lock);
+  // Held until the last push: producers, when several threads take snapshots, are
+  // serialized over the pool scan, the active mask and the single-producer queues.
+  std::lock_guard<WriteMutex> write_lock(write_mutex, std::adopt_lock);
   if(blocked)
   {
     _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
@@ -998,6 +992,14 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   {
     return SnapshotResult::no_sinks;  // removed while this call waited for the mutex
   }
+
+  auto* slot = _p->pool->tryAcquire();  // counts exhaustion itself
+  if(!slot)
+  {
+    return SnapshotResult::pool_exhausted;
+  }
+  SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
+  auto& snapshot = slot->snapshot;
 
   // Under the write mutex, so enable changes made inside a scopedWrite()
   // transaction are seen together with the values they belong to. A rebuilt
@@ -1027,8 +1029,6 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     }
   }
   snapshot.payload.resize(snapshot.payload.size() - payload_buffer.size());
-  write_lock.unlock();
-
   snapshot.active_mask = _p->active_mask;
   snapshot.schema_hash = _p->schema.hash;
   snapshot.timestamp = timestamp;

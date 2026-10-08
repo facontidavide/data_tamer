@@ -222,9 +222,9 @@ public:
   /**
    * @brief Serializes the enabled values and queues the snapshot on every sink.
    *
-   * Call it from one thread per channel. The first call with a sink attached calls
-   * startLogging(). It can block on a writer and allocate: on a real-time thread use
-   * tryTakeSnapshot().
+   * Several threads may take snapshots of one channel: they take turns on its write
+   * mutex. The first call with a sink attached calls startLogging(). It can block on a
+   * writer and allocate: on a real-time thread use tryTakeSnapshot().
    * @param timestamp time of the snapshot; by default the system clock.
    */
   [[nodiscard]] SnapshotResult
@@ -232,10 +232,10 @@ public:
 
   /**
    * @brief Lock-free takeSnapshot() for real-time threads: it never blocks or
-   * allocates. Where takeSnapshot() would wait or allocate, it returns `blocked`
-   * (a writer holds the mutex), `oversize` (the payload outgrew its slot) or
-   * `not_started` (call startLogging() before the loop). Serializers run on this
-   * path: they must not throw, allocate or block.
+   * allocates. Where takeSnapshot() would wait or allocate, it returns `blocked` (a
+   * writer or another snapshot holds the mutex), `oversize` (the payload outgrew its
+   * slot) or `not_started` (call startLogging() before the loop). Serializers run on
+   * this path: they must not throw, allocate or block.
    */
   [[nodiscard]] SnapshotResult
   tryTakeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());

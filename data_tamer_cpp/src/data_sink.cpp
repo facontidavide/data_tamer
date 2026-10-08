@@ -166,8 +166,9 @@ const Snapshot* SnapshotRef::operator->() const
 //---------------- SinkWorker ----------------
 
 /// Single-producer single-consumer ring of one channel on one worker. The
-/// producer is the channel's snapshot thread (tryPush), the consumer whoever
-/// holds store_mutex (the worker thread or drain()).
+/// producer is the thread taking a snapshot of the channel (tryPush), one at a time
+/// under the channel's write mutex; the consumer is whoever holds store_mutex (the
+/// worker thread or drain()).
 struct SinkWorker::Attachment
 {
   // One entry more than the pool: an empty entry tells a full ring from an

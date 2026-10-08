@@ -176,11 +176,12 @@ public:
     bool owns_ = false;
   };
 
-  /// Held by writers inside a transaction and by the snapshot thread while it serializes.
+  /// Held by writers inside a transaction, and by a snapshot from its pool slot to its
+  /// last push.
   WriteMutex write_mutex;
 
-  /// Set after every flag change; the snapshot thread clears it and rebuilds its active
-  /// mask. Keep every access seq_cst: it pairs with the channel's reader epoch.
+  /// Set after every flag change; a snapshot clears it and rebuilds the channel's
+  /// active mask. Keep every access seq_cst: it pairs with the channel's reader epoch.
   std::atomic<bool> mask_dirty{ true };
 
   /// Control thread only. Appends a registered, enabled series; returns its generation

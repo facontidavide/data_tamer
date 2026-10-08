@@ -41,7 +41,8 @@ set(DATATAMER_TEST_SOURCES
     visibility_tests.cpp
     worker_lifecycle_tests.cpp
     announcement_tests.cpp
-    rt_syscall_tests.cpp)
+    rt_syscall_tests.cpp
+    multi_producer_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)
