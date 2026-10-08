@@ -491,12 +491,17 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
   if(_p->schema_frozen)
   {
     // Same protocol as startLogging(): the sink hears a copy of the final schema
-    // with the control mutex released, so it may query the channel.
-    const Schema schema = _p->schema;
-    lock.unlock();
-    sink->addSchema(schema);
-    lock.lock();
-    link->schema_registered = true;
+    // with the control mutex released, so it may query the channel. A failing
+    // startLogging() can reopen the schema meanwhile and a registration change it:
+    // the sink hears it again once it is frozen, else startLogging() announces it.
+    do
+    {
+      const Schema schema = _p->schema;
+      lock.unlock();
+      sink->addSchema(schema);
+      lock.lock();
+      link->schema_registered = _p->schema.hash == schema.hash;
+    } while(!link->schema_registered && _p->schema_frozen);
     free_slot = find_slot();
     if(!free_slot)
     {
