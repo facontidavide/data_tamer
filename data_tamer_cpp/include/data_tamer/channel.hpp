@@ -579,7 +579,11 @@ inline RegistrationID LogChannel::registerValue(const std::string& prefix,
     PendingTypes types;
     discoverTypes<T>(types);
     auto def = typeRegistry().getSerializer<T>();
-    return registerValueWithTypes(prefix, ValuePtr(vect, def), def, std::move(types));
+    // A fixed-size element is serialized like a vector's, with no virtual call per
+    // element (SerializeMe sizes exactly). A variable-size one keeps its serializer,
+    // which tells ValuePtr::isFixedSize(), and so startLogging(), that it can grow.
+    auto value = def->isFixedSize() ? ValuePtr(vect) : ValuePtr(vect, def);
+    return registerValueWithTypes(prefix, std::move(value), def, std::move(types));
   }
 }
 

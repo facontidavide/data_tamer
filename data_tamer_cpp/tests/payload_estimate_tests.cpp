@@ -26,6 +26,17 @@ std::string_view TypeDefinition(Padded& item, AddField& add)
   add("value", &item.value);
   return "Padded";
 }
+
+// Keeps a reference to the last snapshot, so its pool slot can be inspected.
+class RetainingSink : public DataSink
+{
+public:
+  SnapshotRef last;
+
+protected:
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef& snapshot) override { last = snapshot.clone(); }
+};
 }  // namespace
 
 // A payload that fits the slot is not `oversize`: the size the channel computes for a
@@ -65,4 +76,33 @@ TEST(PayloadEstimate, VectorOfStructsIsWrittenWithoutPadding)
   expected[13] = 'y';
   std::memcpy(&expected[14], &second, sizeof(second));
   EXPECT_EQ(std::vector<uint8_t>(expected.begin(), expected.end()), recording.payload());
+}
+
+// A std::array of fixed-size structs is serialized like a vector's: a channel of
+// fixed-size values reserves exactly the bytes written, 9 per item, and those are the
+// format's, with no count and no padding.
+TEST(PayloadEstimate, ArrayOfPaddedStructsFitsASlotOfExactlyItsSize)
+{
+  auto channel = LogChannel::create("estimate");
+  auto sink = DataTamerTest::manual<RetainingSink>();
+  channel->addDataSink(sink);
+  std::array<Padded, 2> items = { Padded{ 'x', 1.5 }, Padded{ 'y', -2.0 } };
+  channel->registerValue("items", &items);
+  channel->startLogging();
+
+  ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+  ASSERT_TRUE(sink->last);
+  const auto& payload = sink->last->payload;
+  EXPECT_EQ(payload.capacity(), 2u * 9);
+
+  const double first = 1.5;
+  const double second = -2.0;
+  std::array<uint8_t, 9 + 9> expected = {};
+  expected[0] = 'x';
+  std::memcpy(&expected[1], &first, sizeof(first));
+  expected[9] = 'y';
+  std::memcpy(&expected[10], &second, sizeof(second));
+  EXPECT_EQ(std::vector<uint8_t>(expected.begin(), expected.end()), payload);
+  sink->last.reset();
 }
