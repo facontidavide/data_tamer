@@ -202,6 +202,29 @@ TEST(ParserRobustness, MinimumSizeOfNestedArraysSaturatesInsteadOfWrapping)
             detail::kHugeSize);
 }
 
+TEST(ParserRobustness, NamesBeyondTheSmallStringBufferAreJoinedWhole)
+{
+  // long names, top-level and nested, so that every name is built on the heap
+  const auto schema =
+      BuildSchemaFromText(kHeader + "float64 robot/leg_front_left/knee_joint/state\n" +
+                          "Pose robot/base_link/estimated_pose\nPose[2] "
+                          "robot/waypoints/planned_path\n" +
+                          kSeparator + "\nMSG: Pose\nfloat64 x\nfloat64 y\n");
+  const std::vector<uint8_t> mask = { 0b111 };
+  const std::vector<uint8_t> payload(7 * sizeof(double));  // 1 value, then 2 and 4 more
+  std::vector<std::string> names;
+  EXPECT_TRUE(ParseSnapshot(
+      schema, viewOf(mask, payload),
+      [&](const std::string& name, const VarNumber&) { names.push_back(name); }));
+  EXPECT_EQ(names, (std::vector<std::string>{ "robot/leg_front_left/knee_joint/state",
+                                              "robot/base_link/estimated_pose/x",
+                                              "robot/base_link/estimated_pose/y",
+                                              "robot/waypoints/planned_path[0]/x",
+                                              "robot/waypoints/planned_path[0]/y",
+                                              "robot/waypoints/planned_path[1]/x",
+                                              "robot/waypoints/planned_path[1]/y" }));
+}
+
 // Schema text: headers and empty input
 
 TEST(ParserRobustness, EmptyTextIsRejected)

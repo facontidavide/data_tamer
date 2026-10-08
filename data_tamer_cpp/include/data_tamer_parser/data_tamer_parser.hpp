@@ -1240,8 +1240,15 @@ void ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
     }
   }
 
-  auto new_prefix =
-      (prefix.empty()) ? field.field_name : (prefix + "/" + field.field_name);
+  // A top-level field is named as it is, without a copy; a nested one is appended to the
+  // name of its parent.
+  std::string joined;
+  if(!prefix.empty())
+  {
+    joined.reserve(prefix.size() + 1 + field.field_name.size());
+    joined.append(prefix).append(1, '/').append(field.field_name);
+  }
+  const std::string& new_prefix = prefix.empty() ? field.field_name : joined;
 
   auto doParse = [&](const std::string& var_name) {
     if(field.type != BasicType::OTHER)
@@ -1289,6 +1296,7 @@ template <typename NumberCallback>
   }
   BufferSpan buffer = snapshot.payload;
   detail::MinSizes min_sizes;
+  const std::string no_prefix;  // one for all top-level fields: "" would build one each
   if(snapshot.active_mask.size * 8 < schema.fields.size())
   {
     throw std::runtime_error("DataTamerParser: active mask shorter than the schema");
@@ -1299,7 +1307,7 @@ template <typename NumberCallback>
     const auto& field = schema.fields[i];
     if(GetBit(snapshot.active_mask, i))
     {
-      detail::ParseSnapshotRecursive(field, schema, buffer, callback_number, "",
+      detail::ParseSnapshotRecursive(field, schema, buffer, callback_number, no_prefix,
                                      min_sizes);
     }
   }
