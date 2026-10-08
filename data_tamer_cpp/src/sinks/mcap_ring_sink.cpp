@@ -349,6 +349,7 @@ void MCAPRingSink::Pimpl::writerLoop()
     lock.unlock();
     writeDump(job);
     lock.lock();
+    ++(job.ok ? dumps_written : dumps_failed);  // before the callback reads stats()
     // The callback runs without writer_mutex, so it may call stats() and
     // requestDump(); writer_busy stays true until it returns.
     std::function<void(const MCAPRingDump&)> notify;
@@ -371,7 +372,6 @@ void MCAPRingSink::Pimpl::writerLoop()
       }
     }
     lock.lock();
-    ++(job.ok ? dumps_written : dumps_failed);
     writer_busy = false;
     writer_cv.notify_all();
   }
