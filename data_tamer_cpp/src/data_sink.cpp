@@ -270,11 +270,17 @@ struct SinkWorker::Pimpl
     DelivererMark mark;
   };
 
+  // True on the thread that runs this worker's callbacks right now: only the
+  // deliverer itself can read its own id here.
+  [[nodiscard]] bool isDeliverer() const
+  {
+    return deliverer.load(std::memory_order_relaxed) == std::this_thread::get_id();
+  }
+
   // stop(), start() and drain() called from a callback would wait for that callback.
-  // Only the deliverer itself can read its own id here.
   void throwIfDeliverer(const char* function) const
   {
-    if(deliverer.load(std::memory_order_relaxed) == std::this_thread::get_id())
+    if(isDeliverer())
     {
       throw std::logic_error(std::string("SinkWorker::") + function +
                              " called from a callback of its own sink");
@@ -453,6 +459,33 @@ struct SinkWorker::Pimpl
     }
   }
 
+  // stop() past its checks; the caller holds lifecycle_mutex.
+  void stopDelivery()
+  {
+    admission.fetch_or(kClosed, std::memory_order_acq_rel);
+    // Wait until every admitted push has finished: block on the counter instead
+    // of spinning; a release made after the close notifies.
+    for(auto state = admission.load(std::memory_order_acquire); (state & ~kClosed) != 0;
+        state = admission.load(std::memory_order_acquire))
+    {
+      admission.wait(state, std::memory_order_acquire);
+    }
+    joinThread();
+    drainQueues();
+    finishSink();
+  }
+
+  // drain() past its check.
+  void drainQueues()
+  {
+    StoreLock lock(*this);
+    // A complete pass ends with a round that found every queue empty, so what
+    // was pushed before the call has been delivered.
+    while(!deliverPass().complete)
+    {
+    }
+  }
+
   // First member, destroyed last: after the thread and every queued snapshot.
   std::unique_ptr<DataSink> sink;
   // Worker side: written by whoever delivers.
@@ -500,7 +533,29 @@ SinkWorker::SinkWorker(std::unique_ptr<DataSink> sink, Delivery delivery)
 
 SinkWorker::~SinkWorker()
 {
-  stop();
+  if(!_p->isDeliverer())
+  {
+    stop();
+    return;
+  }
+  // The last reference was dropped inside a callback of the sink, which stop() would
+  // wait for. A thread of its own finishes the stop once the callback has returned,
+  // then frees the state and the sink.
+  Pimpl* p = _p.release();
+  try
+  {
+    std::thread([p] {
+      {
+        std::lock_guard lifecycle(p->lifecycle_mutex);
+        p->stopDelivery();
+      }
+      delete p;
+    }).detach();
+  }
+  catch(...)
+  {
+    // No thread could be started: keep the state allocated rather than deadlock.
+  }
 }
 
 DataSink& SinkWorker::sink()
@@ -568,49 +623,37 @@ void SinkWorker::addSchema(const Schema& schema)
 
 void SinkWorker::stop()
 {
-  _p->throwIfDeliverer("stop()");
-  std::lock_guard lifecycle(_p->lifecycle_mutex);
-  _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
-  // Wait until every admitted push has finished: block on the counter instead
-  // of spinning; a release made after the close notifies.
-  for(auto state = _p->admission.load(std::memory_order_acquire); (state & ~kClosed) != 0;
-      state = _p->admission.load(std::memory_order_acquire))
-  {
-    _p->admission.wait(state, std::memory_order_acquire);
-  }
-  _p->joinThread();
-  drain();
-  _p->finishSink();
+  auto& p = *_p;  // a callback may destroy this worker meanwhile: see ~SinkWorker()
+  p.throwIfDeliverer("stop()");
+  std::lock_guard lifecycle(p.lifecycle_mutex);
+  p.stopDelivery();
 }
 
 void SinkWorker::start()
 {
-  _p->throwIfDeliverer("start()");
-  std::lock_guard lifecycle(_p->lifecycle_mutex);
+  auto& p = *_p;  // see stop()
+  p.throwIfDeliverer("start()");
+  std::lock_guard lifecycle(p.lifecycle_mutex);
   {
-    Pimpl::StoreLock lock(*_p);
-    if(!_p->sink_running)
+    Pimpl::StoreLock lock(p);
+    if(!p.sink_running)
     {
-      _p->sink_running = true;  // the next stop() calls onStop() again
-      _p->guarded([this] { _p->sink->onStart(); });
+      p.sink_running = true;  // the next stop() calls onStop() again
+      p.guarded([&p] { p.sink->onStart(); });
     }
   }
-  if(_p->delivery == Delivery::Threaded && !_p->thread.joinable())
+  if(p.delivery == Delivery::Threaded && !p.thread.joinable())
   {
-    _p->startThread();
+    p.startThread();
   }
-  _p->admission.fetch_and(~kClosed, std::memory_order_release);
+  p.admission.fetch_and(~kClosed, std::memory_order_release);
 }
 
 void SinkWorker::drain()
 {
-  _p->throwIfDeliverer("drain()");
-  Pimpl::StoreLock lock(*_p);
-  // A complete pass ends with a round that found every queue empty, so what
-  // was pushed before the call has been delivered.
-  while(!_p->deliverPass().complete)
-  {
-  }
+  auto& p = *_p;  // see stop()
+  p.throwIfDeliverer("drain()");
+  p.drainQueues();
 }
 
 uint64_t SinkWorker::delivered() const

@@ -154,9 +154,12 @@ public:
   /// Stop accepting snapshots, wait for the callback in progress, deliver everything
   /// still queued, then call the sink's onStop() on this thread (MCAPSink closes its
   /// file, MCAPRingSink writes a pending dump, ROS2PublisherSink publishes its partial
-  /// batch). A second stop() before start() does nothing. The destructor calls it.
-  /// Throws std::logic_error, changing nothing, when called from a callback of this
-  /// worker's sink. Calls to stop() and start() from several threads are serialized.
+  /// batch). A second stop() before start() does nothing. The destructor calls it, or,
+  /// when it runs inside a callback of this worker's sink (the last reference dropped
+  /// there), leaves the stop to a thread of its own that runs once the callback has
+  /// returned. Throws std::logic_error, changing nothing, when called from a callback
+  /// of this worker's sink. Calls to stop() and start() from several threads are
+  /// serialized.
   void stop();
   /// Resume after stop(): call the sink's onStart() on this thread (MCAPSink opens its
   /// next numbered file), restart the worker thread and accept snapshots again. Does

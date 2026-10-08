@@ -118,6 +118,46 @@ protected:
   void onStart() override { ++starts; }
 };
 
+/// What a QueryingSink saw; outlives the sink.
+struct QueryJournal
+{
+  std::atomic<bool> holding{ false };   // a callback holds the channel
+  std::atomic<bool> released{ false };  // the test let it go on
+  std::atomic<int> stops{ 0 };
+  std::atomic<bool> destroyed{ false };
+};
+
+/// Queries its channel from onSnapshot() through a weak_ptr (a const query, allowed
+/// from a callback), and waits there until the test has dropped its own reference.
+class QueryingSink : public DataSink
+{
+public:
+  QueryingSink(std::weak_ptr<LogChannel> channel, std::shared_ptr<QueryJournal> journal)
+    : channel_(std::move(channel)), journal_(std::move(journal))
+  {}
+  ~QueryingSink() override { journal_->destroyed = true; }
+
+protected:
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef&) override
+  {
+    if(auto channel = channel_.lock())
+    {
+      (void)channel->getSchema();
+      journal_->holding = true;
+      while(!journal_->released)
+      {
+        std::this_thread::yield();
+      }
+    }  // the last reference to the channel, and so to this worker, can end here
+  }
+  void onStop() override { ++journal_->stops; }
+
+private:
+  std::weak_ptr<LogChannel> channel_;
+  std::shared_ptr<QueryJournal> journal_;
+};
+
 /// Runs `function` on two threads released together; returns how many calls threw.
 int runTwiceAtOnce(const std::function<void()>& function)
 {
@@ -236,5 +276,26 @@ TEST(WorkerLifecycle, ConcurrentLifecycleCallsOnOneWorker)
       worker.start();
       ASSERT_EQ(sink->stops, sink->starts);
     }
+  });
+}
+
+// The last reference to a worker released by its own callback: the channel, which
+// owned the worker, is destroyed on the worker thread. The worker still finishes:
+// onStop() runs once and the sink is destroyed.
+TEST(WorkerLifecycle, WorkerReleasedByItsOwnCallbackFinishesTheSink)
+{
+  expectFinishes([] {
+    auto journal = std::make_shared<QueryJournal>();
+    auto channel = LogChannel::create("released_by_callback");
+    double value = 1;
+    channel->registerValue("value", &value);
+    channel->addDataSink(  // the channel holds the only reference to the worker
+        std::make_shared<SinkWorker>(std::make_unique<QueryingSink>(channel, journal)));
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    ASSERT_TRUE(waitFor([&] { return journal->holding.load(); }));
+    channel.reset();
+    journal->released = true;
+    EXPECT_TRUE(waitFor([&] { return journal->destroyed.load(); }));
+    EXPECT_EQ(journal->stops, 1);
   });
 }
