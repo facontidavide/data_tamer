@@ -434,39 +434,25 @@ void LogChannel::discoverTypesImpl(PendingTypes& types, FieldsVector& fields,
                                    const char* field_name)
 {
   using SerializeMe::container_info;
+  // A container member is described by its element type ("float64[3] axis", "Pose[]
+  // poses"); any other member's value_type is its own type.
+  using Type = typename container_info<T>::value_type;
   TypeField field;
   field.field_name = field_name;
-
   if constexpr(container_info<T>::is_container)
   {
-    // A container member is described by its element type: "float64[3] axis",
-    // "Pose[] poses".
-    using Type = typename container_info<T>::value_type;
     field.is_vector = true;
     field.array_size = container_info<T>::size;
-    field.type = GetBasicType<Type>();
-    if constexpr(GetBasicType<Type>() == BasicType::OTHER)
-    {
-      field.type_name = CustomTypeName<Type>::get();
-      discoverTypes<Type>(types);
-    }
-    else
-    {
-      field.type_name = ToStr(field.type);
-    }
+  }
+  field.type = GetBasicType<Type>();
+  if constexpr(GetBasicType<Type>() == BasicType::OTHER)
+  {
+    field.type_name = CustomTypeName<Type>::get();
+    discoverTypes<Type>(types);
   }
   else
   {
-    field.type = GetBasicType<T>();
-    if constexpr(GetBasicType<T>() == BasicType::OTHER)
-    {
-      field.type_name = CustomTypeName<T>::get();
-      discoverTypes<T>(types);
-    }
-    else
-    {
-      field.type_name = ToStr(field.type);
-    }
+    field.type_name = ToStr(field.type);
   }
   fields.push_back(field);
 }
