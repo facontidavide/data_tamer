@@ -1,9 +1,9 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/names.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
-#include "data_tamer_parser/data_tamer_parser.hpp"
 
 #include "../examples/geometry_types.hpp"
+#include "decode_utils.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -432,24 +432,13 @@ TEST(Names, FlattenedNamesHaveNoEmptyComponents)
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
 
-  const auto schema = DataTamerParser::BuildSchemaFromText(ToStr(channel->getSchema()));
-  const auto snapshot = sink->latestSnapshot();
-  const DataTamerParser::SnapshotView view{
-    snapshot.schema_hash,
-    0,
-    { snapshot.active_mask.data(), snapshot.active_mask.size() },
-    { snapshot.payload.data(), snapshot.payload.size() }
-  };
-  std::vector<std::string> names;
-  ASSERT_TRUE(DataTamerParser::ParseSnapshot(
-      schema, view, [&](const std::string& name, const DataTamerParser::VarNumber&) {
-        names.push_back(name);
-      }));
-  ASSERT_EQ(names.size(), 7u);
-  EXPECT_EQ(names.front(), "robot/points[0]/x");
-  EXPECT_EQ(names.back(), "robot/nested/a/b");
-  for(const auto& name : names)
+  const auto values = DataTamerTest::decode(*channel, sink->latestSnapshot());
+  ASSERT_EQ(values.size(), 7u);
+  EXPECT_EQ(values.count("robot/points[0]/x"), 1u);
+  EXPECT_EQ(values.count("robot/nested/a/b"), 1u);
+  for(const auto& entry : values)
   {
+    const std::string& name = entry.first;
     EXPECT_EQ(name.find("//"), std::string::npos) << name;
     EXPECT_NE(name.front(), '/') << name;
     EXPECT_NE(name.back(), '/') << name;

@@ -3,9 +3,9 @@
 // or leave the channel as it was, and the channel must go on working.
 #include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
-#include "data_tamer_parser/data_tamer_parser.hpp"
 
 #include "alloc_counter.hpp"
+#include "decode_utils.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -14,11 +14,11 @@
 #include <atomic>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <new>
 #include <optional>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 using namespace DataTamer;
@@ -100,12 +100,6 @@ Outer g_outer{ Inner{ 1.0 }, { Inner{ 2.0 }, Inner{ 3.0 } } };
 Blob g_blob;
 const auto g_blob_serializer = std::make_shared<BlobSerializer>();
 
-struct Field
-{
-  std::string name;
-  double value;
-};
-
 // What a registration returns, kept outside the code that fails allocations.
 struct Target
 {
@@ -122,8 +116,8 @@ struct Scenario
 {
   std::string label;
   std::function<void(LogChannel&, Target&)> register_target;
-  size_t target_bytes;         // what the target adds to the payload
-  std::vector<Field> decoded;  // what a decoder reads back (empty: not decodable)
+  size_t target_bytes;                    // what the target adds to the payload
+  std::map<std::string, double> decoded;  // what a decoder reads back (empty: none)
 };
 
 std::vector<Scenario> scenarios()
@@ -193,31 +187,12 @@ void ExpectChannelWorks(LogChannel& channel, const Scenario& scenario,
     return;
   }
 
-  std::vector<Field> expected;
+  auto expected = scenario.decoded;
   for(size_t i = 0; i < existing_count; ++i)
   {
-    expected.push_back({ "existing/" + std::to_string(i), double(i) });
+    expected["existing/" + std::to_string(i)] = double(i);
   }
-  expected.insert(expected.end(), scenario.decoded.begin(), scenario.decoded.end());
-
-  const auto parsed = DataTamerParser::BuildSchemaFromText(ToStr(schema));
-  const DataTamerParser::SnapshotView view{
-    snapshot.schema_hash,
-    0,
-    { snapshot.active_mask.data(), snapshot.active_mask.size() },
-    { snapshot.payload.data(), snapshot.payload.size() }
-  };
-  std::vector<Field> actual;
-  ASSERT_TRUE(DataTamerParser::ParseSnapshot(
-      parsed, view, [&](const std::string& name, const DataTamerParser::VarNumber& v) {
-        actual.push_back({ name, std::visit([](auto x) { return double(x); }, v) });
-      }));
-  ASSERT_EQ(actual.size(), expected.size());
-  for(size_t i = 0; i < expected.size(); ++i)
-  {
-    EXPECT_EQ(actual[i].name, expected[i].name);
-    EXPECT_EQ(actual[i].value, expected[i].value);
-  }
+  EXPECT_EQ(DataTamerTest::decode(channel, snapshot), expected);
 }
 
 // Fails the nth allocation of one registration, for n = 1, 2, ... until the

@@ -2,7 +2,7 @@
 #include "data_tamer/contrib/SerializeMe.hpp"
 #include "data_tamer/custom_types.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
-#include "data_tamer_parser/data_tamer_parser.hpp"
+#include "decode_utils.hpp"
 #include "guarded_buffer.hpp"
 #include "test_sinks.hpp"
 
@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <map>
 #include <string>
-#include <variant>
 #include <vector>
 
 // The schema describes a std::string as `char[]`: a uint32 count and that many chars
@@ -31,32 +30,6 @@ std::string_view TypeDefinition(Named& p, AddField& add)
   add("name", &p.name);
   return "Named";
 }
-
-std::vector<uint8_t> payloadOf(const DataTamer::Snapshot& snapshot)
-{
-  return { snapshot.payload.begin(), snapshot.payload.end() };
-}
-
-// What the standalone parser makes of the snapshot, with the schema the channel wrote.
-std::map<std::string, double> decode(const DataTamer::LogChannel& channel,
-                                     const DataTamer::Snapshot& snapshot)
-{
-  const auto schema =
-      DataTamerParser::BuildSchemaFromText(DataTamer::ToStr(channel.getSchema()));
-  const DataTamerParser::SnapshotView view{
-    snapshot.schema_hash,
-    uint64_t(snapshot.timestamp.count()),
-    { snapshot.active_mask.data(), snapshot.active_mask.size() },
-    { snapshot.payload.data(), snapshot.payload.size() }
-  };
-  std::map<std::string, double> values;
-  const bool complete = DataTamerParser::ParseSnapshot(
-      schema, view, [&](const std::string& name, const DataTamerParser::VarNumber& v) {
-        values[name] = std::visit([](const auto& x) { return double(x); }, v);
-      });
-  EXPECT_TRUE(complete) << "bytes are left after the last field";
-  return values;
-}
 }  // namespace
 
 TEST(StringEncoding, StringMemberIsSerializedAsACharVector)
@@ -71,15 +44,13 @@ TEST(StringEncoding, StringMemberIsSerializedAsACharVector)
   sink.drain();
 
   const auto snapshot = sink->latestSnapshot();
-  EXPECT_EQ(payloadOf(snapshot), (std::vector<uint8_t>{ 1, 3, 0, 0, 0, 'a', 'b', 'c' }));
+  EXPECT_EQ(snapshot.payload, (std::vector<uint8_t>{ 1, 3, 0, 0, 0, 'a', 'b', 'c' }));
   EXPECT_NE(DataTamer::ToStr(channel->getSchema()).find("char[] name\n"),
             std::string::npos);
-  EXPECT_EQ(decode(*channel, snapshot), (std::map<std::string, double>{
-                                            { "n/tag", 1 },
-                                            { "n/name[0]", 'a' },
-                                            { "n/name[1]", 'b' },
-                                            { "n/name[2]", 'c' },
-                                        }));
+  const std::map<std::string, double> expected = {
+    { "n/tag", 1 }, { "n/name[0]", 'a' }, { "n/name[1]", 'b' }, { "n/name[2]", 'c' }
+  };
+  EXPECT_EQ(DataTamerTest::decode(*channel, snapshot), expected);
 }
 
 TEST(StringEncoding, RegisteredStringIsSerializedAsACharVector)
@@ -92,7 +63,7 @@ TEST(StringEncoding, RegisteredStringIsSerializedAsACharVector)
   ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
   sink.drain();
 
-  EXPECT_EQ(payloadOf(sink->latestSnapshot()),
+  EXPECT_EQ(sink->latestSnapshot().payload,
             (std::vector<uint8_t>{ 3, 0, 0, 0, 'a', 'b', 'c' }));
 }
 
