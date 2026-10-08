@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -96,6 +97,21 @@ TYPED_TEST(IntegralWireType, HasTheSizeAndSignednessOfTheCppType)
   ASSERT_NE(ToStr(type), "other");
   EXPECT_EQ(SizeOf(type), sizeof(TypeParam));
   EXPECT_EQ(ToStr(type).rfind("uint", 0) == 0, std::is_unsigned_v<TypeParam>);
+}
+
+// What registerValue() takes as a number; containers and custom types have their own
+// overloads.
+TEST(BasicTypes, NumbersAreArithmeticTypesAndEnums)
+{
+  EXPECT_TRUE(IsNumericType<bool>());
+  EXPECT_TRUE(IsNumericType<char>());
+  EXPECT_TRUE(IsNumericType<double>());
+  EXPECT_TRUE(IsNumericType<long long>());
+  EXPECT_TRUE(IsNumericType<WideSigned>());
+  EXPECT_FALSE(IsNumericType<std::string>());
+  EXPECT_FALSE(IsNumericType<Counters>());
+  EXPECT_FALSE(IsNumericType<std::vector<double>>());
+  EXPECT_FALSE(IsNumericType<double*>());
 }
 
 TEST(BasicTypes, EnumsFollowTheirUnderlyingType)

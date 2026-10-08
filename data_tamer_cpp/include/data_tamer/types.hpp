@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <string>
@@ -124,8 +126,7 @@ inline constexpr BasicType GetBasicType()
 template <typename T>
 inline constexpr bool IsNumericType()
 {
-  return std::is_arithmetic_v<T> || std::is_same_v<T, bool> || std::is_same_v<T, char> ||
-         std::is_enum_v<T>;
+  return std::is_arithmetic_v<T> || std::is_enum_v<T>;
 }
 
 class LogChannel;
@@ -171,7 +172,7 @@ struct TypeField
   std::string field_name;
   BasicType type = BasicType::OTHER;
   std::string type_name;
-  bool is_vector = 0;
+  bool is_vector = false;
   uint32_t array_size = 0;
 
   bool operator==(const TypeField& other) const;

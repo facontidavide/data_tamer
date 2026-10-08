@@ -1,10 +1,16 @@
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 #include <typeindex>
+#include <utility>
 
 #include "data_tamer/custom_types.hpp"
+#include "data_tamer/types.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
 
 namespace DataTamer

@@ -1,9 +1,15 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
 #include <typeinfo>
+#include <utility>
 
 #include "data_tamer/types.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
@@ -174,9 +180,6 @@ struct CustomTypeName<
 {
   static std::string_view get() { return CustomTypeName<T>::get(); }
 };
-
-template <class C, typename T>
-T getPointerType(T C::*v);
 
 // Adds the serialized size of T to fixed_size, and clears is_fixed_size if T contains a
 // vector. Used by the CustomSerializerT constructor.
