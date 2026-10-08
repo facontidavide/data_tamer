@@ -3,6 +3,7 @@
 
 #include "alloc_counter.hpp"
 #include "gate.hpp"
+#include "paused_serializer.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -15,13 +16,11 @@
 
 using namespace DataTamer;
 using DataTamerTest::Attached;
+using DataTamerTest::CustomValue;
+using DataTamerTest::PausedSerializer;
 
 namespace
 {
-struct CustomValue
-{
-  uint64_t value = 42;
-};
 struct RegisteredCustom
 {
   uint64_t value = 42;
@@ -44,53 +43,6 @@ std::string_view TypeDefinition(RejectedCustom& value, AddField& add)
 }
 
 using DataTamerTest::Gate;
-
-class PausedSerializer : public CustomSerializer
-{
-public:
-  mutable Gate* gate = nullptr;
-  bool throw_size = false;
-  bool throw_serialize = false;
-  bool throw_schema = false;
-  mutable size_t size_calls = 0;
-  std::optional<CustomSchema> typeSchema() const override
-  {
-    if(throw_schema)
-    {
-      throw std::runtime_error("schema");
-    }
-    return std::nullopt;
-  }
-  const std::string& typeName() const override
-  {
-    static const std::string name = "CustomValue";
-    return name;
-  }
-  bool isFixedSize() const override { return true; }
-  size_t serializedSize(const void*) const override
-  {
-    ++size_calls;
-    if(gate)
-    {
-      gate->pause();
-    }
-    if(throw_size)
-    {
-      throw std::runtime_error("size");
-    }
-    return 8;
-  }
-  void serialize(const void* source, SerializeMe::SpanBytes& bytes) const override
-  {
-    if(throw_serialize)
-    {
-      throw std::runtime_error("serialize");
-    }
-    const auto value = static_cast<const CustomValue*>(source)->value;
-    std::memcpy(bytes.data(), &value, 8);
-    bytes.trimFront(8);
-  }
-};
 
 class ControlSink : public DataSink
 {
