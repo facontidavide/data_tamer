@@ -519,11 +519,18 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest)
     {
       throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
     }
-    std::memcpy(&dest, buffer.data(), S);  // buffer.data() may be misaligned for T
+    if constexpr(std::is_same_v<T, bool>)
+    {
+      dest = buffer.data()[0] != 0;  // another byte value is not a valid bool
+    }
+    else
+    {
+      std::memcpy(&dest, buffer.data(), S);  // buffer.data() may be misaligned for T
 
 #if SERIALIZE_LITTLEENDIAN == 0
-    dest = EndianSwap<T>(dest);
+      dest = EndianSwap<T>(dest);
 #endif
+    }
     buffer = SpanBytesConst(buffer.data() + S, buffer.size() - S);  // NOLINT
   }
   else
@@ -560,7 +567,7 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, std::array<T, N>& dest
     throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
   }
 
-  if constexpr(sizeof(T) == 1)
+  if constexpr(sizeof(T) == 1 && !std::is_same_v<T, bool>)
   {
     memcpy(dest.data(), buffer.data(), N);
     buffer.trimFront(N);

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -88,4 +89,40 @@ TEST(SerializeMeBounds, ByteEnumArrayFillsAnExactlySizedBuffer)
   EXPECT_EQ(out.size(), 0u);
   EXPECT_EQ(std::vector<uint8_t>(buffer.data(), buffer.data() + 8),
             std::vector<uint8_t>(8, 1));
+}
+
+namespace
+{
+// The byte a bool object holds; reading it through memcpy is valid for any value.
+uint8_t representation(const bool& value)
+{
+  uint8_t raw = 0;
+  std::memcpy(&raw, &value, 1);
+  return raw;
+}
+}  // namespace
+
+// A byte other than 0 or 1 must not turn into a bool object that is neither.
+
+TEST(SerializeMeCorruptInput, BoolReadFromANonZeroByteIsTrue)
+{
+  for(const uint8_t byte : { 0, 1, 2, 0x80, 0xff })
+  {
+    const std::vector<uint8_t> bytes{ byte };
+    SpanBytesConst in(bytes);
+    bool value = false;
+    DeserializeFromBuffer(in, value);
+    EXPECT_EQ(representation(value), byte == 0 ? 0 : 1) << "byte " << int(byte);
+  }
+}
+
+TEST(SerializeMeCorruptInput, BoolArrayElementsAreValidBools)
+{
+  const std::vector<uint8_t> bytes{ 2, 0, 1, 0xff };
+  SpanBytesConst in(bytes);
+  std::array<bool, 4> values{};
+  DeserializeFromBuffer(in, values);
+  const std::vector<uint8_t> raw{ representation(values[0]), representation(values[1]),
+                                  representation(values[2]), representation(values[3]) };
+  EXPECT_EQ(raw, (std::vector<uint8_t>{ 1, 0, 1, 1 }));
 }
