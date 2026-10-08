@@ -37,7 +37,8 @@ set(DATATAMER_TEST_SOURCES
     wire_format_tests.cpp
     name_tests.cpp
     registry_limit_tests.cpp
-    lock_order_tests.cpp)
+    lock_order_tests.cpp
+    visibility_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)
@@ -92,6 +93,21 @@ target_compile_features(datatamer_fault_test PRIVATE cxx_std_20)
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
     DATA_TAMER_WIRE_FORMAT_DIR="${PROJECT_SOURCE_DIR}/../docs/wire_format")
+
+# A consumer compiled with -fvisibility=hidden, loaded by visibility_tests.cpp. It can
+# only share the library's state when libdata_tamer is a shared library (always under
+# ROS 2, BUILD_SHARED_LIBS=ON otherwise); without it the test skips.
+get_target_property(DATA_TAMER_LIBRARY_TYPE data_tamer TYPE)
+if(UNIX AND DATA_TAMER_LIBRARY_TYPE STREQUAL "SHARED_LIBRARY")
+    add_library(hidden_visibility_consumer MODULE hidden_visibility_consumer.cpp)
+    set_target_properties(hidden_visibility_consumer PROPERTIES
+        CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
+    target_compile_features(hidden_visibility_consumer PRIVATE cxx_std_20)
+    target_link_libraries(hidden_visibility_consumer PRIVATE data_tamer)
+    add_dependencies(datatamer_test hidden_visibility_consumer)
+    target_compile_definitions(datatamer_test PRIVATE
+        DATA_TAMER_HIDDEN_CONSUMER="$<TARGET_FILE:hidden_visibility_consumer>")
+endif()
 
 # Resolve the package directory first: when it is a symlink (workspaces that
 # link each package into src/), "<link>/../python" names a directory next to

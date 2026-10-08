@@ -9,6 +9,15 @@
 #include <memory>
 #include <stdexcept>
 
+// Default visibility even in a consumer built with -fvisibility=hidden: the
+// thread-local chain of Transaction::active() must be one per process, shared with
+// the library, or a transaction opened by one module does not nest another's.
+#if defined(__GNUC__) || defined(__clang__)
+#define DATA_TAMER_SHARED_STATE_VISIBILITY __attribute__((visibility("default")))
+#else
+#define DATA_TAMER_SHARED_STATE_VISIBILITY
+#endif
+
 namespace DataTamer
 {
 
@@ -89,7 +98,7 @@ private:
  * mutex and one atomic flag word per series, appended by the control thread and read
  * lock-free by the snapshot thread and the writers.
  */
-class ChannelSharedState
+class DATA_TAMER_SHARED_STATE_VISIBILITY ChannelSharedState
 {
 public:
   /**
