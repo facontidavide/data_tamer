@@ -32,6 +32,7 @@ set(DATATAMER_TEST_SOURCES
     abi_tests.cpp
     locked_reference_tests.cpp
     serialize_me_tests.cpp
+    serialize_me_bounds_tests.cpp
     mcap_encoding_tests.cpp
     mcap_ring_sink_tests.cpp
     mcap_sink_reopen_tests.cpp

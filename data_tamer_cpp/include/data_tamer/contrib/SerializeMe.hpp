@@ -584,6 +584,12 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
   // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
+    const size_t size = num_values * BufferSize(T{});
+    if(size > buffer.size())
+    {
+      throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
+    }
+
     if constexpr(container_info<Container<T, TArgs...>>::size == 0)
     {
       dest.resize(num_values);
@@ -596,7 +602,6 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
       }
     }
 
-    const size_t size = num_values * BufferSize(T{});
     memcpy(dest.data(), buffer.data(), size);
     buffer.trimFront(size);
   }
