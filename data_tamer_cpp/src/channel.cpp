@@ -582,8 +582,13 @@ uint64_t LogChannel::writeLockWaitMaxNs() const
 
 uint64_t LogChannel::poolExhausted() const
 {
-  std::lock_guard const lock(_p->control_mutex);  // pool is created under it
-  return _p->pool ? _p->pool->exhausted() : 0;
+  // startLogging() creates the pool before it sets logging_started and never replaces
+  // it afterwards; before that no snapshot can have found it exhausted.
+  if(!_p->logging_started.load(std::memory_order_acquire))
+  {
+    return 0;
+  }
+  return _p->pool->exhausted();
 }
 
 void LogChannel::setPayloadCapacity(size_t bytes)

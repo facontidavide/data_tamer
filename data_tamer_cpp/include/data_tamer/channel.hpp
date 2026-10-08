@@ -262,8 +262,7 @@ public:
   /// Longest time takeSnapshot() blocked on the write mutex, in nanoseconds.
   [[nodiscard]] uint64_t writeLockWaitMaxNs() const;
 
-  /// Snapshot attempts that found no free pool slot. Takes the control mutex: not
-  /// real-time safe.
+  /// Snapshot attempts that found no free pool slot.
   [[nodiscard]] uint64_t poolExhausted() const;
 
   /// Sets the minimum payload bytes reserved by each pool slot. Zero (the default)
