@@ -10,7 +10,6 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
-#include <map>
 #include <new>
 #include <stdexcept>
 #include <string>
@@ -76,7 +75,8 @@ TEST(ParserRobustness, DecodedBoolFieldIsAValidBool)
 
 namespace
 {
-// Calls ParseSnapshot() with one active field and the callback `callback`.
+// What ParseSnapshot() makes of a schema with one active field: whether the payload fits
+// the schema exactly, how many values come out, and how long the call takes.
 struct Decoded
 {
   bool complete = false;
@@ -97,7 +97,7 @@ Decoded decode(const std::string& schema_text, const std::vector<uint8_t>& paylo
   return decoded;
 }
 
-// The old parser needs seconds for these; the new one microseconds.
+// Decoding these takes microseconds; a loop over the elements would take seconds.
 constexpr double kInstant = 0.25;
 }  // namespace
 
@@ -553,7 +553,8 @@ TEST(ParserRobustness, LegacyTextWithoutAVersionLineIsRead)
 
 TEST(ParserRobustness, LongRunOfSpacesIsTrimmedInLinearTime)
 {
-  // a million leading spaces took the old trimming (one erase per space) seconds
+  // a million spaces before and after the field: trimming that erases one space at a
+  // time would take seconds
   const std::string spaces(1'000'000, ' ');
   const std::string text = kHeader + spaces + "\n" + spaces + "float64 x" + spaces + "\n";
 

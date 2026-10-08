@@ -8,8 +8,8 @@ import time
 import unittest
 
 import data_tamer_parser as dt
+from test_data_tamer_parser import SEPARATOR
 
-SEPARATOR = "=" * 59
 HEADER = "### version: 5\n### hash: 0\n### channel_name: c\n\n"
 
 
@@ -33,7 +33,7 @@ class WorkBound(unittest.TestCase):
     """A count read from the payload, or the length of a fixed array, must not make the
     decoder work more than the payload can pay for."""
 
-    INSTANT = 0.25  # seconds; the old decoder needs seconds for the zero-size cases
+    INSTANT = 0.25  # seconds: microseconds for these cases, seconds for a loop over them
 
     def timed_parse(self, text: str, payload: bytes):
         schema = dt.parse_schema(HEADER + text)

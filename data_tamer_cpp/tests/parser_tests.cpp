@@ -310,8 +310,8 @@ TEST(DataTamerParser, VectorParsing)
   ASSERT_EQ(parsed_values.at("quats[1]/z"), 33);
 }
 
-// Version 4 texts (std::hash recipe) must still parse and verify exactly as before;
-// version 5 texts verify with the platform-independent recipe.
+// Version 4 texts verify with their std::hash recipe, version 5 texts with the
+// platform-independent one.
 TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
 {
   auto channel = DataTamer::LogChannel::create("chan");
