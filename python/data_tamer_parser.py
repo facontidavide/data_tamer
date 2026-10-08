@@ -153,16 +153,18 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     if _first_line(text).startswith("version:"):
         return _parse_schema_yaml(text, verify_hash)
     schema = Schema()
-    lines = iter(text.splitlines())
+    lines = text.split("\n")
     target = schema.fields
     last_type = ""
     seen_line = False
     after_separator = False
-    for raw in lines:
+    section_starts = False  # the line being read follows a "MSG:" line
+    for index, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             continue
         seen_line = True
+        opens_section, section_starts = section_starts, False
         if after_separator and not line.startswith("MSG: "):
             raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
         after_separator = False
@@ -179,9 +181,14 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
         elif line.startswith("MSG: "):
             last_type = line[5:].strip()
             target = schema.custom_types.setdefault(last_type, [])
+            section_starts = True
         elif line.startswith("ENCODING: "):
-            # Opaque sections come last and own the rest of the text (spec section 2).
-            schema.custom_schemas[last_type] = (line[10:].strip(), "\n".join(lines))
+            # Opaque sections come last and own the rest of the text (spec section 2), one
+            # final newline (which the writer adds) apart.
+            if not opens_section:
+                raise ValueError(f"ENCODING: outside the start of a section, in {line!r}")
+            foreign = "\n".join(lines[index + 1:])
+            schema.custom_schemas[last_type] = (line[10:].strip(), foreign.removesuffix("\n"))
             del schema.custom_types[last_type]
             break
         else:

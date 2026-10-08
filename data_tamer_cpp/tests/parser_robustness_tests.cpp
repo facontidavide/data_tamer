@@ -8,6 +8,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -304,5 +305,69 @@ TEST(ParserRobustness, SeparatorNotFollowedByATypeNameIsRejected)
     EXPECT_THROW(BuildSchemaFromText(kHeader + "Pose p\n" + kSeparator + "\n" + after),
                  std::runtime_error)
         << "[" << after << "]";
+  }
+}
+
+// Schema text: opaque custom types (an `ENCODING:` section, docs/wire_format.md)
+
+TEST(ParserRobustness, EncodingSectionIsAnOpaqueCustomType)
+{
+  const std::string text = kHeader + "Foreign f\nPose p\n" + kSeparator +
+                           "\nMSG: Pose\nfloat64 x\n" + kSeparator +
+                           "\nMSG: Foreign\nENCODING: ros2msg\nfloat64 a\nstring b\n";
+  const auto schema = BuildSchemaFromText(text);
+
+  ASSERT_EQ(schema.custom_schemas.size(), 1u);
+  EXPECT_EQ(schema.custom_schemas.at("Foreign").encoding, "ros2msg");
+  EXPECT_EQ(schema.custom_schemas.at("Foreign").schema, "float64 a\nstring b");
+  EXPECT_EQ(schema.custom_types.count("Foreign"), 0u);
+  EXPECT_EQ(schema.custom_types.count("Pose"), 1u);
+  EXPECT_EQ(ToText(schema), text);
+}
+
+TEST(ParserRobustness, OpaqueSectionOwnsTheRestOfTheText)
+{
+  // the foreign schema has sections of its own: none of them is ours
+  const std::string foreign = "float64 a\n" + kSeparator + "\nMSG: Inner\nint32 b\n\n";
+  const auto schema =
+      BuildSchemaFromText(kHeader + "Foreign f\n" + kSeparator +
+                          "\nMSG: Foreign\nENCODING: proto \r\n" + foreign);
+  EXPECT_EQ(schema.custom_schemas.at("Foreign").encoding, "proto");
+  EXPECT_EQ(schema.custom_schemas.at("Foreign").schema,
+            foreign.substr(0, foreign.size() - 1));
+  EXPECT_TRUE(schema.custom_types.empty());
+}
+
+TEST(ParserRobustness, OpaqueBodyIsTheRestOfTheTextWithoutOneFinalNewline)
+{
+  // the writer adds the newline after the body, so a body can end in a newline of its own
+  const std::vector<std::pair<std::string, std::string>> cases = {
+    { "ENCODING: proto", "" },
+    { "ENCODING: proto\n", "" },
+    { "ENCODING: proto\n\n", "" },
+    { "ENCODING: proto\n\n\n", "\n" },
+    { "ENCODING: proto\nbody", "body" },
+    { "ENCODING: proto\nbody\n", "body" },
+    { "ENCODING: proto\nbody\n\n", "body\n" },
+  };
+  for(const auto& [tail, body] : cases)
+  {
+    const auto schema = BuildSchemaFromText(kHeader + "Foreign f\n" + kSeparator +
+                                            "\nMSG: Foreign\n" + tail);
+    EXPECT_EQ(schema.custom_schemas.at("Foreign").encoding, "proto") << tail;
+    EXPECT_EQ(schema.custom_schemas.at("Foreign").schema, body) << tail;
+  }
+}
+
+TEST(ParserRobustness, EncodingLineThatDoesNotOpenASectionIsRejected)
+{
+  const std::string head = kHeader + "Pose p\n";
+  for(const std::string& text : { kHeader + "ENCODING: proto\n", head + kSeparator +
+                                                                     "\nMSG: "
+                                                                     "Pose\nfloat64 "
+                                                                     "x\nENCODING: "
+                                                                     "proto\nbody\n" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << text;
   }
 }

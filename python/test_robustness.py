@@ -141,5 +141,44 @@ class CustomTypeSections(unittest.TestCase):
                 dt.parse_schema(HEADER + f"Pose p\n{SEPARATOR}\n{after}")
 
 
+class OpaqueSections(unittest.TestCase):
+    """An `ENCODING:` section is an opaque custom type (docs/wire_format.md)."""
+
+    def test_encoding_section_is_an_opaque_custom_type(self):
+        text = (HEADER + "Foreign f\nPose p\n"
+                + f"{SEPARATOR}\nMSG: Pose\nfloat64 x\n"
+                + f"{SEPARATOR}\nMSG: Foreign\nENCODING: ros2msg\nfloat64 a\nstring b\n")
+        schema = dt.parse_schema(text)
+        self.assertEqual(schema.custom_schemas, {"Foreign": ("ros2msg", "float64 a\nstring b")})
+        self.assertEqual(list(schema.custom_types), ["Pose"])
+        self.assertEqual(dt.to_text(schema), text)
+
+    def test_opaque_section_owns_the_rest_of_the_text(self):
+        # the foreign schema has sections of its own: none of them is ours
+        foreign = "float64 a\n" + SEPARATOR + "\nMSG: Inner\nint32 b\n\n"
+        schema = dt.parse_schema(HEADER + "Foreign f\n" + SEPARATOR
+                                 + "\nMSG: Foreign\nENCODING: proto \r\n" + foreign)
+        self.assertEqual(schema.custom_schemas, {"Foreign": ("proto", foreign[:-1])})
+        self.assertEqual(schema.custom_types, {})
+
+    def test_opaque_body_is_the_rest_of_the_text_without_one_final_newline(self):
+        # the writer adds the newline after the body, so a body can end in a newline of its own
+        for tail, body in (("ENCODING: proto", ""), ("ENCODING: proto\n", ""),
+                           ("ENCODING: proto\n\n", ""), ("ENCODING: proto\n\n\n", "\n"),
+                           ("ENCODING: proto\nbody", "body"), ("ENCODING: proto\nbody\n", "body"),
+                           ("ENCODING: proto\nbody\n\n", "body\n")):
+            with self.subTest(tail=tail):
+                schema = dt.parse_schema(HEADER + "Foreign f\n" + SEPARATOR
+                                         + "\nMSG: Foreign\n" + tail)
+                self.assertEqual(schema.custom_schemas, {"Foreign": ("proto", body)})
+
+    def test_encoding_line_that_does_not_open_a_section_is_rejected(self):
+        for text in (HEADER + "ENCODING: proto\n",
+                     HEADER + "Pose p\n" + SEPARATOR
+                     + "\nMSG: Pose\nfloat64 x\nENCODING: proto\nbody\n"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                dt.parse_schema(text)
+
+
 if __name__ == "__main__":
     unittest.main()

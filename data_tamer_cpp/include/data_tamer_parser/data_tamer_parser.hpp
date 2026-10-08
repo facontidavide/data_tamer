@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -855,8 +857,20 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
 
   std::vector<TypeField>* field_vector = &schema.fields;
   bool any_line = false;
+  std::string section_name;     // the type of the last "MSG:" line
+  bool section_starts = false;  // the line being read follows that "MSG:" line
 
-  while(std::getline(ss, line))
+  size_t consumed = 0;  // bytes of txt read so far
+  auto readLine = [&](std::string& out) {
+    if(!std::getline(ss, out))
+    {
+      return false;
+    }
+    consumed = std::min(txt.size(), consumed + out.size() + 1);
+    return true;
+  };
+
+  while(readLine(line))
   {
     trimString(line);
     if(line.empty())
@@ -864,11 +878,12 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       continue;
     }
     any_line = true;
+    const bool opens_section = std::exchange(section_starts, false);
     if(line.size() >= 30 && line.find_first_not_of('=') == std::string::npos)
     {
       // a separator: the next line that is not blank is "MSG: <type name>"
       std::string msg_line;
-      while(std::getline(ss, msg_line))
+      while(readLine(msg_line))
       {
         trimString(msg_line);
         if(!msg_line.empty())
@@ -883,8 +898,30 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       }
       msg_line.erase(0, 5);
       trimString(msg_line);
-      field_vector = &schema.custom_types[msg_line];
+      section_name = msg_line;
+      section_starts = true;
+      field_vector = &schema.custom_types[section_name];
       continue;
+    }
+
+    if(line.rfind("ENCODING: ", 0) == 0)
+    {
+      // an opaque type: the foreign schema is the rest of the text, one final newline
+      // (which the writer adds) apart
+      if(!opens_section)
+      {
+        throw std::runtime_error("ENCODING: outside the start of a section, in: " + line);
+      }
+      std::string encoding = line.substr(10);
+      trimString(encoding);
+      std::string foreign = txt.substr(consumed);
+      if(!foreign.empty() && foreign.back() == '\n')
+      {
+        foreign.pop_back();
+      }
+      schema.custom_types.erase(section_name);
+      schema.custom_schemas[section_name] = { encoding, foreign };
+      break;
     }
 
     // Headers: "### key: value", the value being what follows the colon.
