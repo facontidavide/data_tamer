@@ -84,6 +84,8 @@ public:
   WriteMutex& operator=(WriteMutex&&) = delete;
 
   void lock() { mutex_.lock(); }
+  /// Fails while any thread holds the mutex, the calling one included: the mutex is not
+  /// recursive (POSIX defines it so for the priority-inheriting mutex).
   bool try_lock() noexcept { return mutex_.try_lock(); }
   void unlock() noexcept { mutex_.unlock(); }
 

@@ -973,29 +973,32 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     return SnapshotResult::no_sinks;
   }
 
-  // This thread holds the write mutex (scopedWrite() or a guard): it would wait for
-  // itself.
-  if(_p->shared->inTransactionOnThisThread())
-  {
-    _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
-    return SnapshotResult::blocked;
-  }
   // The write mutex before the epoch: a control operation waiting for the epoch
   // (it may run inside a transaction) never waits for a snapshot that waits for it.
   auto& write_mutex = _p->shared->write_mutex;
   uint64_t blocked_wait_ns = 0;
   bool blocked = false;
-  if(real_time)
+  if(!write_mutex.try_lock())
   {
-    if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
+    // A thread that holds the write mutex (scopedWrite() or a guard) fails try_lock()
+    // and would wait for itself. The check, a thread-local lookup, runs only here.
+    if(_p->shared->inTransactionOnThisThread())
     {
       _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
       return SnapshotResult::blocked;
     }
-  }
-  else
-  {
-    blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
+    if(real_time)
+    {
+      if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
+      {
+        _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+        return SnapshotResult::blocked;
+      }
+    }
+    else
+    {
+      blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
+    }
   }
   // Held until the last push: producers, when several threads take snapshots, are
   // serialized over the pool scan, the active mask and the single-producer queues.
