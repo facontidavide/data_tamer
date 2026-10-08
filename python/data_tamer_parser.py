@@ -402,6 +402,19 @@ def _parse_schema_yaml(text: str, verify_hash: bool) -> Schema:
 MAX_SCHEMA_DEPTH = 64  # deeper nesting is treated as a malformed (cyclic) schema
 
 
+# The two functions below build the errors, and the callers test the depth and look the
+# fields up themselves: a call per field would cost a flat snapshot about 5%.
+def _nesting_error() -> ValueError:
+    return ValueError("custom types nested too deeply (cyclic schema?)")
+
+
+def _undecodable_error(schema: Schema, type_name: str) -> ValueError:
+    """The error for a custom type the schema does not describe field by field."""
+    if type_name in schema.custom_schemas:
+        return ValueError(f"type {type_name!r} has an opaque encoding; cannot continue")
+    return ValueError(f"unknown type {type_name!r}")
+
+
 def get_bit(mask: bytes, index: int) -> bool:
     if (index >> 3) >= len(mask):
         raise ValueError("active mask shorter than the schema")
@@ -430,14 +443,14 @@ def _min_element_size(f: Field, schema: Schema, depth: int) -> int:
     sum of the fewest bytes of each field of the custom type (kept on the schema)."""
     if f.is_basic:
         return _STRUCT[f.type_name].size
-    if f.type_name not in schema.custom_types:
-        raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
     memo = schema._min_sizes
     if f.type_name not in memo:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
         if depth > MAX_SCHEMA_DEPTH:
-            raise ValueError("custom types nested too deeply (cyclic schema?)")
-        memo[f.type_name] = sum(_min_field_size(sub, schema, depth + 1)
-                                for sub in schema.custom_types[f.type_name])
+            raise _nesting_error()
+        memo[f.type_name] = sum(_min_field_size(sub, schema, depth + 1) for sub in subs)
     return memo[f.type_name]
 
 
@@ -452,7 +465,7 @@ def _min_field_size(f: Field, schema: Schema, depth: int) -> int:
 def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
                  depth: int = 0) -> None:
     if depth > MAX_SCHEMA_DEPTH:
-        raise ValueError("custom types nested too deeply (cyclic schema?)")
+        raise _nesting_error()
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
     if f.is_vector:
         count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
@@ -471,13 +484,13 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
     if f.is_basic:
         for n in names:
             out[n] = reader.number(f.type_name)
-    elif f.type_name in schema.custom_types:
-        subs = schema.custom_types[f.type_name]
+    else:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
         for n in names:
             for sub in subs:
                 _parse_field(sub, schema, reader, n, out, depth + 1)
-    else:
-        raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
 
 
 MAX_FIELD_NAMES = 1_000_000  # Schema.field_names() refuses to list more names
@@ -491,20 +504,20 @@ def _names_count(f: Field, schema: Schema, memo: dict, depth: int) -> int:
     linear in the number of type references, whatever the array sizes.
     """
     if depth > MAX_SCHEMA_DEPTH:
-        raise ValueError("custom types nested too deeply (cyclic schema?)")
+        raise _nesting_error()
     per_element, height = 1, 0  # basic or opaque type: one name, no nesting
     if not f.is_basic and f.type_name not in schema.custom_schemas:
-        if f.type_name not in schema.custom_types:
-            raise ValueError(f"type {f.type_name!r} is not defined in the schema")
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
         if f.type_name in memo:
             if memo[f.type_name] is None:
                 raise ValueError(f"custom type {f.type_name!r} contains itself (cyclic schema)")
             per_element, height = memo[f.type_name]
             if depth + height > MAX_SCHEMA_DEPTH:
-                raise ValueError("custom types nested too deeply")
+                raise _nesting_error()
         else:
             memo[f.type_name] = None
-            subs = schema.custom_types[f.type_name]
             per_element = sum(_names_count(sub, schema, memo, depth + 1) for sub in subs)
             height = 1 + max((memo[sub.type_name][1] for sub in subs
                               if memo.get(sub.type_name)), default=0) if subs else 0

@@ -218,7 +218,16 @@ class OpaqueSections(unittest.TestCase):
         self.assertEqual(dt.parse_snapshot(schema, b"\x00", b""), {})
         # the field, and a non-empty vector of the type: neither can be decoded
         for mask, payload in ((b"\x01", bytes(8)), (b"\x02", bytes([1, 0, 0, 0, 0, 0, 0, 0]))):
-            with self.subTest(mask=mask), self.assertRaisesRegex(ValueError, "opaque encoding"):
+            with self.subTest(mask=mask), self.assertRaisesRegex(
+                    ValueError, "type 'Foreign' has an opaque encoding"):
+                dt.parse_snapshot(schema, mask, payload)
+
+    def test_active_field_of_an_undefined_type_says_it_is_unknown(self):
+        schema = dt.parse_schema(HEADER + "Foreign f\nForeign[] fs\n")
+        self.assertEqual(dt.parse_snapshot(schema, b"\x00", b""), {})
+        for mask, payload in ((b"\x01", bytes(8)), (b"\x02", bytes([1, 0, 0, 0, 0, 0, 0, 0]))):
+            with self.subTest(mask=mask), self.assertRaisesRegex(
+                    ValueError, "unknown type 'Foreign'"):
                 dt.parse_snapshot(schema, mask, payload)
 
     def test_encoding_line_that_does_not_open_a_section_is_rejected(self):

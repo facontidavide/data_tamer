@@ -89,7 +89,7 @@ class FieldNames(unittest.TestCase):
             "legs[1]/q[]", "legs[1]/mode[0]", "legs[1]/mode[1]", "blob", "blobs[]"])
 
     def test_rejects_undefined_and_cyclic_types(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "unknown type 'Foo'"):
             dt.parse_schema("### version: 5\n### hash: 0\n### channel_name: c\n\nFoo x\n").field_names()
         cyclic = ("### version: 5\n### hash: 0\n### channel_name: c\n\nA a\n"
                   + SEP + "\nMSG: A\nA a\n")
@@ -110,14 +110,14 @@ class FieldNames(unittest.TestCase):
         self.assertEqual(dt.parse_snapshot(ok, b"\x01", b"\0" * 4), {"t/" * 64 + "x": 0.0})
         for depth in (dt.MAX_SCHEMA_DEPTH + 1, 80, 1200):  # 1200: no RecursionError
             schema = dt.parse_schema(self.chain(depth))
-            with self.subTest(depth=depth), self.assertRaises(ValueError):
+            with self.subTest(depth=depth), self.assertRaisesRegex(ValueError, "nested too deeply"):
                 schema.field_names()
-            with self.subTest(depth=depth), self.assertRaises(ValueError):
+            with self.subTest(depth=depth), self.assertRaisesRegex(ValueError, "nested too deeply"):
                 dt.parse_snapshot(schema, b"\x01", b"\0" * 4)
         # a deep type reached again, deeper, through the memo
         text = ("### version: 5\n### hash: 0\n### channel_name: c\n\nT1 a\nW w\n"
                 f"{SEP}\nMSG: W\nT1 b\n" + self.chain(dt.MAX_SCHEMA_DEPTH).split("T1 t\n", 1)[1])
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "nested too deeply"):
             dt.parse_schema(text).field_names()
 
     def test_size_limit(self):
