@@ -118,9 +118,8 @@ TEST(LoggedValue, SetDoesNotEnableADisabledValue)
   ASSERT_EQ(sink->latestPayloadSize(), sizeof(double));
 }
 
-// The race that existed before this plan: a writer thread hammering set()
-// while the snapshot thread serializes. Must be clean under TSAN, and every
-// snapshot must decode to a value the writer actually wrote.
+// A writer thread hammering set() while the snapshot thread serializes. Must be clean
+// under TSAN, and every snapshot must decode to a value the writer actually wrote.
 namespace
 {
 // Every delivered 8-byte payload must have all bytes equal (see the writer below).

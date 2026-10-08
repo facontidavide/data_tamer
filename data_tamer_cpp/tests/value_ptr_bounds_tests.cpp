@@ -64,7 +64,7 @@ TEST(ValuePtrBounds, ANumberFillsExactlyItsRoomInLittleEndian)
   EXPECT_EQ(serializeExactly(ValuePtr(&atomic)), (Bytes{ 7, 0, 0, 0 }));
 }
 
-// serialize() used to copy the bytes first and only then notice that they did not fit.
+// serialize() checks that the value fits before it copies a byte.
 TEST(ValuePtrBounds, ANumberThatDoesNotFitIsRefusedBeforeItIsWritten)
 {
   const int16_t i16 = -2;

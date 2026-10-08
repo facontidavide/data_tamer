@@ -43,7 +43,7 @@ std::string_view TypeDefinition(Counters& counters, AddField& add)
 
 }  // namespace
 
-// The mapping that existed before must not move.
+// The wire type of each fixed-width C++ type is part of the wire format.
 TEST(BasicTypes, FixedWidthTypesKeepTheirWireType)
 {
   EXPECT_EQ(ToStr(GetBasicType<bool>()), "bool");

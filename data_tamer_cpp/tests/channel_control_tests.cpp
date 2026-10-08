@@ -7,10 +7,8 @@
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
-#include <condition_variable>
 #include <cstring>
 #include <functional>
-#include <optional>
 #include <future>
 #include <thread>
 

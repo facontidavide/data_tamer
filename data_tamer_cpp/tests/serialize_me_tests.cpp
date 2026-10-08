@@ -26,9 +26,9 @@ TEST(SerializeMe, ByteArrayIsSerializedIntoTheBuffer)
   ASSERT_EQ(decoded, values);
 }
 
-// Issue #42: numbers were read through a reinterpret_cast, which is undefined
-// behaviour at unaligned offsets. A leading byte forces every following field
-// off its natural alignment; UBSAN fails this test with the old code.
+// Issue #42: numbers are read with a copy, because a read through a reinterpret_cast is
+// undefined behaviour at unaligned offsets. A leading byte forces every following field
+// off its natural alignment, which UBSAN reports for the cast.
 TEST(SerializeMe, NumbersRoundTripAtUnalignedOffsets)
 {
   const uint8_t tag = 7;

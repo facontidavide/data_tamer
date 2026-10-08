@@ -17,8 +17,8 @@ static_assert(noexcept(std::declval<WriteMutex&>().try_lock()));
 static_assert(noexcept(std::declval<WriteMutex&>().unlock()));
 static_assert(noexcept(std::declval<WriteMutex&>().tryLockWithSpin()));
 
-// now() + spin_ns overflowed the clock for a huge budget: the deadline wrapped into the
-// past and the call gave up at once (undefined behaviour, reported by UBSan).
+// The deadline now() + spin_ns must not overflow the clock for a huge budget: the call
+// spins until the lock is free instead of giving up at once.
 TEST(WriteMutexSpin, AHugeBudgetSpinsUntilTheLockIsFree)
 {
   WriteMutex mutex;

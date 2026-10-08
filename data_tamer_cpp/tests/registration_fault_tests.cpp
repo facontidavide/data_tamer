@@ -19,7 +19,6 @@
 #include <new>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 using namespace DataTamer;

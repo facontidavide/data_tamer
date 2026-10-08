@@ -11,7 +11,7 @@
 using namespace DataTamer;
 
 // A channel holds eight sinks, so a ninth default sink could never reach any channel.
-// It is refused when added; accepted, it made every later getChannel() throw.
+// It is refused when added, and getChannel() goes on working.
 TEST(ChannelsRegistry, RefusesANinthDefaultSinkBeforeAnyChannelExists)
 {
   ChannelsRegistry registry;

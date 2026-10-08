@@ -8,11 +8,8 @@
 
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <memory>
 #include <optional>
-#include <string>
-#include <thread>
 #include <vector>
 
 using namespace DataTamer;
