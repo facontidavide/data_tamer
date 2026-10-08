@@ -489,7 +489,9 @@ inline void LogChannel::discoverTypes(PendingTypes& types)
     auto func = [this, &types, &fields](const char* field_name, const auto* member) {
       using MemberType =
           typename std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
-      discoverTypesImpl<MemberType>(types, fields, field_name);
+      // this-> spelled out: clang does not count a dependent call as a use of the
+      // capture (-Wunused-lambda-capture).
+      this->discoverTypesImpl<MemberType>(types, fields, field_name);
     };
     T dummy;
     SerializeMe::InvokeTypeDefinition(dummy, func);
