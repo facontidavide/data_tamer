@@ -12,6 +12,8 @@ void useResults(const std::string& text)
   using namespace DataTamerParser;
   const std::vector<uint8_t> body(16);
   const Schema schema;
+  const SnapshotView view{};
+  const auto callback = [](const std::string&, const VarNumber&) {};
 
 #ifdef DT_IGNORE_BUILD_SCHEMA_FROM_TEXT
   BuildSchemaFromText(text);
@@ -37,5 +39,10 @@ void useResults(const std::string& text)
   SplitMcapMessage(BufferSpan{ body.data(), body.size() });
 #else
   (void)SplitMcapMessage(BufferSpan{ body.data(), body.size() });
+#endif
+#ifdef DT_IGNORE_PARSE_SNAPSHOT
+  ParseSnapshot(schema, view, callback);
+#else
+  (void)ParseSnapshot(schema, view, callback);
 #endif
 }

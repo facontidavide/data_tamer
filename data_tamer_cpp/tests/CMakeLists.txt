@@ -229,13 +229,16 @@ endfunction()
 
 # Compile-fail checks. A probe in tests/compile_fail/ compiles as written
 # (<stem>_control, part of the default build). <name>_fail adds `definition`, which
-# breaks the probe; the test builds it and passes when that build fails or, with
-# REGEX, when its output matches, which also checks the message the user gets.
+# breaks the probe; the test builds it and passes when the output matches REGEX, the
+# message the user gets, so a build that fails for another reason does not pass.
 # OPTIONS are compile options of both variants, FAIL_OPTIONS of the failing one. All
 # calls on one probe share its OPTIONS: the control target is made by the first call and
 # takes that call's.
 function(data_tamer_compile_fail_test name source definition)
     cmake_parse_arguments(ARG "" "REGEX" "OPTIONS;FAIL_OPTIONS" ${ARGN})
+    if(NOT ARG_REGEX)
+        message(FATAL_ERROR "${name}: a compile-fail test needs a REGEX")
+    endif()
     get_filename_component(stem ${source} NAME_WE)
     if(NOT TARGET ${stem}_control)
         data_tamer_add_probe(${stem}_control ${source})
@@ -247,45 +250,43 @@ function(data_tamer_compile_fail_test name source definition)
         target_compile_definitions(${name}_fail PRIVATE ${definition})
     endif()
     data_tamer_add_build_test(${name} ${name}_fail)
-    if(ARG_REGEX)
-        set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARG_REGEX}")
-    else()
-        set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE)
-    endif()
+    set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARG_REGEX}")
 endfunction()
 
-data_tamer_compile_fail_test(pool_try_acquire_result_is_nodiscard
-    snapshot_pool_nodiscard.cpp DT_IGNORE_TRY_ACQUIRE)
-data_tamer_compile_fail_test(pool_adopt_result_is_nodiscard
-    snapshot_pool_nodiscard.cpp DT_IGNORE_ADOPT)
+# What GCC, Clang and MSVC say about a discarded [[nodiscard]] result.
+set(DATA_TAMER_NODISCARD_REGEX "ignoring return value|discarding return value")
 
-data_tamer_compile_fail_test(atomic_word_table_const_is_read_only
-    atomic_word_table_const.cpp DT_WRITE_THROUGH_CONST)
-data_tamer_compile_fail_test(fixed_size_of_an_undescribed_type_is_rejected
-    get_fixed_size.cpp DT_UNDESCRIBED_TYPE)
-data_tamer_compile_fail_test(serializer_is_not_built_from_a_name_implicitly
-    custom_serializer_constructor.cpp DT_IMPLICIT_NAME)
-foreach(function TO_STR TO_YAML RENDER_SCHEMA)
-    string(TOLOWER ${function} function_name)
-    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
-        schema_nodiscard.cpp DT_IGNORE_${function})
+# Each case of library_nodiscard.cpp and parser_nodiscard.cpp ignores one result.
+foreach(case POOL_TRY_ACQUIRE POOL_ADOPT TO_STR TO_YAML RENDER_SCHEMA REQUEST_DUMP
+             TRY_SET_ENABLED CREATE NUMBER_OF_SINKS)
+    string(TOLOWER ${case} case_name)
+    data_tamer_compile_fail_test(${case_name}_result_is_nodiscard
+        library_nodiscard.cpp DT_IGNORE_${case}
+        REGEX "${DATA_TAMER_NODISCARD_REGEX}")
+endforeach()
+foreach(case BUILD_SCHEMA_FROM_TEXT BUILD_SCHEMA_FROM_YAML TO_TEXT GET_BIT
+             SPLIT_MCAP_MESSAGE PARSE_SNAPSHOT)
+    string(TOLOWER ${case} case_name)
+    data_tamer_compile_fail_test(${case_name}_result_is_nodiscard
+        parser_nodiscard.cpp DT_IGNORE_${case}
+        REGEX "${DATA_TAMER_NODISCARD_REGEX}")
 endforeach()
 
+data_tamer_compile_fail_test(atomic_word_table_const_is_read_only
+    atomic_word_table_const.cpp DT_WRITE_THROUGH_CONST
+    REGEX "discards qualifiers|no matching member function|cannot convert 'this' pointer")
+data_tamer_compile_fail_test(fixed_size_of_an_undescribed_type_is_rejected
+    get_fixed_size.cpp DT_UNDESCRIBED_TYPE
+    REGEX "Missing TypeDefinition")
+data_tamer_compile_fail_test(serializer_is_not_built_from_a_name_implicitly
+    custom_serializer_constructor.cpp DT_IMPLICIT_NAME
+    REGEX "conversion from|no viable conversion|cannot convert")
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)
     data_tamer_compile_fail_test(long_double_${case_name}_is_rejected
         long_double_registration.cpp DT_LONG_DOUBLE_${case} REGEX "has no wire type")
 endforeach()
 
-data_tamer_compile_fail_test(request_dump_result_is_nodiscard
-    request_dump_nodiscard.cpp DT_IGNORE_REQUEST_DUMP)
-
-foreach(function TRY_SET_ENABLED CREATE NUMBER_OF_SINKS)
-    string(TOLOWER ${function} function_name)
-    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
-        channel_nodiscard.cpp DT_IGNORE_${function}
-        REGEX "ignoring return value|discarding return value")
-endforeach()
 data_tamer_compile_fail_test(dropped_snapshots_is_deprecated
     dropped_snapshots_deprecated.cpp DT_CALL_DEPRECATED
     REGEX "deprecated-declarations|declared deprecated")
@@ -293,16 +294,6 @@ data_tamer_compile_fail_test(dropped_snapshots_is_deprecated
 data_tamer_compile_fail_test(endian_swap_of_long_double_is_rejected
     endian_swap_size.cpp DT_SWAP_LONG_DOUBLE OPTIONS -DSERIALIZE_LITTLEENDIAN=0
     REGEX "accepts only 1, 2, 4 and 8 byte types")
-data_tamer_compile_fail_test(parse_snapshot_result_is_nodiscard
-    parse_snapshot_nodiscard.cpp DT_IGNORE_PARSE_SNAPSHOT
-    REGEX "ignoring return value|discarding return value")
-foreach(function BUILD_SCHEMA_FROM_TEXT BUILD_SCHEMA_FROM_YAML TO_TEXT GET_BIT
-                 SPLIT_MCAP_MESSAGE)
-    string(TOLOWER ${function} function_name)
-    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
-        parser_nodiscard.cpp DT_IGNORE_${function}
-        REGEX "ignoring return value|discarding return value")
-endforeach()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     data_tamer_compile_fail_test(parser_needs_a_little_endian_host
         parser_byte_order.cpp ""
