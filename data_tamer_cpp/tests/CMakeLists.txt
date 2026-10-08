@@ -26,6 +26,7 @@ set(DATATAMER_TEST_SOURCES
     shared_state_tests.cpp
     channel_control_tests.cpp
     registration_atomicity_tests.cpp
+    registration_fault_tests.cpp
     channel_capacity_tests.cpp
     payload_estimate_tests.cpp
     pool_exhausted_tests.cpp
@@ -136,12 +137,6 @@ data_tamer_add_gtest(datatamer_test
     LIBRARIES data_tamer ${DATA_TAMER_MCAP_TARGET})
 # Tests are built as C++20 like the library.
 target_compile_features(datatamer_test PRIVATE cxx_std_20)
-
-# The allocation-failure tests replace operator new, so they are a program of their own.
-data_tamer_add_gtest(datatamer_fault_test
-    SOURCES registration_fault_tests.cpp
-    LIBRARIES data_tamer ${DATA_TAMER_MCAP_TARGET})
-target_compile_features(datatamer_fault_test PRIVATE cxx_std_20)
 
 # SerializeMe's byte-swapping path, built as for a big endian host. It is its own
 # executable: SerializeMe's inline functions differ from the ones in datatamer_test.

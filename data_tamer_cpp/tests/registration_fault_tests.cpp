@@ -1,18 +1,17 @@
-// Registration under allocation failure. This program replaces operator new so that
-// the Nth allocation of the calling thread throws std::bad_alloc. For every N, a
-// registration must complete or leave the channel as it was, and the channel must go
-// on working. It is a program of its own because operator new is replaced for all of it.
+// Registration under allocation failure. AllocCounter::FailNth makes the Nth allocation
+// of the calling thread throw std::bad_alloc. For every N, a registration must complete
+// or leave the channel as it was, and the channel must go on working.
 #include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"
 
+#include "alloc_counter.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <atomic>
-#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <new>
@@ -26,56 +25,7 @@ using namespace DataTamer;
 
 namespace
 {
-struct FaultState
-{
-  static thread_local long countdown;  // allocations until the failing one; 0: off
-  static thread_local bool fired;
-};
-thread_local long FaultState::countdown = 0;
-thread_local bool FaultState::fired = false;
-
-// Fails the nth allocation made by this thread while it lives.
-class AllocationFault
-{
-public:
-  explicit AllocationFault(long nth)
-  {
-    FaultState::fired = false;
-    FaultState::countdown = nth;
-  }
-  ~AllocationFault() { disarm(); }
-  AllocationFault(const AllocationFault&) = delete;
-  AllocationFault& operator=(const AllocationFault&) = delete;
-
-  void disarm() { FaultState::countdown = 0; }
-  bool fired() const { return FaultState::fired; }
-};
-
-void* allocate(std::size_t size)
-{
-  if(FaultState::countdown > 0 && --FaultState::countdown == 0)
-  {
-    FaultState::fired = true;
-    throw std::bad_alloc();
-  }
-  if(void* p = std::malloc(size == 0 ? 1 : size))
-  {
-    return p;
-  }
-  throw std::bad_alloc();
-}
-
-void* allocateOrNull(std::size_t size) noexcept
-{
-  try
-  {
-    return allocate(size);
-  }
-  catch(...)
-  {
-    return nullptr;
-  }
-}
+using DataTamerTest::AllocCounter;
 
 struct Reading
 {
@@ -293,7 +243,7 @@ void FailEveryAllocation(const Scenario& scenario, size_t existing_count)
     std::string other_error;
     Target target;
     {
-      AllocationFault fault(nth);
+      AllocCounter::FailNth fault(nth);
       try
       {
         scenario.register_target(*channel, target);
@@ -336,39 +286,6 @@ void FailEveryAllocation(const Scenario& scenario, size_t existing_count)
 }
 }  // namespace
 
-void* operator new(std::size_t size)
-{
-  return allocate(size);
-}
-void* operator new[](std::size_t size)
-{
-  return allocate(size);
-}
-void* operator new(std::size_t size, const std::nothrow_t&) noexcept
-{
-  return allocateOrNull(size);
-}
-void* operator new[](std::size_t size, const std::nothrow_t&) noexcept
-{
-  return allocateOrNull(size);
-}
-void operator delete(void* p) noexcept
-{
-  std::free(p);
-}
-void operator delete[](void* p) noexcept
-{
-  std::free(p);
-}
-void operator delete(void* p, std::size_t) noexcept
-{
-  std::free(p);
-}
-void operator delete[](void* p, std::size_t) noexcept
-{
-  std::free(p);
-}
-
 // The first registration allocates the first block of flag words, the 65th the second.
 TEST(RegistrationFault, EveryAllocationFailureLeavesTheChannelUnchanged)
 {
@@ -392,7 +309,7 @@ TEST(RegistrationFault, ReRegistrationNeedsNoAllocation)
   double value = 1.0;
   const auto id = channel->registerValue("value", &value);
   channel->unregister(id);
-  AllocationFault fault(1);
+  AllocCounter::FailNth fault(1);
   RegistrationID again;
   EXPECT_NO_THROW(again = channel->registerValue("value", &value));
   EXPECT_FALSE(fault.fired());
