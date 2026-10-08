@@ -371,3 +371,48 @@ TEST(ParserRobustness, EncodingLineThatDoesNotOpenASectionIsRejected)
     EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << text;
   }
 }
+
+// Schema text: the upper-case type names of files from before version 4
+
+namespace
+{
+// "type[extent] name", the way a field line reads
+std::vector<std::string> describe(const FieldsVector& fields)
+{
+  std::vector<std::string> out;
+  for(const auto& field : fields)
+  {
+    std::string type = field.type_name;
+    if(field.is_vector)
+    {
+      type += "[" + (field.array_size ? std::to_string(field.array_size) : "") + "]";
+    }
+    out.push_back(type + " " + field.field_name);
+  }
+  return out;
+}
+}  // namespace
+
+TEST(ParserRobustness, FieldNamedLikeALegacyTypeKeepsItsType)
+{
+  // with a version line a field line is "<type> <name>", whatever the name looks like
+  const auto schema = BuildSchemaFromText(kHeader +
+                                          "float64 BOOL\nuint32 INT8\nPose OTHER\n"
+                                          "int8[2] DOUBLE\n" +
+                                          kSeparator + "\nMSG: Pose\nfloat64 x\n");
+  EXPECT_EQ(describe(schema.fields),
+            (std::vector<std::string>{ "float64 BOOL", "uint32 INT8", "Pose OTHER",
+                                       "int8[2] DOUBLE" }));
+  EXPECT_EQ(schema.fields[2].type, BasicType::OTHER);
+}
+
+TEST(ParserRobustness, LegacyTextWithoutAVersionLineIsRead)
+{
+  // before version 4 the name came first and the type was upper case
+  const auto schema = BuildSchemaFromText("speed DOUBLE\ncount INT32[3]\nflag "
+                                          "BOOL\nstamp UINT64[]\n");
+  EXPECT_EQ(describe(schema.fields),
+            (std::vector<std::string>{ "float64 speed", "int32[3] count", "bool flag",
+                                       "uint64[] stamp" }));
+  EXPECT_EQ(schema.fields[1].type, BasicType::INT32);
+}

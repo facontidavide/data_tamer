@@ -180,5 +180,16 @@ class OpaqueSections(unittest.TestCase):
                 dt.parse_schema(text)
 
 
+class LegacyTypeNames(unittest.TestCase):
+    def test_field_named_like_a_legacy_type_keeps_its_type(self):
+        # the Python decoder has no legacy mode: this is how the C++ parser reads a text
+        # that has a version line
+        text = (HEADER + "float64 BOOL\nuint32 INT8\nPose OTHER\nint8[2] DOUBLE\n"
+                + f"{SEPARATOR}\nMSG: Pose\nfloat64 x\n")
+        fields = dt.parse_schema(text).fields
+        self.assertEqual([(f.type_name, f.field_name) for f in fields], [
+            ("float64", "BOOL"), ("uint32", "INT8"), ("Pose", "OTHER"), ("int8", "DOUBLE")])
+
+
 if __name__ == "__main__":
     unittest.main()

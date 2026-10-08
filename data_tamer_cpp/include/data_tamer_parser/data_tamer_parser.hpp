@@ -857,6 +857,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
 
   std::vector<TypeField>* field_vector = &schema.fields;
   bool any_line = false;
+  bool has_version_line = false;
   std::string section_name;     // the type of the last "MSG:" line
   bool section_starts = false;  // the line being read follows that "MSG:" line
 
@@ -949,6 +950,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
         throw std::runtime_error("Wrong SCHEMA_VERSION");
       }
       version = int(*number);
+      has_version_line = true;
       continue;
     }
     if(isHeader("hash"))
@@ -986,7 +988,8 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     TypeField field;
 
     const auto& kNamesNew = detail::BasicTypeNames();
-    // Legacy files (before version 4): upper-case type names after the field name.
+    // Files from before version 4 have no version line, upper-case type names and the
+    // type after the field name.
     static const std::array<std::string, TypesCount> kNamesOld = {
       "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
       "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
@@ -1003,7 +1006,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
         field.type = static_cast<BasicType>(i);
         break;
       }
-      if(typeToken(str_right) == kNamesOld[i])
+      if(!has_version_line && typeToken(str_right) == kNamesOld[i])
       {
         field.type = static_cast<BasicType>(i);
         std::swap(str_type, str_name);
