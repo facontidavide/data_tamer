@@ -70,6 +70,22 @@ endif()
 # Tests are built as C++20 like the library.
 target_compile_features(datatamer_test PRIVATE cxx_std_20)
 
+# The allocation-failure tests replace operator new, so they are a program of their own.
+if(DATA_TAMER_BUILD_ROS AND gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
+    ament_add_gtest(datatamer_fault_test registration_fault_tests.cpp)
+    target_link_libraries(datatamer_fault_test data_tamer ${DATA_TAMER_MCAP_TARGET})
+else()
+    add_executable(datatamer_fault_test registration_fault_tests.cpp)
+    target_link_libraries(datatamer_fault_test
+        PRIVATE data_tamer ${DATA_TAMER_MCAP_TARGET} GTest::gtest_main)
+    if(DATA_TAMER_TEST_WRAPPER)
+        set_target_properties(datatamer_fault_test PROPERTIES
+            CROSSCOMPILING_EMULATOR "${DATA_TAMER_TEST_WRAPPER}")
+    endif()
+    gtest_discover_tests(datatamer_fault_test DISCOVERY_MODE PRE_TEST)
+endif()
+target_compile_features(datatamer_fault_test PRIVATE cxx_std_20)
+
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
     DATA_TAMER_WIRE_FORMAT_DIR="${PROJECT_SOURCE_DIR}/../docs/wire_format")

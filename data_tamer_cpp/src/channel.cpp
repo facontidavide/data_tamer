@@ -296,41 +296,84 @@ RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
                                "can't register new value '" + name +
                                "' once recording started");
     }
+    // Whatever can throw and needs no change to the channel comes first (user code
+    // such as typeSchema() included), then spare capacity for what is appended.
     const auto type = value_ptr.type();
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
     TypeField field{ name, type, type_name, value_ptr.isVector(),
                      value_ptr.vectorSize() };
-    // User code (typeSchema) runs before anything is published, so a throw
-    // leaves the channel exactly as it was.
     std::optional<CustomSchema> custom_schema;
     if(type_info && !_p->schema.custom_types.contains(type_info->typeName()) &&
        !types.contains(type_info->typeName()))
     {
       custom_schema = type_info->typeSchema();
     }
-    _p->series.reserve(_p->series.size() + 1);
-    _p->schema.fields.reserve(_p->schema.fields.size() + 1);
-
-    for(auto& [pending_name, pending_fields] : types)
-    {
-      _p->schema.custom_types[pending_name] = std::move(pending_fields);
-    }
-
     Pimpl::ValueHolder instance;
     instance.name = name;
     instance.holder = std::move(value_ptr);
-    _p->series.emplace_back(std::move(instance));
-    const uint32_t generation = _p->shared->addSeries();
-    const size_t index = _p->series.size() - 1;
-    _p->registered_values.insert({ name, index });
-    _p->schema.fields.emplace_back(std::move(field));
-    if(custom_schema)
+    _p->series.reserve(_p->series.size() + 1);
+    _p->schema.fields.reserve(_p->schema.fields.size() + 1);
+    std::vector<decltype(_p->schema.custom_types)::iterator> added_types;
+    added_types.reserve(types.size());
+
+    // Then the changes, each of which either completes or throws without effect, in
+    // an order that ends with the only one that cannot be undone, addSeries(). A throw
+    // undoes the earlier ones, which cannot throw.
+    const size_t index = _p->series.size();
+    std::optional<decltype(_p->registered_values)::iterator> indexed;
+    std::optional<decltype(_p->schema.custom_schemas)::iterator> added_schema;
+    bool appended = false;
+    try
     {
-      _p->schema.custom_schemas.insert({ type_info->typeName(), *custom_schema });
+      for(auto& [pending_name, pending_fields] : types)
+      {
+        const auto [entry, inserted] = _p->schema.custom_types.try_emplace(pending_name);
+        if(inserted)
+        {
+          added_types.push_back(entry);
+          entry->second = std::move(pending_fields);
+        }
+      }
+      indexed = _p->registered_values.emplace(name, index).first;
+      if(custom_schema)
+      {
+        const auto [entry, inserted] = _p->schema.custom_schemas.emplace(
+            type_info->typeName(), std::move(*custom_schema));
+        if(inserted)
+        {
+          added_schema = entry;
+        }
+      }
+      _p->series.emplace_back(std::move(instance));
+      _p->schema.fields.emplace_back(std::move(field));
+      appended = true;
+      const uint64_t hash = ComputeSchemaHash(_p->schema);
+      const uint32_t generation = _p->shared->addSeries();
+      _p->schema.hash = hash;
+      _p->invalidateAnnouncements();
+      return RegistrationID(uint32_t(index), generation);
     }
-    _p->schema.hash = ComputeSchemaHash(_p->schema);
-    _p->invalidateAnnouncements();
-    return RegistrationID(uint32_t(index), generation);
+    catch(...)
+    {
+      if(appended)
+      {
+        _p->schema.fields.pop_back();
+        _p->series.pop_back();
+      }
+      if(added_schema)
+      {
+        _p->schema.custom_schemas.erase(*added_schema);
+      }
+      if(indexed)
+      {
+        _p->registered_values.erase(*indexed);
+      }
+      for(const auto& entry : added_types)
+      {
+        _p->schema.custom_types.erase(entry);
+      }
+      throw;
+    }
   }
 
   const size_t index = it->second;

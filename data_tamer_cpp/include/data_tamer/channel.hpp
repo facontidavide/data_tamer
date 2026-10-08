@@ -100,7 +100,8 @@ public:
    * The name must be unique in the channel, non-empty and free of whitespace and
    * control characters; JoinNames() builds hierarchical names. Throws
    * std::runtime_error for a duplicate or invalid name, and for a new name once
-   * logging started. Not real-time safe.
+   * logging started. A call that throws leaves the channel unchanged. Not real-time
+   * safe.
    *
    * @return the ID for unregister(), setEnabled() and isEnabled()
    */
