@@ -93,6 +93,16 @@ Unreleased
   ``CustomSerializerT(std::string)`` is ``explicit``. Removed: ``getPointerType`` and
   ``WriteMutex::kPriorityInheritance``. **Source change**: ``mcap_ring_sink.hpp`` no
   longer includes ``mcap_sink.hpp``.
+* **Real-time**: a snapshot wakes sleeping sink workers after it releases the write
+  mutex, so writers wait less (with four sinks the mutex was held 13 us per snapshot,
+  2.5 us now). Serializing a number checks the buffer once.
+* **Fixed**: a ``ValuePtr`` container count of 2^32 or more throws instead of being
+  written truncated. ``SerializeMe::enable_if_same_t`` is removed. Some error texts
+  changed: a number that does not fit reports "Buffer overrun", and ``MCAPRingSink``
+  reports a negative timestamp with the text of ``mcap_encoding::CheckTimestamp()``.
+* **Clang**: ``discoverTypes()`` and ``TypesRegistry`` no longer trigger
+  ``-Wunused-lambda-capture`` and ``-Wpotentially-evaluated-expression``, which broke
+  ``-Werror`` builds of consumers that register a custom type.
 * **ABI**: one new private exported function, ``LogChannel::registerValueWithTypes``.
 * **Counters in one struct per channel and one per sink**:
   ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and
