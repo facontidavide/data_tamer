@@ -253,3 +253,56 @@ TEST(ParserRobustness, VersionAndHashMustBeUnsignedDecimals)
       BuildSchemaFromText("### version: 5\n### hash: 18446744073709551615\n" + tail);
   EXPECT_EQ(largest.hash, UINT64_MAX);
 }
+
+// Schema text: custom type sections
+
+TEST(ParserRobustness, SeparatorIsALineOfAtLeast30EqualSigns)
+{
+  for(const size_t length : { size_t{ 30 }, size_t{ 59 }, size_t{ 100 } })
+  {
+    const auto schema =
+        BuildSchemaFromText(kHeader + "Pose p\n" + std::string(length, '=') +
+                            " \r\nMSG: Pose\n"
+                            "float64 x\n");
+    ASSERT_EQ(schema.custom_types.count("Pose"), 1u) << length;
+    EXPECT_EQ(schema.custom_types.at("Pose").size(), 1u) << length;
+  }
+}
+
+TEST(ParserRobustness, ShorterRunOfEqualSignsIsNotASeparator)
+{
+  const std::string text =
+      kHeader + "Pose p\n" + std::string(29, '=') + "\nMSG: Pose\nfloat64 x\n";
+  EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error);
+}
+
+TEST(ParserRobustness, FieldNameHoldingEqualSignsIsNotASeparator)
+{
+  const std::string name = "a" + std::string(35, '=') + "b";
+  const auto schema = BuildSchemaFromText(kHeader + "float64 " + name + "\nint8 after\n");
+  ASSERT_EQ(schema.fields.size(), 2u);
+  EXPECT_EQ(schema.fields[0].field_name, name);
+  EXPECT_EQ(schema.fields[1].field_name, "after");
+  EXPECT_TRUE(schema.custom_types.empty());
+}
+
+TEST(ParserRobustness, TypeNameLineAfterTheSeparatorIsTrimmedAndMayFollowBlankLines)
+{
+  for(const char* msg_line : { "  MSG: Pose", "MSG: Pose  \r", "\n \n  MSG:   Pose" })
+  {
+    const auto schema = BuildSchemaFromText(kHeader + "Pose p\n" + kSeparator + "\n" +
+                                            msg_line + "\nfloat64 x\n");
+    ASSERT_EQ(schema.custom_types.size(), 1u) << "[" << msg_line << "]";
+    EXPECT_EQ(schema.custom_types.begin()->first, "Pose") << "[" << msg_line << "]";
+  }
+}
+
+TEST(ParserRobustness, SeparatorNotFollowedByATypeNameIsRejected)
+{
+  for(const char* after : { "float64 x\n", "MSG:\n", "" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(kHeader + "Pose p\n" + kSeparator + "\n" + after),
+                 std::runtime_error)
+        << "[" << after << "]";
+  }
+}

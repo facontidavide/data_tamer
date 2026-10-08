@@ -864,17 +864,26 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       continue;
     }
     any_line = true;
-    if(line.find("==============================") != std::string::npos)
+    if(line.size() >= 30 && line.find_first_not_of('=') == std::string::npos)
     {
-      std::getline(ss, line);
-      auto msg_pos = line.find("MSG: ");
-      if(msg_pos == std::string::npos)
+      // a separator: the next line that is not blank is "MSG: <type name>"
+      std::string msg_line;
+      while(std::getline(ss, msg_line))
       {
-        throw std::runtime_error("Expecting \"MSG: \" at the beginning of line: " + line);
+        trimString(msg_line);
+        if(!msg_line.empty())
+        {
+          break;
+        }
       }
-      line.erase(0, 5);
-      trimString(line);
-      field_vector = &schema.custom_types[line];
+      if(msg_line.rfind("MSG: ", 0) != 0)
+      {
+        throw std::runtime_error("Expecting \"MSG: \" at the beginning of line: " +
+                                 msg_line);
+      }
+      msg_line.erase(0, 5);
+      trimString(msg_line);
+      field_vector = &schema.custom_types[msg_line];
       continue;
     }
 

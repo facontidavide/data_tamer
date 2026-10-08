@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 SCHEMA_VERSION = 5
 SCHEMA_YAML_VERSION = 6  # the YAML rendering of the same schema (spec section 2.1)
 _READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
+_MIN_SEPARATOR = 30  # a type section starts with a line of at least this many "="
 
 # Basic type name -> little-endian struct; the order is the BasicType id order.
 _STRUCT = {
@@ -156,12 +157,17 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     target = schema.fields
     last_type = ""
     seen_line = False
+    after_separator = False
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
         seen_line = True
-        if line.startswith("====="):
+        if after_separator and not line.startswith("MSG: "):
+            raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
+        after_separator = False
+        if len(line) >= _MIN_SEPARATOR and not line.strip("="):
+            after_separator = True
             continue
         if line.startswith("### version:"):
             if _parse_uint(line.split(":", 1)[1].strip(), "version") not in _READABLE_VERSIONS:
@@ -182,6 +188,8 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             target.append(_parse_field_line(line))
     if not seen_line:
         raise ValueError("empty schema text")
+    if after_separator:
+        raise ValueError('expected "MSG: <type name>" after the last separator')
     if verify_hash and schema.hash != schema_hash(text):
         raise ValueError("schema hash does not match its text")
     return schema

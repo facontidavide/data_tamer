@@ -111,5 +111,35 @@ class SchemaNumbers(unittest.TestCase):
         self.assertEqual(largest.hash, 2**64 - 1)
 
 
+class CustomTypeSections(unittest.TestCase):
+    def test_separator_is_a_line_of_at_least_30_equal_signs(self):
+        for length in (30, 59, 100):
+            with self.subTest(length=length):
+                text = HEADER + "Pose p\n" + "=" * length + " \r\nMSG: Pose\nfloat64 x\n"
+                self.assertEqual(dt.parse_schema(text).custom_types,
+                                 {"Pose": [dt.Field("x", "float64")]})
+
+    def test_shorter_run_of_equal_signs_is_not_a_separator(self):
+        with self.assertRaises(ValueError):
+            dt.parse_schema(HEADER + "Pose p\n" + "=" * 29 + "\nMSG: Pose\nfloat64 x\n")
+
+    def test_field_name_holding_equal_signs_is_not_a_separator(self):
+        name = "a" + "=" * 35 + "b"
+        schema = dt.parse_schema(HEADER + f"float64 {name}\nint8 after\n")
+        self.assertEqual([f.field_name for f in schema.fields], [name, "after"])
+        self.assertEqual(schema.custom_types, {})
+
+    def test_type_name_line_is_trimmed_and_may_follow_blank_lines(self):
+        for msg_line in ("  MSG: Pose", "MSG: Pose  \r", "\n \n  MSG:   Pose"):
+            with self.subTest(msg_line=msg_line):
+                text = HEADER + f"Pose p\n{SEPARATOR}\n{msg_line}\nfloat64 x\n"
+                self.assertEqual(list(dt.parse_schema(text).custom_types), ["Pose"])
+
+    def test_separator_not_followed_by_a_type_name_is_rejected(self):
+        for after in ("float64 x\n", "MSG:\n", ""):
+            with self.subTest(after=after), self.assertRaises(ValueError):
+                dt.parse_schema(HEADER + f"Pose p\n{SEPARATOR}\n{after}")
+
+
 if __name__ == "__main__":
     unittest.main()
