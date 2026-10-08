@@ -196,6 +196,10 @@ size_t ForEachSnapshotInBatch(SchemaRegistry& registry, const BatchMsgT& batch,
 //---------------------------------------------------------
 //---------------------------------------------------------
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "needs a little endian host");
+#endif
+
 /// Reads a T from the front of `buffer` and advances it; throws std::runtime_error if
 /// it is too short. Copies the bytes as they are, so the host must be little endian.
 template <typename T>

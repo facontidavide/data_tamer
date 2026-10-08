@@ -121,15 +121,17 @@ target_include_directories(serialize_me_big_endian_test PRIVATE ${PROJECT_SOURCE
 set_target_properties(serialize_me_big_endian_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
-# Sources that must not compile. SOURCE holds a block under `#ifdef FAIL_CASE`. The
-# check is two tests: SOURCE without the block compiles (so a typo cannot pass for the
-# failure) and with the block the build fails. Extra arguments are compile options.
+# Sources that must not compile. SOURCE holds a block under `#ifdef FAIL_CASE`, or fails
+# through FAIL_OPTIONS. The check is two tests: SOURCE builds (with OPTIONS), so that a
+# typo cannot pass for the failure, and it does not build with FAIL_CASE defined and
+# FAIL_OPTIONS added.
 function(data_tamer_compile_fail NAME SOURCE)
+    cmake_parse_arguments(ARG "" "" "OPTIONS;FAIL_OPTIONS" ${ARGN})
     foreach(case compiles rejected)
         set(target ${NAME}_${case})
         add_library(${target} OBJECT EXCLUDE_FROM_ALL ${SOURCE})
         target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-        target_compile_options(${target} PRIVATE ${ARGN})
+        target_compile_options(${target} PRIVATE ${ARG_OPTIONS})
         set_target_properties(${target} PROPERTIES
             CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
         add_test(NAME ${target}
@@ -139,13 +141,18 @@ function(data_tamer_compile_fail NAME SOURCE)
         set_tests_properties(${target} PROPERTIES RESOURCE_LOCK data_tamer_compile_fail)
     endforeach()
     target_compile_definitions(${NAME}_rejected PRIVATE FAIL_CASE)
+    target_compile_options(${NAME}_rejected PRIVATE ${ARG_FAIL_OPTIONS})
     set_tests_properties(${NAME}_rejected PROPERTIES WILL_FAIL TRUE)
 endfunction()
 
 data_tamer_compile_fail(endian_swap_size compile_fail_endian_swap.cpp
-    -DSERIALIZE_LITTLEENDIAN=0)
+    OPTIONS -DSERIALIZE_LITTLEENDIAN=0)
 data_tamer_compile_fail(parse_snapshot_result compile_fail_parse_snapshot_result.cpp
-    $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>)
+    OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    data_tamer_compile_fail(parser_byte_order compile_fail_byte_order.cpp
+        FAIL_OPTIONS -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__)
+endif()
 
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
