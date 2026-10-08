@@ -200,3 +200,35 @@ TEST(LockOrder, StartLoggingInsideATransaction)
     EXPECT_EQ(sink->snapshotsCount(channel->getSchema().hash), 1);
   });
 }
+
+// A thread holding its own transaction or guard can't take a snapshot of the
+// channel: both variants return `blocked` (counted as contention) instead of
+// waiting for themselves, and capture nothing.
+TEST(LockOrder, SnapshotInsideOwnTransactionOrGuardIsBlocked)
+{
+  expectFinishes([] {
+    auto channel = LogChannel::create("lock_order");
+    auto value = channel->createLoggedValue<std::vector<double>>("value");
+    auto sink = DataTamerTest::manual<DummySink>();
+    channel->addDataSink(sink);
+    {
+      auto tx = channel->scopedWrite();
+      EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::blocked);  // starts logging
+      EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::blocked);
+    }
+    EXPECT_TRUE(channel->isLoggingStarted());
+    {
+      auto guard = value->getMutablePtr();
+      EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::blocked);
+      EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::blocked);
+    }
+    {
+      auto guard = value->getConstPtr();
+      EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::blocked);
+    }
+    EXPECT_EQ(channel->writeLockContended(), 5u);
+    EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);  // no guard left
+    sink.drain();
+    EXPECT_EQ(sink->snapshotsCount(channel->getSchema().hash), 1);
+  });
+}

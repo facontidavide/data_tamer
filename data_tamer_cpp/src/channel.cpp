@@ -898,6 +898,13 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
   auto& snapshot = slot->snapshot;
 
+  // This thread holds the write mutex (scopedWrite() or a guard): it would wait for
+  // itself.
+  if(_p->shared->inTransactionOnThisThread())
+  {
+    _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+    return SnapshotResult::blocked;
+  }
   // The write mutex before the epoch: a control operation waiting for the epoch
   // (it may run inside a transaction) never waits for a snapshot that waits for it.
   auto& write_mutex = _p->shared->write_mutex;

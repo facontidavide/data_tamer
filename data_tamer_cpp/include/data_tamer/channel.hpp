@@ -60,7 +60,8 @@ enum class SnapshotResult : uint8_t
   pool_exhausted,
   /// tryTakeSnapshot(): the payload outgrew the slot (see droppedOversize()).
   oversize,
-  /// tryTakeSnapshot(): a writer held the write mutex past the spin budget.
+  /// tryTakeSnapshot(): a writer held the write mutex past the spin budget. Both
+  /// variants: the calling thread holds it itself (scopedWrite(), a LoggedValue guard).
   blocked
 };
 
@@ -255,8 +256,8 @@ public:
    *
    * Keep the scope short and free of blocking calls: the snapshot thread waits for it
    * (takeSnapshot() blocks, tryTakeSnapshot() returns `blocked`). Nested transactions
-   * and LoggedValue guards on the same thread are safe, but that thread must not take
-   * a snapshot meanwhile: takeSnapshot() would deadlock.
+   * and LoggedValue guards on the same thread are safe; a snapshot that thread takes
+   * meanwhile returns `blocked`.
    */
   [[nodiscard]] WriteTransaction scopedWrite();
 
