@@ -67,10 +67,10 @@ struct LogChannel::Pimpl
   std::shared_ptr<SnapshotPool> pool;
   Schema schema;
   bool schema_frozen = false;  // control_mutex held
-  // Set once by prepare() after the pool and every sink announcement succeeded;
+  // Set once by startLogging() after the pool and every sink announcement succeeded;
   // read without locks by the snapshot thread.
   std::atomic<bool> logging_started{ false };
-  std::mutex prepare_mutex;  // one prepare() at a time; control_mutex is released inside
+  std::mutex start_mutex;  // serializes startLogging(), which releases control_mutex
 
   /// Schema changed while open: every sink must hear it again.
   void invalidateAnnouncements()
@@ -129,7 +129,7 @@ struct LogChannel::Pimpl
     return size;
   }
 
-  // Per-slot payload reservation made by prepare(); caller holds write_mutex
+  // Per-slot payload reservation made by startLogging(); caller holds write_mutex
   // with the mask rebuilt. When every value is fixed-size, exactly the payload
   // with all of them enabled (one disabled now may be enabled later). Otherwise
   // twice the current payload and at least 256 bytes, so that containers can
@@ -213,7 +213,7 @@ struct LogChannel::Pimpl
 
   // Gives sinks[i] its queue on the worker, as many entries as the pool has
   // slots, then publishes the link to the snapshot thread. Caller holds
-  // control_mutex, and prepare() created the pool. Throws (std::bad_alloc)
+  // control_mutex, and startLogging() created the pool. Throws (std::bad_alloc)
   // before anything is published.
   void publish(size_t i)
   {
@@ -411,7 +411,7 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
   auto link = std::make_unique<Pimpl::SinkLink>(sink);
   if(_p->schema_frozen)
   {
-    // Same protocol as prepare(): the sink hears a copy of the final schema
+    // Same protocol as startLogging(): the sink hears a copy of the final schema
     // with the control mutex released, so it may query the channel.
     const Schema schema = _p->schema;
     lock.unlock();
@@ -425,7 +425,7 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
     }
   }
   _p->sinks[*free_slot] = std::move(link);
-  // Before logging starts, prepare() gives the link its queue and publishes it.
+  // Before logging starts, startLogging() gives the link its queue and publishes it.
   if(_p->logging_started.load(std::memory_order_relaxed))
   {
     try
@@ -672,14 +672,14 @@ bool LogChannel::hasCustomType(const std::string& type_name) const
   return _p->schema.custom_types.contains(type_name);
 }
 
-bool LogChannel::isPrepared() const
+bool LogChannel::isLoggingStarted() const
 {
   return _p->logging_started.load(std::memory_order_acquire);
 }
 
-void LogChannel::prepare()
+void LogChannel::startLogging()
 {
-  std::lock_guard const serialize(_p->prepare_mutex);
+  std::lock_guard const serialize(_p->start_mutex);
   if(_p->logging_started.load(std::memory_order_relaxed))
   {
     return;
@@ -735,7 +735,7 @@ void LogChannel::prepare()
   // Last step, under the lock: a queue for every link (as large as the pool;
   // links attached from now on get theirs in addDataSink()), then every link
   // published. A failed allocation, the only throw left, leaves the schema
-  // frozen with its pool and nothing published; prepare() can be called again.
+  // frozen with its pool and nothing published; startLogging() can be called again.
   _p->forEachLink([&](Pimpl::SinkLink& link) { link.ensureQueue(_p->pool->capacity()); });
   for(size_t i = 0; i < _p->sinks.size(); ++i)
   {
@@ -756,7 +756,7 @@ SnapshotResult LogChannel::takeSnapshot(std::chrono::nanoseconds timestamp)
     {
       return SnapshotResult::no_sinks;  // nothing to deliver to: stay open
     }
-    prepare();
+    startLogging();
   }
   return takeSnapshotImpl(timestamp, false);
 }
@@ -766,7 +766,7 @@ SnapshotResult LogChannel::tryTakeSnapshot(std::chrono::nanoseconds timestamp)
   _p->attempts.fetch_add(1, std::memory_order_relaxed);
   if(!_p->logging_started.load(std::memory_order_acquire))
   {
-    return SnapshotResult::not_prepared;
+    return SnapshotResult::not_started;
   }
   return takeSnapshotImpl(timestamp, true);
 }

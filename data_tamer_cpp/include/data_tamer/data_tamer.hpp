@@ -61,7 +61,7 @@ public:
   static ChannelsRegistry& Global();
 
   /// Attach this sink to every channel of the registry: the ones that exist
-  /// (a prepared channel announces its schema to the sink at once, see
+  /// (a started channel announces its schema to the sink at once, see
   /// LogChannel::addDataSink) and the ones getChannel() creates later.
   /// A sink a channel holds already is not attached twice. If a channel
   /// refuses the sink (eight sinks already, onSchema() throws), the sink is
@@ -73,7 +73,7 @@ public:
 
   /// Settings for the channels getChannel() creates from now on. Channels that
   /// exist already are not changed: their owner may have configured them, and
-  /// pool and payload sizes freeze at prepare().
+  /// pool and payload sizes freeze at startLogging().
   /// Throws what ChannelDefaults::resolve() throws (checked here, not at
   /// getChannel()); the previous defaults are then kept.
   void setChannelDefaults(const ChannelDefaults& defaults);

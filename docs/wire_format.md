@@ -315,7 +315,7 @@ Topics under a user-chosen prefix:
 - `<prefix>/schemas`, type `data_tamer_msgs/msg/Schemas`, reliable,
   transient-local, `KeepLast(1)`. Each message is the complete catalog (every
   schema the sink knows), republished as soon as a schema is added (when a
-  channel is prepared), so a late subscriber receives the latest catalog only
+  channel starts logging), so a late subscriber receives the latest catalog only
   and needs nothing older. Each entry carries `uint64 hash`,
   `string channel_name`, `string schema_text` (section 2).
 - `<prefix>/data`, type `data_tamer_msgs/msg/Snapshot`, with

@@ -116,7 +116,7 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   (`tests/alloc_counter.hpp`): add one when you touch these paths. `takeSnapshot()` may
   block and grow a slot; keep the two variants distinct.
 - `onSchema()`/`onSnapshot()`/`onStop()`/`onStart()` are serialized by the SinkWorker,
-  and control operations (registration, sinks, `prepare()`) wait for them. Never call a
+  and control operations (registration, sinks, `startLogging()`) wait for them. Never call a
   control operation from a sink callback, a serializer or inside `scopedWrite()`.
   `stop()` runs `onStop()` once per stop, after the last delivery, and `start()` after a
   stop runs `onStart()`: a sink that needs to finish (close, flush, dump) or reopen does

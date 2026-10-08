@@ -60,7 +60,7 @@ flowchart LR
 - `LogChannel` (`data_tamer/channel.hpp`) holds pointers to registered variables. It
   reads them only when you take a snapshot. One channel is one schema and one rate: use
   several channels for several loops or rates.
-- `prepare()` freezes the schema, allocates a pool of snapshot slots plus one queue per
+- `startLogging()` freezes the schema, allocates a pool of snapshot slots plus one queue per
   attached sink, as long as the pool, and announces the schema to every attached sink
   (`DataSink::onSchema()`).
 - `takeSnapshot()` or `tryTakeSnapshot()` serializes every enabled value into a free pool
@@ -155,7 +155,7 @@ int main()
   auto mode = channel->createLoggedValue<int32_t>("mode");  // RAII, atomic
 
   channel->setPoolCapacity(200ms, 1ms);  // absorb a 200 ms sink stall at 1 kHz
-  channel->prepare();             // freeze schema, allocate pool, announce
+  channel->startLogging();             // freeze schema, allocate pool, announce
 
   uint64_t lost = 0;
   for(int i = 0; i < 2000; ++i)  // 1 kHz control loop
@@ -180,7 +180,7 @@ int main()
         ++lost;                             // count, never block or log here
         break;
       case SnapshotResult::no_sinks:
-      case SnapshotResult::not_prepared:
+      case SnapshotResult::not_started:
         break;
     }
     cycle_time_ms = std::chrono::duration<double, std::milli>(
@@ -237,7 +237,7 @@ The wire format has no string type. A `std::string` registers as `char[]`, a vec
 
 ### When registration is allowed
 
-All values must be registered before the schema freezes. `prepare()` freezes it, and so
+All values must be registered before the schema freezes. `startLogging()` freezes it, and so
 does the first `takeSnapshot()` that finds a sink attached (a `takeSnapshot()` without
 sinks returns `no_sinks` and leaves the schema open). After the freeze:
 
@@ -394,9 +394,9 @@ Rules:
 - The specialization must be visible wherever the type is registered.
 - The channel keys custom types by the returned name: give each C++ type its own name.
 
-## Preparing the channel
+## Starting to log
 
-Call `channel->prepare()` once, after registration and before the loop, on a non
+Call `channel->startLogging()` once, after registration and before the loop, on a non
 real-time thread. It:
 
 - freezes the schema;
@@ -407,21 +407,25 @@ real-time thread. It:
 - calls `onSchema()` of every attached sink on the calling thread. `MCAPSink` registers
   the MCAP channel, and `ROS2PublisherSink` publishes the schema catalog over DDS.
 
-If a sink throws from `onSchema()`, `prepare()` rethrows and leaves the channel as it was
+If a sink throws from `onSchema()`, `startLogging()` rethrows and leaves the channel as it was
 (schema open, pool released), so fixing the cause and calling it again is enough. The
 queues are allocated last: if that throws (`std::bad_alloc`), the schema stays frozen with
-its pool, nothing is published, and calling `prepare()` again retries the allocation. `prepare()` also works without sinks:
-a sink added later receives the schema inside `addDataSink()`. `isPrepared()` reports the
-state. `takeSnapshot()` prepares the channel implicitly, with its allocations and sink
-callbacks, which is why an explicit `prepare()` belongs outside the control loop.
+its pool, nothing is published, and calling `startLogging()` again retries the allocation. `startLogging()` also works without sinks:
+a sink added later receives the schema inside `addDataSink()`. `isLoggingStarted()` reports the
+state. `takeSnapshot()` calls `startLogging()` implicitly, with its allocations and sink
+callbacks, which is why an explicit `startLogging()` belongs outside the control loop.
 
 ## Taking snapshots
 
 Only one thread per channel may call `takeSnapshot()` or `tryTakeSnapshot()`.
 
+`tryTakeSnapshot()` exists to be lock-free: it never blocks on a lock and never allocates,
+and reports every failure as a `SnapshotResult` instead of throwing. Use it on real-time
+threads; `takeSnapshot()` waits and allocates where `tryTakeSnapshot()` gives up.
+
 | | `takeSnapshot()` | `tryTakeSnapshot()` |
 |---|---|---|
-| Before `prepare()` | prepares the channel if a sink is attached | returns `not_prepared` |
+| Before `startLogging()` | calls `startLogging()` if a sink is attached | returns `not_started` |
 | Write mutex held by a writer | spins 2 us, then blocks | spins 2 us, then returns `blocked` |
 | Payload larger than the slot | grows the slot (allocates) | returns `oversize` |
 | Use from a real-time thread | no | yes |
@@ -433,8 +437,8 @@ Both return a `[[nodiscard]] SnapshotResult`. Cast to `(void)` to ignore it on p
 | `ok` | Captured and queued by every sink. | Nothing. |
 | `partial` | Captured, but some sinks refused it because their `SinkWorker` is stopped. | Check `stats().dropped_by_sink`; `start()` the worker or detach it. |
 | `rejected` | Captured, but every sink refused it (every worker stopped). | Same as `partial`. |
-| `no_sinks` | No sink attached; nothing captured. Before `prepare()` the schema stays open. | Attach a sink. |
-| `not_prepared` | `tryTakeSnapshot()` before `prepare()`; nothing captured. | Call `prepare()` first. |
+| `no_sinks` | No sink attached; nothing captured. Before `startLogging()` the schema stays open. | Attach a sink. |
+| `not_started` | `tryTakeSnapshot()` before `startLogging()`; nothing captured. | Call `startLogging()` first. |
 | `pool_exhausted` | Sinks still hold every pool slot; the sample is lost for every sink. | Raise `setPoolCapacity()`, or fix the slow sink. |
 | `oversize` | `tryTakeSnapshot()`: the payload outgrew the slot. | Raise `setPayloadCapacity()`. |
 | `blocked` | `tryTakeSnapshot()`: a writer held the write mutex past the spin budget. | Shorten `scopedWrite()` scopes and pointer guards. |
@@ -517,7 +521,7 @@ channels it creates, their default sinks and their default settings.
 - `getChannel(name)` creates the channel on first use. It applies the channel defaults,
   then attaches the default sinks.
 - `addDefaultSink(worker)` attaches the sink to every existing channel and to every
-  channel created later. A prepared channel announces its schema to the sink at once
+  channel created later. A started channel announces its schema to the sink at once
   (`onSchema()` on the calling thread). A channel that holds the sink already keeps it.
   If one channel refuses the sink (it holds eight sinks already, or `onSchema()` throws),
   the call is undone: the channels it attached the sink to drop it again, it does not
@@ -527,7 +531,7 @@ channels it creates, their default sinks and their default settings.
   or after the channels exist.
 - `setChannelDefaults(ChannelDefaults{...})` sets what `getChannel()` applies to the
   channels it creates from then on (table below). Existing channels are not changed:
-  their owner may have configured them, and their sizes freeze at `prepare()`. A field
+  their owner may have configured them, and their sizes freeze at `startLogging()`. A field
   left at zero keeps the library default. The values are checked when the call is made
   (`ChannelDefaults::resolve()`, which throws `std::invalid_argument` or
   `std::length_error` like the `LogChannel` setters), and a refused call keeps the
@@ -553,7 +557,7 @@ defaults.pool_snapshot_period = 1ms;    // ... at 1 kHz: 200 slots
 registry.setChannelDefaults(defaults);
 registry.addDefaultSink(DataTamer::MCAPSink::create("run.mcap"));
 auto channel = registry.getChannel("controller");  // 200 slots, MCAP attached
-// ... register, prepare, log ...
+// ... register, startLogging(), log ...
 registry.stopAll();  // run.mcap is complete
 ```
 
@@ -667,8 +671,8 @@ ring->stop();
 
 - `<prefix>/schemas` (`data_tamer_msgs/Schemas`) carries the complete schema catalog in
   every message: reliable, transient-local, depth 1, so late subscribers get it. It is
-  published when a channel is prepared, from the thread calling `prepare()` or
-  `addDataSink()`. Call `prepare()` before the control loop, or the first
+  published when a channel starts logging, from the thread calling `startLogging()` or
+  `addDataSink()`. Call `startLogging()` before the control loop, or the first
   `takeSnapshot()` makes that DDS write.
 - `<prefix>/data` (`data_tamer_msgs/Snapshot`) carries one message per snapshot, or
   `<prefix>/data_batch` (`data_tamer_msgs/SnapshotBatch`) carries batches when
@@ -717,7 +721,7 @@ sleeping.
 Derive from `DataTamer::DataSink` and implement the two protected callbacks, plus
 `onStop()` and `onStart()` if the sink has something to finish and reopen:
 
-- `onSchema(const Schema&)` runs on the thread that prepares the channel or attaches the
+- `onSchema(const Schema&)` runs on the thread that starts logging or attaches the
   sink, once per channel schema.
 - `onSnapshot(const SnapshotRef&)` runs on the worker thread, in the order each channel
   took its snapshots.
@@ -736,7 +740,7 @@ Derive from `DataTamer::DataSink` and implement the two protected callbacks, plu
 - For slow work (network, disk, batching), copy with `Snapshot copy = *ref;`, hand the
   copy to your own thread and return.
 - Callbacks may call the channel's const queries (`getSchema()`, `stats()`), never
-  anything that changes it (registration, sinks, `prepare()`): those wait for callbacks
+  anything that changes it (registration, sinks, `startLogging()`): those wait for callbacks
   and deadlock.
 
 ```cpp
@@ -813,7 +817,7 @@ sinks are sized from the pool and never fill.
 
 Every snapshot queued in any sink, or retained by one, holds a slot. The default is 64
 slots (`SnapshotPool::kDefaultCapacity`): 64 ms at 1 kHz. Size it in time, before
-`prepare()`:
+`startLogging()`:
 
 ```cpp
 channel->setPoolCapacity(200ms, 1ms);  // ceil(200 ms / 1 ms) = 200 slots
@@ -828,13 +832,13 @@ accept (an MCAP disk flush can take 200 ms) and the snapshot period, and sets
 ### Payload capacity (per slot)
 
 Scalars take `sizeof(T)`, a `std::array` takes its elements, and a `std::vector` takes 4
-bytes of length plus its elements. `prepare()` reserves, per slot:
+bytes of length plus its elements. `startLogging()` reserves, per slot:
 
 - when every registered value is fixed-size (scalars, `std::array`, custom types whose
   serializer is fixed-size): exactly the payload with every value enabled, so a value
-  disabled at `prepare()` still fits when enabled later;
+  disabled at `startLogging()` still fits when enabled later;
 - otherwise (a `std::vector` or a variable-size custom type is registered, or a value was
-  unregistered before `prepare()`): `max(2 x payload size at prepare(), 256)`.
+  unregistered before `startLogging()`): `max(2 x payload size at startLogging(), 256)`.
 
 `setPayloadCapacity(bytes)` raises that reservation to at least `bytes`. If vectors grow
 at run time past the slot, `tryTakeSnapshot()` returns `oversize` and `takeSnapshot()`
@@ -898,15 +902,15 @@ The two extra counters cost the snapshot path two atomic increments (`attempts` 
 
 | Call | Real-time safe | Notes |
 |---|---|---|
-| `tryTakeSnapshot()` | yes | Requires `prepare()`. Custom serializers must not allocate, block or throw. |
-| `takeSnapshot()` | no | Can block on the write mutex, grow a slot, or prepare the channel. |
+| `tryTakeSnapshot()` | yes | Requires `startLogging()`. Custom serializers must not allocate, block or throw. |
+| `takeSnapshot()` | no | Can block on the write mutex, grow a slot, or call `startLogging()`. |
 | scalar `LoggedValue::set()`, `get()` | yes | Wait-free. |
 | non-scalar `LoggedValue::set()`, `get()`, pointer guards | no | Lock the write mutex while a snapshot serializes. |
 | `trySetEnabled()`, `LoggedValue::setEnabled()` | yes | Lock-free. `setEnabled()` can throw. |
 | `MCAPRingSink::requestDump()` | yes | One compare-exchange. |
 | `writeLockContended()`, `payloadReallocations()`, `droppedOversize()`, `snapshotAttempts()`, `snapshotsAccepted()` | yes | Atomic loads. |
 | `registerValue()`, `createLoggedValue()`, `unregister()`, `LoggedValue` destructor | no | Control mutex; can wait for a snapshot. |
-| `addDataSink()`, `removeDataSink()`, `prepare()` | no | Control mutex; run sink callbacks. |
+| `addDataSink()`, `removeDataSink()`, `startLogging()` | no | Control mutex; run sink callbacks. |
 | `LogChannel::stats()`, `poolExhausted()`, `droppedSnapshots()`, `sinkDropped()`, `getSchema()` | no | Control mutex. |
 | `SinkWorker::delivered()`, `errors()`, `queueHighWater()` | yes | Relaxed atomic loads. |
 | `SinkWorker::stats()`, `lastError()` | no | Take a mutex and copy a string (allocates). |
@@ -919,7 +923,7 @@ Threads involved:
 
 - your snapshot thread: serializes values and pushes references, one thread per channel;
 - one worker thread per `SinkWorker`: runs `onSnapshot()` (MCAP writes, ROS publishes);
-- the thread calling `prepare()` or `addDataSink()`: runs `onSchema()`;
+- the thread calling `startLogging()` or `addDataSink()`: runs `onSchema()`;
 - the `MCAPRingSink` writer thread: writes dump files and runs the dump callback.
 
 ## Reading the data
@@ -955,7 +959,7 @@ MCAP file with it.
 
 - [ ] Included only `data_tamer/data_tamer.hpp` and used `LogChannel`: include
       `data_tamer/channel.hpp`.
-- [ ] Registered a value after `prepare()` or after the first snapshot with a sink: it
+- [ ] Registered a value after `startLogging()` or after the first snapshot with a sink: it
       throws. Register everything first.
 - [ ] Registered a pointer that dangles: a local that goes out of scope, a vector element
       before the vector grew, a member of a moved object, a member declared after the
@@ -964,9 +968,9 @@ MCAP file with it.
       without `scopedWrite()`.
 - [ ] Called `setCreateNewFileOnReset(false)` on an `MCAPSink` whose recording you keep:
       every reset truncates the file and discards what it held.
-- [ ] Skipped `prepare()`: the first `takeSnapshot()` in the loop then allocates and runs
+- [ ] Skipped `startLogging()`: the first `takeSnapshot()` in the loop then allocates and runs
       sink callbacks (a DDS write for ROS 2), and `tryTakeSnapshot()` returns
-      `not_prepared` forever.
+      `not_started` forever.
 - [ ] Used `takeSnapshot()` on a real-time thread: use `tryTakeSnapshot()`.
 - [ ] Ignored `SnapshotResult` and never read `stats()`: drops stay invisible.
 - [ ] Kept the default pool (64 ms at 1 kHz) with a sink that stalls longer.

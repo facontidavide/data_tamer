@@ -53,7 +53,7 @@ Attached<T> manual(Args&&... args)
   return attach<T>(DataTamer::SinkWorker::Delivery::Manual, std::forward<Args>(args)...);
 }
 
-/// A channel with one registered value, attached to `sink` (not prepared).
+/// A channel with one registered value, attached to `sink` (logging not started).
 template <typename T>
 std::shared_ptr<DataTamer::LogChannel>
 channelWith(const std::shared_ptr<DataTamer::SinkWorker>& sink, T* value,
@@ -65,7 +65,7 @@ channelWith(const std::shared_ptr<DataTamer::SinkWorker>& sink, T* value,
   return channel;
 }
 
-/// Snapshots a prepared channel accepts until its pool is exhausted. With
+/// Snapshots a started channel accepts until its pool is exhausted. With
 /// nothing delivered meanwhile, that is the pool capacity.
 inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
 {
@@ -84,7 +84,7 @@ inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
 
 /// True while the calling thread (or any other) holds the channel's write mutex:
 /// a probe thread's tryTakeSnapshot() reports `blocked`. The channel must be
-/// prepared with a sink attached (the probe takes a snapshot when not blocked).
+/// started with a sink attached (the probe takes a snapshot when not blocked).
 inline bool writeMutexHeld(DataTamer::LogChannel& channel)
 {
   bool held = false;

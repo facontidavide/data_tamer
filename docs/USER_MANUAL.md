@@ -19,8 +19,8 @@ the [FAQ](#faq) collects short answers that fit nowhere else.
 - A **channel** (`LogChannel`) owns a set of registered values and takes snapshots of them.
   Use one channel per rate: a 1 kHz controller and a 10 Hz planner get one channel each.
 - A **snapshot** is the value of every enabled variable of a channel at one time stamp.
-- The **schema** describes the values of a channel. It freezes the first time the channel
-  is prepared, and the sinks receive it once.
+- The **schema** describes the values of a channel. It freezes when the channel
+  starts logging, and the sinks receive it once.
 - A **sink** receives schemas and snapshots and does something with them: `MCAPSink`
   writes a file, `MCAPRingSink` keeps the last seconds in RAM, `ROS2PublisherSink`
   publishes ROS 2 messages. Each sink runs in a `SinkWorker`, which owns its thread.
@@ -40,7 +40,7 @@ character.
 
 ### When you can register
 
-Register everything before the first snapshot. The schema freezes at `channel->prepare()`,
+Register everything before the first snapshot. The schema freezes at `channel->startLogging()`,
 or at the first `takeSnapshot()` that finds a sink attached, and registering a new name
 after that throws `std::runtime_error`. A name you unregistered can be registered again
 after the freeze, but only with its original type, because it reuses its slot.
@@ -144,14 +144,16 @@ snapshot thread waits for them.
 
 ## Real-time use
 
-Do the work that allocates before the loop, and use `tryTakeSnapshot()` inside it:
+`tryTakeSnapshot()` exists to be lock-free: it never blocks on a lock and never
+allocates, so a real-time loop can call it every cycle. Do the work that allocates before
+the loop, and call `tryTakeSnapshot()` inside it:
 
 ```cpp
 using namespace std::chrono_literals;
 
 // before the loop, on a normal thread
 channel->setPoolCapacity(200ms, 1ms);  // absorb a 200 ms sink stall at 1 kHz
-channel->prepare();                    // freeze the schema, allocate, announce to the sinks
+channel->startLogging();                    // freeze the schema, allocate, announce to the sinks
 
 // inside the loop
 const auto result = channel->tryTakeSnapshot();
@@ -161,15 +163,15 @@ if(result != DataTamer::SnapshotResult::ok)
 }
 ```
 
-`tryTakeSnapshot()` never blocks and never allocates. Where `takeSnapshot()` would wait
-for a writer or grow a slot, it returns `blocked` or `oversize` instead. Only one thread
-per channel may take snapshots.
+Where `takeSnapshot()` would wait for a writer or grow a slot, `tryTakeSnapshot()` gives up
+and returns `blocked` or `oversize`. It reports every failure as a `SnapshotResult` and
+doesn't throw. Only one thread per channel may take snapshots.
 
 The pool has 64 slots by default, which is 64 ms at 1 kHz. If a sink stalls longer than
 that (a disk flush can take 200 ms), new snapshots are dropped with `pool_exhausted`.
 `setPoolCapacity(stall, period)` sizes the pool for the stall you want to absorb.
 `setPayloadCapacity(bytes)` reserves room for vectors that grow at run time. Both must be
-called before `prepare()`.
+called before `startLogging()`.
 
 ## Sinks
 
@@ -241,8 +243,7 @@ auto worker = DataTamer::ROS2PublisherSink::create(node, "/robot", options);
 channel->addDataSink(worker);
 ```
 
-Preparing the channel publishes the schemas, so call `channel->prepare()` before the
-control loop. The data topic keeps the last 100 messages (`options.data_qos`): a slow
+`startLogging()` publishes the schemas, so call it before the control loop. The data topic keeps the last 100 messages (`options.data_qos`): a slow
 subscriber loses old messages instead of growing the publisher's memory.
 [ros2_publisher.cpp](../data_tamer_cpp/examples/ros2_publisher.cpp) and
 [ros2_subscriber.py](../python/ros2_subscriber.py) show both ends.
@@ -355,7 +356,7 @@ Check what `takeSnapshot()` or `tryTakeSnapshot()` returns:
 | `no_sinks` | No sink is attached. | Attach one. |
 | `oversize` | A vector outgrew the slot (`tryTakeSnapshot()` only). | Raise `setPayloadCapacity()`. |
 | `blocked` | A writer held the write mutex too long (`tryTakeSnapshot()` only). | Shorten `scopedWrite()` scopes. |
-| `not_prepared` | `prepare()` was not called (`tryTakeSnapshot()` only). | Call it before the loop. |
+| `not_started` | `startLogging()` was not called (`tryTakeSnapshot()` only). | Call it before the loop. |
 
 For totals over time, read the counters from a non real-time thread:
 
@@ -371,7 +372,7 @@ full disk.
 
 ### Registration throws "once recording started"
 
-The schema froze before you registered the value. Register everything before `prepare()`
+The schema froze before you registered the value. Register everything before `startLogging()`
 and before the first snapshot. To record a value only some of the time, register it at
 start and use `setEnabled()`.
 
@@ -404,8 +405,8 @@ history the ring holds now.
 
 ### The first iteration of the control loop is slow
 
-The first `takeSnapshot()` prepared the channel: it allocated the pool and called the
-sinks, which for ROS 2 means a DDS write. Call `channel->prepare()` before the loop.
+The first `takeSnapshot()` called `startLogging()`: it allocated the pool and called the
+sinks, which for ROS 2 means a DDS write. Call `channel->startLogging()` before the loop.
 
 ### The ROS 2 publisher process grows in memory
 
@@ -435,7 +436,7 @@ Yes. A disabled value costs one bit per snapshot and no payload.
 
 ### Is `takeSnapshot()` safe on a real-time thread?
 
-No. It can block on a writer, allocate a larger slot, or prepare the channel. Use
+No. It can block on a writer, allocate a larger slot, or call `startLogging()`. Use
 `tryTakeSnapshot()`, as shown in [Real-time use](#real-time-use).
 
 ### Can one sink serve several channels?

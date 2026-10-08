@@ -63,18 +63,12 @@ struct ROS2PublisherOptions
 /// ROS2PublisherOptions::aggregate). Create it with ROS2PublisherSink::create()
 /// and pass the returned worker to LogChannel::addDataSink().
 ///
-/// Every message on `<topic_prefix>/schemas` holds the complete catalog (all the
-/// schemas the sink knows), and the topic is reliable, transient-local with
-/// depth 1: a late subscriber receives the latest catalog. It is published as
-/// soon as the sink learns a schema, i.e. by LogChannel::prepare() (explicit or
-/// from the first takeSnapshot()) or by addDataSink() on a prepared channel, on
-/// the calling thread. If that publish fails, prepare() still succeeds and the
-/// catalog stays pending: the next snapshot retries it (a failure is counted by
-/// the SinkWorker, see SinkWorker::errors()), and so does flush() (a failure
-/// throws to its caller).
-///
-/// Call LogChannel::prepare() explicitly outside the control loop: otherwise the
-/// first takeSnapshot() prepares the channel, which includes this DDS write.
+/// Every message on `<topic_prefix>/schemas` holds the complete catalog of the
+/// schemas the sink knows (reliable, transient-local, depth 1), so a late
+/// subscriber receives it. It is published when the sink learns a schema, by
+/// LogChannel::startLogging() or addDataSink(), on the calling thread: call
+/// startLogging() before the control loop. A failed publish is retried by the
+/// next snapshot and by flush().
 class ROS2PublisherSink : public DataSink
 {
 public:

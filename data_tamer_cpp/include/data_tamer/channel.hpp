@@ -61,11 +61,11 @@ enum class SnapshotResult : uint8_t
   partial,
   /// Captured, but every attached sink refused it (every SinkWorker stopped).
   rejected,
-  /// No sink is attached: nothing captured. Before prepare() this also leaves
+  /// No sink is attached: nothing captured. Before startLogging() this also leaves
   /// the schema open.
   no_sinks,
-  /// tryTakeSnapshot() before prepare(): nothing captured.
-  not_prepared,
+  /// tryTakeSnapshot() before startLogging(): nothing captured.
+  not_started,
   /// Every pool slot is still referenced by a sink; see poolExhausted().
   pool_exhausted,
   /// tryTakeSnapshot(): the payload outgrew the slot; see droppedOversize().
@@ -214,9 +214,9 @@ public:
    * @brief addDataSink attaches a sink (a SinkWorker owning a DataSink, see
    * MCAPSink::create or SinkWorker::create<T>) that will receive our snapshots.
    * A channel holds at most eight sinks; adding a ninth throws. Adding the
-   * same sink twice is a no-op. On a prepared channel it allocates the
+   * same sink twice is a no-op. Once logging started, it allocates the
    * channel's queue on that sink (as many entries as pool slots) and calls
-   * onSchema(); otherwise prepare() does both.
+   * onSchema(); otherwise startLogging() does both.
    * @return true if this call attached the sink, false if the channel held it
    * already.
    */
@@ -235,47 +235,35 @@ public:
   size_t getNumberOfSinks() const;
 
   /**
-   * @brief prepare freezes the schema, allocates the snapshot pool and announces
-   * the schema to every attached sink. Call it from a control thread once all
-   * values are registered; takeSnapshot() calls it implicitly otherwise.
-   *
-   * Throws if a sink rejects the schema or a size is impossible; the channel is
-   * then left exactly as before (schema still open, no pool), so fixing the
-   * cause and calling prepare() again is enough. Sinks that were announced
-   * successfully are not announced twice unless the schema changes. The last
-   * step allocates one queue per sink; if that throws (std::bad_alloc), the
-   * schema stays frozen with its pool, and calling prepare() again retries it.
-   * onSchema() runs without channel locks held (here and in addDataSink), so
-   * a sink may call the channel's const queries from it.
+   * @brief Freezes the schema, allocates the snapshot pool and announces the
+   * schema to the sinks: the channel is then ready to take snapshots. Call it
+   * once all values are registered; otherwise the first takeSnapshot() with a
+   * sink attached calls it. Throws if a sink rejects the schema or the pool
+   * can't be allocated; calling it again retries.
    */
-  void prepare();
+  void startLogging();
 
-  /// True once prepare() has completed (explicitly or through takeSnapshot()).
-  [[nodiscard]] bool isPrepared() const;
+  /// True once startLogging() has completed.
+  [[nodiscard]] bool isLoggingStarted() const;
 
   /**
-   * @brief takeSnapshot copies the current value of all your registered values
-   *  and sends a Snapshot to all your sinks.
-   *
-   * Call from one snapshot producer thread per channel. Control operations
-   * (registration, unregister, sink changes) must run outside writer guards
-   * and serializer callbacks; they may wait for an active snapshot to finish.
-   * Without sinks nothing is captured and the schema stays open. The first
-   * call with sinks prepares the channel (allocations, sink callbacks).
-   * @param timestamp is the time since epoch, by default.
+   * @brief Copies the registered values and sends the snapshot to every sink.
+   * Call it from one thread per channel. The first call with a sink attached
+   * calls startLogging(). It can wait for a writer and allocate: on a real-time
+   * thread, use tryTakeSnapshot(). Registration and sink changes wait for an
+   * active snapshot, so never call them inside scopedWrite() or a serializer.
+   * @param timestamp time since epoch, by default.
    */
   [[nodiscard]] SnapshotResult
   takeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
 
   /**
-   * @brief Real-time variant of takeSnapshot(). Requires prepare(). The
-   * library itself performs no allocation and no blocking acquisition on this
-   * path: it spins on the write mutex for its budget and returns `blocked`
-   * instead of waiting, sizes the payload against the slot and returns
-   * `oversize` instead of growing it, and publishes into one wait-free
-   * single-producer queue per sink, sized like the pool so that it never fills.
-   * What custom serializers do inside serializedSize()/serialize() is up to
-   * them: on this path they must not throw, allocate or block.
+   * @brief Lock-free takeSnapshot() for real-time threads: it never blocks and
+   * never allocates. Where takeSnapshot() would wait or allocate, it returns
+   * `blocked` (a writer holds the mutex), `oversize` (the payload outgrew its
+   * slot) or `not_started` (call startLogging() before the loop). It reports
+   * failures, never throws; custom serializers must not throw, allocate or
+   * block either.
    */
   [[nodiscard]] SnapshotResult
   tryTakeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
@@ -325,26 +313,26 @@ public:
   /// Snapshot attempts that could not acquire a free pool slot.
   [[nodiscard]] uint64_t poolExhausted() const;
 
-  /// Minimum payload bytes each pool slot reserves; configure before prepare().
-  /// prepare() reserves at least this much, and more when the schema needs it:
+  /// Minimum payload bytes each pool slot reserves; configure before startLogging().
+  /// startLogging() reserves at least this much, and more when the schema needs it:
   /// exactly the payload with every value enabled when all registered values
   /// are fixed-size (scalars, std::array, fixed-size custom types), otherwise
-  /// max(2 x payload size at prepare(), 256). Zero (the default) is automatic.
+  /// max(2 x payload size at startLogging(), 256). Zero (the default) is automatic.
   void setPayloadCapacity(size_t bytes);
 
   /// Number of pool slots, i.e. snapshots that may be queued in or retained by
   /// sinks at the same time; default 64 (SnapshotPool::kDefaultCapacity).
-  /// Configure before prepare(). Zero is invalid. Each attached sink gets a
+  /// Configure before startLogging(). Zero is invalid. Each attached sink gets a
   /// queue of the same size, so the pool is the only bound on in-flight
   /// snapshots.
   void setPoolCapacity(size_t count);
 
   /// Pool sized in time: enough slots to absorb a sink stall of
   /// `stall_tolerance` while snapshots are taken every `snapshot_period`, i.e.
-  /// ceil(stall_tolerance / snapshot_period). Configure before prepare(). Both
+  /// ceil(stall_tolerance / snapshot_period). Configure before startLogging(). Both
   /// arguments must be positive (std::invalid_argument, checked first); a
   /// result too large for setPoolCapacity(count) throws std::length_error, and
-  /// a call after prepare() throws std::runtime_error, like the count overload.
+  /// a call after startLogging() throws std::runtime_error, like the count overload.
   /// Example: 200 ms at 1 kHz gives 200 slots.
   void setPoolCapacity(std::chrono::nanoseconds stall_tolerance,
                        std::chrono::nanoseconds snapshot_period);
@@ -356,9 +344,9 @@ public:
   [[nodiscard]] uint64_t droppedOversize() const;
 
   /// Calls of takeSnapshot() and tryTakeSnapshot() so far, whatever their
-  /// result (a call that throws, e.g. from prepare(), counts too). Without
+  /// result (a call that throws, e.g. from startLogging(), counts too). Without
   /// such calls, attempts equal the sum of the results: ok + partial + rejected
-  /// + no_sinks + not_prepared + pool_exhausted + oversize + blocked.
+  /// + no_sinks + not_started + pool_exhausted + oversize + blocked.
   [[nodiscard]] uint64_t snapshotAttempts() const;
 
   /// Snapshots at least one attached sink took: the results `ok` and `partial`.

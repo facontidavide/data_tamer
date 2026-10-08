@@ -408,12 +408,12 @@ std::set<uint64_t> hashesOf(const data_tamer_msgs::msg::Schemas& msg)
 }
 }  // namespace
 
-TEST(DataTamerROS2Publisher, SchemasPublishedOnPrepareForLateJoiners)
+TEST(DataTamerROS2Publisher, SchemasPublishedOnStartLoggingForLateJoiners)
 {
   auto node = std::make_shared<rclcpp::Node>("test_datatamer_schemas_late");
   auto ros2_sink = ROS2PublisherSink::create(node, "test_schemas_late");
 
-  // two channels, prepared without taking any snapshot: two catalogs published
+  // two channels, started without taking any snapshot: two catalogs published
   auto channel_a = LogChannel::create("channel_schemas_late_a");
   auto channel_b = LogChannel::create("channel_schemas_late_b");
   double const value = 1.;
@@ -421,8 +421,8 @@ TEST(DataTamerROS2Publisher, SchemasPublishedOnPrepareForLateJoiners)
   channel_b->registerValue("b", &value);
   channel_a->addDataSink(ros2_sink);
   channel_b->addDataSink(ros2_sink);
-  channel_a->prepare();
-  channel_b->prepare();
+  channel_a->startLogging();
+  channel_b->startLogging();
 
   // the writer keeps only the latest one, which is the complete catalog
   const auto received = receiveRetainedSchemas(node, "test_schemas_late");
@@ -431,7 +431,7 @@ TEST(DataTamerROS2Publisher, SchemasPublishedOnPrepareForLateJoiners)
                                                         channel_b->getSchema().hash }));
 }
 
-TEST(DataTamerROS2Publisher, SchemasPublishedOnAddDataSinkToPreparedChannel)
+TEST(DataTamerROS2Publisher, SchemasPublishedOnAddDataSinkToStartedChannel)
 {
   auto node = std::make_shared<rclcpp::Node>("test_datatamer_schemas_add_sink");
   auto ros2_sink = ROS2PublisherSink::create(node, "test_schemas_add_sink");
@@ -440,7 +440,7 @@ TEST(DataTamerROS2Publisher, SchemasPublishedOnAddDataSinkToPreparedChannel)
   double const value = 1.;
   channel->registerValue("value", &value);
   channel->addDataSink(DummySink::create());
-  channel->prepare();
+  channel->startLogging();
   channel->addDataSink(ros2_sink);  // announced now; no snapshot is taken
 
   const auto received = receiveRetainedSchemas(node, "test_schemas_add_sink");

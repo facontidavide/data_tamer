@@ -194,7 +194,7 @@ TEST(LoggedValue, NonScalarStillWorksThroughMutablePtr)
   DataTamerTest::Attached<DummySink> sink;
   channel->addDataSink(sink);
   auto v = channel->createLoggedValue<std::vector<double>>("vec", { 1.0, 2.0 });
-  channel->prepare();
+  channel->startLogging();
   {
     auto p = v->getMutablePtr();
     p->push_back(3.0);

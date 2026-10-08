@@ -128,10 +128,10 @@ void ROS2PublisherSink::onSchema(const Schema& schema)
   _p->schemas[schema.hash] = std::move(schema_msg);
   _p->schema_changed = true;
 
-  // Publish the catalog now, from the thread running prepare() / addDataSink()
+  // Publish the catalog now, from the thread running startLogging() / addDataSink()
   // (serialized with onSnapshot() by the SinkWorker), so that subscribers get
   // it without waiting for a snapshot. Publisher::publish() is thread-safe.
-  // A failure must not make prepare() fail: the catalog stays pending, and the
+  // A failure must not make startLogging() fail: the catalog stays pending, and the
   // next onSnapshot() or flush() retries it and reports the error.
   try
   {

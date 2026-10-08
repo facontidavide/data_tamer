@@ -55,7 +55,7 @@ void ChannelsRegistry::addDefaultSink(std::shared_ptr<SinkWorker> sink)
   }
   // A default sink from here on: getChannel() attaches it to the channels it
   // creates meanwhile. The existing ones are attached without the registry
-  // lock, since a prepared channel announces its schema to the sink.
+  // lock, since a started channel announces its schema to the sink.
   bool inserted = false;
   std::vector<std::shared_ptr<LogChannel>> channels;
   {

@@ -75,8 +75,8 @@ TEST(ChannelStats, CountersMatchEveryResultOfAScriptedSequence)
 
   expect(channel->takeSnapshot(), SnapshotResult::no_sinks);
   channel->addDataSink(a);
-  expect(channel->tryTakeSnapshot(), SnapshotResult::not_prepared);
-  expect(channel->takeSnapshot(), SnapshotResult::ok);  // prepares
+  expect(channel->tryTakeSnapshot(), SnapshotResult::not_started);
+  expect(channel->takeSnapshot(), SnapshotResult::ok);  // starts logging
 
   channel->addDataSink(b);
   b.worker->stop();
@@ -113,7 +113,7 @@ TEST(ChannelStats, CountersMatchEveryResultOfAScriptedSequence)
   // Every result of the script was exercised, and the counters add up.
   for(auto result : { SnapshotResult::ok, SnapshotResult::partial,
                       SnapshotResult::rejected, SnapshotResult::no_sinks,
-                      SnapshotResult::not_prepared, SnapshotResult::pool_exhausted,
+                      SnapshotResult::not_started, SnapshotResult::pool_exhausted,
                       SnapshotResult::oversize, SnapshotResult::blocked })
   {
     EXPECT_GE(seen[result], 1u) << "result " << int(result) << " never happened";
@@ -225,7 +225,7 @@ TEST(ChannelStats, TheSnapshotPathStillAllocatesNothing)
   channel->setPoolCapacity(4);
   auto sink = manual<CountingSink>();
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
   ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   sink.drain();
   {
@@ -249,7 +249,7 @@ TEST(ChannelStats, CountersAreExactWhileAnotherThreadReadsThem)
   channel->setPoolCapacity(8);
   auto sink = attach<CountingSink>(Delivery::Threaded);
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
 
   std::atomic<bool> done{ false };
   std::thread reader([&] {
@@ -368,7 +368,7 @@ TEST(SinkWorkerStats, ThreadedWorkerCountsEverythingItDelivers)
   channel->setPoolCapacity(64);
   auto sink = attach<CountingSink>(Delivery::Threaded);
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
   uint64_t accepted = 0;
   for(int i = 0; i < 5000; ++i)
   {
@@ -394,7 +394,7 @@ TEST(ChannelStats, RefusedLastPushWhileAnotherSinkAcceptsIsPartial)
   auto first = manual<CountingSink>();
   channel->addDataSink(last);
   channel->addDataSink(first);
-  channel->prepare();
+  channel->startLogging();
   last.worker->stop();
 
   for(uint64_t round = 1; round <= 3; ++round)

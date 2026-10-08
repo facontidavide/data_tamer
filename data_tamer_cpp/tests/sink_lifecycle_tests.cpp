@@ -333,37 +333,37 @@ TEST(ChannelsRegistry, AddDefaultSinkReachesExistingChannels)
 
   auto open_channel = registry.getChannel("open");
   open_channel->registerValue("value", &value);
-  auto prepared_channel = registry.getChannel("prepared");
-  prepared_channel->registerValue("value", &value);
-  prepared_channel->addDataSink(other);
-  prepared_channel->prepare();
+  auto started_channel = registry.getChannel("started");
+  started_channel->registerValue("value", &value);
+  started_channel->addDataSink(other);
+  started_channel->startLogging();
 
   auto journal = std::make_shared<Journal>();
   auto sink = manual<LifecycleSink>(journal).worker;
   registry.addDefaultSink(sink);
-  // The prepared channel announced its schema at once; the open one will at prepare().
-  EXPECT_EQ(journal->schemaCount("prepared"), 1);
+  // The started channel announced its schema at once; the open one will when it starts.
+  EXPECT_EQ(journal->schemaCount("started"), 1);
   EXPECT_EQ(journal->schemaCount("open"), 0);
   EXPECT_EQ(open_channel->getNumberOfSinks(), 1u);
-  EXPECT_EQ(prepared_channel->getNumberOfSinks(), 2u);
+  EXPECT_EQ(started_channel->getNumberOfSinks(), 2u);
 
   auto later = registry.getChannel("later");
   later->registerValue("value", &value);
   EXPECT_EQ(later->getNumberOfSinks(), 1u);
 
   ASSERT_EQ(open_channel->takeSnapshot(), SnapshotResult::ok);
-  ASSERT_EQ(prepared_channel->tryTakeSnapshot(), SnapshotResult::ok);
+  ASSERT_EQ(started_channel->tryTakeSnapshot(), SnapshotResult::ok);
   ASSERT_EQ(later->takeSnapshot(), SnapshotResult::ok);
   sink->drain();
   EXPECT_EQ(journal->schemaCount("open"), 1);
-  EXPECT_EQ(journal->schemaCount("prepared"), 1) << "announced once";
+  EXPECT_EQ(journal->schemaCount("started"), 1) << "announced once";
   EXPECT_EQ(journal->schemaCount("later"), 1);
   EXPECT_EQ(journal->snapshotCount(), 3);
 
   // Adding it again changes nothing.
   registry.addDefaultSink(sink);
-  EXPECT_EQ(prepared_channel->getNumberOfSinks(), 2u);
-  EXPECT_EQ(journal->schemaCount("prepared"), 1);
+  EXPECT_EQ(started_channel->getNumberOfSinks(), 2u);
+  EXPECT_EQ(journal->schemaCount("started"), 1);
 }
 
 TEST(ChannelsRegistry, AddDefaultSinkIsUndoneWhenAChannelRefusesIt)
@@ -410,7 +410,7 @@ TEST(ChannelsRegistry, ChannelDefaultsApplyToNewChannelsOnly)
   for(const auto& channel : { existing, created })
   {
     channel->registerValue("value", &value);
-    channel->prepare();
+    channel->startLogging();
   }
   EXPECT_EQ(acceptedUntilExhausted(*created), 3u);
   // An existing channel keeps the library default.
@@ -423,7 +423,7 @@ TEST(ChannelsRegistry, ChannelDefaultsApplyToNewChannelsOnly)
   registry.setChannelDefaults(defaults);
   auto timed = registry.getChannel("timed");
   timed->registerValue("value", &value);
-  timed->prepare();
+  timed->startLogging();
   EXPECT_EQ(acceptedUntilExhausted(*timed), 4u);
 
   // clear() forgets the defaults with the channels.
@@ -431,13 +431,13 @@ TEST(ChannelsRegistry, ChannelDefaultsApplyToNewChannelsOnly)
   auto fresh = registry.getChannel("fresh");
   fresh->registerValue("value", &value);
   fresh->addDataSink(sink);
-  fresh->prepare();
+  fresh->startLogging();
   EXPECT_EQ(acceptedUntilExhausted(*fresh), 64u);
 }
 
 TEST(ChannelsRegistry, ChannelDefaultsPayloadCapacityIsAFloor)
 {
-  // A vector that grows after prepare(): tryTakeSnapshot() refuses the snapshot
+  // A vector that grows after startLogging(): tryTakeSnapshot() refuses the snapshot
   // when it outgrows the slot, unless the defaults reserved enough.
   for(const size_t floor : { size_t{ 0 }, size_t{ 4096 } })
   {
@@ -449,7 +449,7 @@ TEST(ChannelsRegistry, ChannelDefaultsPayloadCapacityIsAFloor)
     auto channel = registry.getChannel("payload");
     std::vector<double> values(1, 0.0);
     channel->registerValue("values", &values);
-    channel->prepare();
+    channel->startLogging();
     values.resize(400);  // 3200 bytes, beyond the automatic 256-byte reserve
     EXPECT_EQ(channel->tryTakeSnapshot(),
               floor == 0 ? SnapshotResult::oversize : SnapshotResult::ok)
@@ -478,7 +478,7 @@ TEST(ChannelsRegistry, ChannelDefaultsAreValidatedWhenSet)
   registry.addDefaultSink(manual<LifecycleSink>(std::make_shared<Journal>()).worker);
   auto channel = registry.getChannel("validated");
   channel->registerValue("value", &value);
-  channel->prepare();
+  channel->startLogging();
   EXPECT_EQ(acceptedUntilExhausted(*channel), 5u);
 }
 

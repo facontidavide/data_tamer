@@ -57,7 +57,7 @@ Unreleased
 * ``ChannelsRegistry::stopAll()`` stops, once each, every default sink and
   every sink attached to a channel the registry created.
 * ``ChannelsRegistry::addDefaultSink()`` also attaches the sink to the
-  channels that exist already (a prepared one announces its schema at once,
+  channels that exist already (a started one announces its schema at once,
   without the registry lock held), so it no longer has to come before
   ``getChannel()``. If a channel refuses the sink, the call is undone and the
   exception propagates.
@@ -74,7 +74,7 @@ Unreleased
   Delivery = Delivery::Threaded)``. Each channel attached to a worker publishes
   into a single-producer single-consumer ring of its own, holding exactly as
   many snapshots as the channel's pool and allocated with the pool
-  (``prepare()``, or ``addDataSink()`` on a prepared channel). A queued
+  (``startLogging()``, or ``addDataSink()`` on a started channel). A queued
   snapshot holds a pool slot, so the ring can't fill while the pool has a free
   slot. Before, a channel's snapshots could be ``rejected`` with free slots once
   the moodycamel blocks of the shared queue were taken by other channels; now
@@ -89,7 +89,7 @@ Unreleased
 * ``LogChannel::setPoolCapacity(stall_tolerance, snapshot_period)`` sizes the
   pool in time: ``ceil(stall_tolerance / snapshot_period)`` slots, both
   positive, overflow-checked.
-* ``prepare()`` reserves per slot exactly the payload with every value enabled
+* ``startLogging()`` reserves per slot exactly the payload with every value enabled
   when all registered values are fixed-size (scalars, ``std::array``,
   fixed-size custom types; new ``ValuePtr::isFixedSize()``), instead of
   ``max(2 x payload, 256)``, which still applies to schemas with a dynamic
@@ -150,10 +150,10 @@ Unreleased
   safe defaults below).
   ``schemas`` is reliable, transient-local ``KeepLast(1)``: every message is the
   complete catalog, so a late subscriber still gets all schemas. The catalog is
-  published as soon as the sink learns a schema (``prepare()``, or
-  ``addDataSink()`` on a prepared channel) instead of with the next snapshot, so
-  call ``prepare()`` explicitly outside the control loop. A failed publication
-  does not fail ``prepare()``: it is retried by the next snapshot (counted in
+  published as soon as the sink learns a schema (``startLogging()``, or
+  ``addDataSink()`` on a started channel) instead of with the next snapshot, so
+  call ``startLogging()`` explicitly outside the control loop. A failed publication
+  does not fail ``startLogging()``: it is retried by the next snapshot (counted in
   ``SinkWorker::errors()``) or by ``flush()``, which now publishes a pending
   catalog even without aggregation and throws if that fails.
 * Parser helpers to decode the ROS messages without depending on ROS (templates
@@ -284,19 +284,22 @@ Unreleased
     ``BuilSchemaFromText`` remains as a deprecated alias for one release.
 * **Breaking, snapshots**: ``takeSnapshot()`` returns a ``[[nodiscard]]``
   ``SnapshotResult`` instead of ``bool`` (``ok``, ``partial``, ``rejected``,
-  ``no_sinks``, ``not_prepared``, ``pool_exhausted``, ``oversize``, ``blocked``). New
+  ``no_sinks``, ``not_started``, ``pool_exhausted``, ``oversize``, ``blocked``). New
   ``tryTakeSnapshot()`` for real-time producers: never blocks on the write mutex
-  and never grows a slot; it requires ``prepare()``. ``setStrictMode()`` is
+  and never grows a slot; it requires ``startLogging()``. ``setStrictMode()`` is
   removed (it was ``tryTakeSnapshot()``'s no-growth behaviour); the
   ``droppedOversize()`` counter stays.
-* New ``LogChannel::prepare()`` / ``isPrepared()``: freeze the schema, allocate
-  the pool and announce the schema to the sinks explicitly. A ``prepare()``
+* New ``LogChannel::startLogging()`` / ``isLoggingStarted()`` (``prepare()`` /
+  ``isPrepared()`` during the 2.0 development; ``SnapshotResult::not_prepared``
+  is now ``not_started``): freeze the schema, allocate the pool and announce the
+  schema to the sinks, so that the channel is ready to take snapshots. The first
+  ``takeSnapshot()`` with a sink attached calls it automatically. A ``startLogging()``
   that fails while sizing or announcing leaves the channel exactly as it was
   (schema open, settable capacities) so it can be retried; if the schema
   changes afterwards, sinks that already heard it are announced again. Its last
   step allocates one queue per sink: if that throws (``std::bad_alloc``), the
   schema stays frozen with its pool, nothing is published, and calling
-  ``prepare()`` again retries the allocation. ``takeSnapshot()`` without sinks now
+  ``startLogging()`` again retries the allocation. ``takeSnapshot()`` without sinks now
   returns ``no_sinks`` without freezing anything. Sink ``onSchema`` callbacks run
   with the channel control mutex released, so a sink may query the channel.
 * **Breaking, sinks**: ``DataSinkBase`` is replaced by composition. A sink

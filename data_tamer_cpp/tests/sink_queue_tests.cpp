@@ -139,8 +139,8 @@ TEST(SinkQueue, FixedPayloadFanoutAndRefusalDoNotAllocate)
   auto running = queueSink();
   auto channel = channelWith(stopped, &value);
   channel->addDataSink(running);
-  channel->prepare();  // Creates the pool and the queues, registers schemas.
-  stopped.drain();     // The first delivery pass sizes the worker's pass list.
+  channel->startLogging();  // Creates the pool and the queues, registers schemas.
+  stopped.drain();          // The first delivery pass sizes the worker's pass list.
   running.drain();
   size_t allocations = 0, deallocations = 0;
   int successes = 0, partials = 0;
@@ -673,7 +673,7 @@ TEST(SinkQueue, McapFailedRestartKeepsTheCurrentRecording)
 
 namespace
 {
-/// Prepared channels on one sink, each logging its own counter, which take()
+/// Started channels on one sink, each logging its own counter, which take()
 /// increments before every snapshot: delivered values grow in channel order.
 struct CountingChannels
 {
@@ -686,7 +686,7 @@ struct CountingChannels
       channel->registerValue("counter", &counters[i]);
       channel->setPoolCapacity(pool);
       channel->addDataSink(sink);
-      channel->prepare();
+      channel->startLogging();
       hashes.push_back(channel->getSchema().hash);
       channels.push_back(channel);
     }
@@ -948,7 +948,7 @@ public:
 // A queue attached while the worker is inside a delivery pass is served
 // without another push: that pass reports itself incomplete and the worker
 // runs the next one at once. Channel B's queue lands on the worker during the
-// gated callback of channel A: B's prepare() announced B to the worker and then
+// gated callback of channel A: B's startLogging() announced B to the worker and then
 // failed on another sink, so the retry announces only to that other sink (no
 // worker lock needed) and attaches B's queue. B's push posts before the gate
 // opens, so the last round of A's pass reads that post: without the check
@@ -974,7 +974,7 @@ TEST(SinkQueue, QueueAttachedDuringAPassIsServedWithoutAnotherPush)
   };
   uint64_t a_value = 1, b_value = 2;
   auto a = channelWith(sink, &a_value, "during_pass_a");
-  a->prepare();
+  a->startLogging();
 
   // Slots are filled from the highest down and announced from the lowest up:
   // `sink` hears B's schema before `refusing` throws.
@@ -984,7 +984,7 @@ TEST(SinkQueue, QueueAttachedDuringAPassIsServedWithoutAnotherPush)
   b->addDataSink(refusing);
   b->addDataSink(sink);
   refusing->refuse = true;
-  EXPECT_THROW(b->prepare(), std::runtime_error);
+  EXPECT_THROW(b->startLogging(), std::runtime_error);
   refusing->refuse = false;
   const auto b_hash = b->getSchema().hash;
 
@@ -994,7 +994,7 @@ TEST(SinkQueue, QueueAttachedDuringAPassIsServedWithoutAnotherPush)
     ASSERT_TRUE(
         condition.wait_for(lock, std::chrono::seconds(5), [&] { return entered; }));
   }
-  b->prepare();  // attaches B's queue on `sink` while its pass is gated
+  b->startLogging();  // attaches B's queue on `sink` while its pass is gated
   ASSERT_EQ(b->tryTakeSnapshot(), SnapshotResult::ok);
   {
     std::lock_guard lock(mutex);
@@ -1020,7 +1020,7 @@ TEST(SinkQueue, DrainFreesTheQueueOfADetachedChannel)
   int delivered = 0;
   sink->callback = [&](const SnapshotRef&) { ++delivered; };
   auto channel = channelWith(sink, &value);
-  channel->prepare();
+  channel->startLogging();
   for(int i = 0; i < 5; ++i)
   {
     ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
@@ -1072,7 +1072,7 @@ TEST(SinkQueue, EverySnapshotWakesAnIdleWorker)
     condition.notify_all();
   };
   auto channel = channelWith(sink, &value);
-  channel->prepare();
+  channel->startLogging();
   using std::chrono::microseconds;
   const std::array<microseconds, 6> pauses{ microseconds(0),  microseconds(5),
                                             microseconds(18), microseconds(22),

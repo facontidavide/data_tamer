@@ -31,7 +31,7 @@ int main()
   channel->registerValue("position", &position);
   channel->registerValue("velocity", &velocity);
   channel->addDataSink(worker);
-  channel->prepare();
+  channel->startLogging();
 
   // A 1 kHz control loop; a fault at t = 2 s.
   for(int i = 0; i < 3000; i++)

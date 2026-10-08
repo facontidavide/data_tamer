@@ -82,7 +82,7 @@ public:
 };
 }  // namespace
 
-TEST(ChannelCapacity, PrepareWithoutSinkReservesAndRejectsSetters)
+TEST(ChannelCapacity, StartLoggingWithoutSinkReservesAndRejectsSetters)
 {
   auto channel = LogChannel::create("capacity");
   auto value = channel->createLoggedValue<std::vector<double>>("value", { 1.0 });
@@ -95,17 +95,17 @@ TEST(ChannelCapacity, PrepareWithoutSinkReservesAndRejectsSetters)
   channel->setPayloadCapacity(0);  // Automatic minimum remains valid.
   // Without sinks nothing is captured and nothing is frozen.
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::no_sinks);
-  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::not_prepared);
-  EXPECT_FALSE(channel->isPrepared());
+  EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::not_started);
+  EXPECT_FALSE(channel->isLoggingStarted());
   channel->setPoolCapacity(2);
-  channel->prepare();  // Explicit preparation freezes even without sinks.
-  EXPECT_TRUE(channel->isPrepared());
+  channel->startLogging();  // An explicit start freezes even without sinks.
+  EXPECT_TRUE(channel->isLoggingStarted());
   EXPECT_THROW(channel->setPoolCapacity(2), std::runtime_error);
   EXPECT_THROW(channel->setPayloadCapacity(256), std::runtime_error);
   value->set(std::vector<double>(1024, 3.0));
   CapacityWorker sink;
   channel->addDataSink(sink);
-  // Must use the reservation made by prepare().
+  // Must use the reservation made by startLogging().
   EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::oversize);
   EXPECT_EQ(channel->droppedOversize(), 1u);
   EXPECT_EQ(channel->payloadReallocations(), 0u);
@@ -118,7 +118,7 @@ TEST(ChannelCapacity, TryTakeSnapshotReportsBlockedInsteadOfWaiting)
   auto value = channel->createLoggedValue<uint64_t>("value", 1);
   channel->setPoolCapacity(1);  // a leaked slot would show as pool_exhausted
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
   EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   sink.drain();
   {
@@ -144,7 +144,7 @@ TEST(ChannelCapacity, TryTakeSnapshotDoesNotThrowOrAllocateOnRejection)
   channel->registerCustomValue("second", &value, serializer);
   channel->setPoolCapacity(1);
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
   sink.drain();  // The first delivery pass sizes the worker's pass list.
   size_t allocations = 0;
   {
@@ -296,7 +296,7 @@ TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochOnBothPaths)
       auto id = channel->registerCustomValue("value", &value, serializer);
       channel->setPoolCapacity(1);
       channel->addDataSink(sink);
-      channel->prepare();
+      channel->startLogging();
       ASSERT_EQ(take(), SnapshotResult::ok);
       sink.drain();
       serializer->throw_size = sizing;
@@ -311,7 +311,7 @@ TEST(ChannelCapacity, ExceptionsReleaseSingleSlotAndEpochOnBothPaths)
   }
 }
 
-TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndPrepareCanRetry)
+TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndStartLoggingCanRetry)
 {
   auto channel = LogChannel::create("capacity");
   CapacityWorker sink;
@@ -323,8 +323,8 @@ TEST(ChannelCapacity, ImpossibleSizesFailSafelyAndPrepareCanRetry)
   channel->addDataSink(sink);
   serializer->size = std::numeric_limits<size_t>::max();
   EXPECT_THROW((void)channel->takeSnapshot(), std::length_error);
-  EXPECT_FALSE(channel->isPrepared());  // a failed prepare leaves the channel open
-  channel->setPayloadCapacity(256);     // so sizes can still be tuned
+  EXPECT_FALSE(channel->isLoggingStarted());  // a failed start leaves the channel open
+  channel->setPayloadCapacity(256);           // so sizes can still be tuned
   serializer->size = 8;
   ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   sink.drain();
@@ -443,7 +443,7 @@ TEST(ChannelCapacity, PoolSizedInTimeIsTheCeilingOfStallOverPeriod)
     channel->registerValue("value", &value);
     channel->addDataSink(sink);
     channel->setPoolCapacity(stall, period);
-    channel->prepare();
+    channel->startLogging();
     return acceptedUntilExhausted(*channel);
   };
   EXPECT_EQ(slots(milliseconds(200), milliseconds(1)), 200u);
@@ -475,7 +475,7 @@ TEST(ChannelCapacity, PoolSizedInTimeValidatesItsArguments)
   // About 9.2e18 slots, computed without overflow: more than a pool can address.
   EXPECT_THROW(channel->setPoolCapacity(nanoseconds::max(), nanoseconds(1)),
                std::length_error);
-  channel->prepare();  // the failed calls kept the capacity set before
+  channel->startLogging();  // the failed calls kept the capacity set before
   EXPECT_EQ(acceptedUntilExhausted(*channel), 3u);
   EXPECT_THROW(channel->setPoolCapacity(milliseconds(10), milliseconds(1)),
                std::runtime_error);
@@ -494,10 +494,10 @@ TEST(ChannelCapacity, FixedSizeSchemaReservesExactlyItsFullPayload)
   channel->registerValue("atomic", &atomic);
   channel->registerValue("pose", &pose);
   constexpr size_t kFull = 8 + 3 * 4 + 4 + 7 * 8;
-  // Disabled at prepare(): its bytes are still reserved, for when it comes back.
+  // Disabled at startLogging(): its bytes are still reserved, for when it comes back.
   channel->setEnabled(scalar_id, false);
   channel->addDataSink(sink);
-  channel->prepare();
+  channel->startLogging();
   ASSERT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
   sink.deliver();
   EXPECT_EQ(sink->last->payload.size(), kFull - 8);
@@ -542,7 +542,7 @@ TEST(ChannelCapacity, PayloadReserveRulePerSchemaKind)
     channel->setPayloadCapacity(hint);
     channel->setPoolCapacity(1);
     channel->addDataSink(sink);
-    channel->prepare();
+    channel->startLogging();
     EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
     sink.deliver();
     return sink->last->payload.capacity();

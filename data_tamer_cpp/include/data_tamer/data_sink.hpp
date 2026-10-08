@@ -106,11 +106,11 @@ private:
  * At a 1 kHz control rate, 64 slots last 64 ms. A sink that needs to do slow
  * work (network, disk flushes, batching) should copy what it needs
  * (`Snapshot copy = *ref;`), hand the copy to its own thread and return, or
- * raise the pool capacity before prepare().
+ * raise the pool capacity before startLogging().
  *
  * A callback may use the channel's const queries (getSchema(), stats(), ...)
  * but must never call anything that changes it (registration, sinks,
- * prepare()): those wait for callbacks to finish and would deadlock.
+ * startLogging()): those wait for callbacks to finish and would deadlock.
  *
  * ABI: the virtual functions below are frozen for 2.x. The library calls them
  * through vtables compiled into user binaries, so adding, removing or
@@ -138,15 +138,15 @@ protected:
  *
  * Each channel attached to the worker publishes into a queue of its own, which
  * holds exactly as many snapshots as the channel's pool has slots
- * (LogChannel::setPoolCapacity) and is allocated with the pool, in prepare(), or
- * in addDataSink() on a prepared channel. A queued snapshot holds a pool slot,
+ * (LogChannel::setPoolCapacity) and is allocated with the pool, in startLogging(),
+ * or in addDataSink() on a started channel. A queued snapshot holds a pool slot,
  * so the queue cannot fill while the pool has a free slot: the pool is the only
  * bound, and there is no queue size to configure. Snapshots of one channel are
- * delivered in the order they were taken; the worker serves the channels in
- * turn, so snapshots of different channels interleave in no guaranteed order.
- * A channel detached from the worker (removeDataSink(), channel destroyed) has
- * its queued snapshots delivered before its queue is freed, and before what it
- * publishes after attaching to the worker again.
+ * delivered in the order they were taken; the worker serves the channels in turn,
+ * so snapshots of different channels interleave in no guaranteed order. A channel
+ * detached from the worker (removeDataSink(), channel destroyed) has its queued
+ * snapshots delivered before its queue is freed, and before what it publishes
+ * after attaching to the worker again.
  *
  * An idle worker thread polls for about 20 us before it sleeps. A snapshot
  * pushed while it polls costs the snapshot thread an atomic increment and a

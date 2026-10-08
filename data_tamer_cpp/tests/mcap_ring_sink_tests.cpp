@@ -146,7 +146,7 @@ struct Source
   {
     channel->registerValue("value", &value);
     channel->addDataSink(sink);
-    channel->prepare();
+    channel->startLogging();
   }
   void take(int64_t ts)
   {

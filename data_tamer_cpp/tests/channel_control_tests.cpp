@@ -217,19 +217,19 @@ TEST(ChannelControl, RejectsNullSink)
   EXPECT_EQ(channel->getNumberOfSinks(), 0u);
 }
 
-TEST(ChannelControl, WithoutSinksNothingFreezesUntilPrepare)
+TEST(ChannelControl, WithoutSinksNothingFreezesUntilStartLogging)
 {
   auto channel = LogChannel::create("control");
   uint64_t value = 42;
   channel->registerValue("value", &value);
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::no_sinks);
-  EXPECT_FALSE(channel->isPrepared());
+  EXPECT_FALSE(channel->isLoggingStarted());
   channel->registerValue("late", &value);  // still allowed
-  channel->prepare();
-  EXPECT_TRUE(channel->isPrepared());
+  channel->startLogging();
+  EXPECT_TRUE(channel->isLoggingStarted());
   EXPECT_THROW(channel->registerValue("later", &value), std::runtime_error);
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::no_sinks);
-  channel->prepare();  // idempotent
+  channel->startLogging();  // idempotent
 }
 
 TEST(ChannelControl, StaleIdCannotResurrectDetachedValueAndTypesRemainChecked)
@@ -380,7 +380,7 @@ TEST(ChannelControl, RemovalWaitsForPausedReaderAndReferencesSurvive)
   EXPECT_EQ(retained->payload.size(), 8u);
 }
 
-TEST(ChannelControl, FailedPrepareLeavesTheChannelOpenAndRetryAnnouncesOnce)
+TEST(ChannelControl, FailedStartLoggingLeavesTheChannelOpenAndRetryAnnouncesOnce)
 {
   auto channel = LogChannel::create("control");
   auto good = controlSink();
@@ -391,7 +391,7 @@ TEST(ChannelControl, FailedPrepareLeavesTheChannelOpenAndRetryAnnouncesOnce)
   channel->addDataSink(good);  // Visited first: a retry must not register it twice.
   failing->reject_schema = true;
   EXPECT_THROW((void)channel->takeSnapshot(), std::runtime_error);
-  EXPECT_FALSE(channel->isPrepared());
+  EXPECT_FALSE(channel->isLoggingStarted());
   EXPECT_NO_THROW(channel->setPoolCapacity(4));  // nothing was frozen
   failing->reject_schema = false;
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
@@ -408,7 +408,7 @@ TEST(ChannelControl, FailedPrepareLeavesTheChannelOpenAndRetryAnnouncesOnce)
   EXPECT_EQ(failing->snapshots.size(), 2u);
 }
 
-TEST(ChannelControl, SchemaChangeAfterFailedPrepareIsAnnouncedAgain)
+TEST(ChannelControl, SchemaChangeAfterFailedStartLoggingIsAnnouncedAgain)
 {
   auto channel = LogChannel::create("control");
   auto good = controlSink();
@@ -418,11 +418,11 @@ TEST(ChannelControl, SchemaChangeAfterFailedPrepareIsAnnouncedAgain)
   channel->addDataSink(failing);
   channel->addDataSink(good);  // Visited first: announced before the failure.
   failing->reject_schema = true;
-  EXPECT_THROW(channel->prepare(), std::runtime_error);
+  EXPECT_THROW(channel->startLogging(), std::runtime_error);
   EXPECT_EQ(good->registrations, 1u);
   channel->registerValue("late", &value);  // open: allowed, and it changes the schema
   failing->reject_schema = false;
-  channel->prepare();
+  channel->startLogging();
   EXPECT_EQ(good->registrations, 2u);  // heard the final schema
   EXPECT_EQ(failing->registrations, 1u);
   EXPECT_EQ(good->schema.hash, channel->getSchema().hash);
@@ -432,7 +432,7 @@ TEST(ChannelControl, SchemaChangeAfterFailedPrepareIsAnnouncedAgain)
   checkPayloads(*good, 2);
 }
 
-// onSchema runs with the control mutex released, both from prepare() and from a
+// onSchema runs with the control mutex released, both from startLogging() and from a
 // late addDataSink(): a sink may query the channel from inside the callback.
 TEST(ChannelControl, SinksMayQueryTheChannelFromOnSchema)
 {
@@ -448,7 +448,7 @@ TEST(ChannelControl, SinksMayQueryTheChannelFromOnSchema)
   auto first = controlSink();
   first->on_schema = query;
   channel->addDataSink(first);
-  channel->prepare();
+  channel->startLogging();
   EXPECT_EQ(queries, 1u);
   auto late = controlSink();
   late->on_schema = query;
@@ -469,7 +469,7 @@ TEST(ChannelControl, LateAttachmentAnnouncesWithoutTheControlMutex)
   auto channel = LogChannel::create("control");
   uint64_t value = 42;
   channel->registerValue("value", &value);
-  channel->prepare();
+  channel->startLogging();
   auto sink = controlSink();
   Gate gate;
   sink->add_gate = &gate;

@@ -156,7 +156,7 @@ private:
   std::string name_ = "CustomValue";
 };
 
-// With probe_mutexes, every channel must be prepared with a sink attached.
+// With probe_mutexes, every channel must be started with a sink attached.
 void nestTransactions(const std::vector<std::shared_ptr<LogChannel>>& channels,
                       size_t index, bool probe_mutexes)
 {
@@ -181,7 +181,7 @@ TEST(Transaction, ScopedWriteOwnsTheSharedWriteMutex)
   auto channel = LogChannel::create("chan");
   auto value = channel->createLoggedValue<double>("value");
   channel->addDataSink(DummySink::create());
-  channel->prepare();
+  channel->startLogging();
   {
     auto tx = channel->scopedWrite();
     ASSERT_TRUE(DataTamerTest::writeMutexHeld(*channel));
@@ -227,7 +227,7 @@ TEST(Transaction, NestingAcrossMoreThanEightChannelsDoesNotAllocateOrAlias)
   for(auto& channel : channels)
   {
     channel->addDataSink(DummySink::create());
-    channel->prepare();
+    channel->startLogging();
   }
   nestTransactions(channels, 0, true);
 }
