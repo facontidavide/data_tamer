@@ -665,17 +665,17 @@ void SinkWorker::drain()
   p.drainQueues();
 }
 
-uint64_t SinkWorker::delivered() const
+uint64_t SinkWorker::delivered() const noexcept
 {
   return _p->delivered.load(std::memory_order_relaxed);
 }
 
-uint64_t SinkWorker::queueHighWater() const
+uint64_t SinkWorker::queueHighWater() const noexcept
 {
   return _p->queue_high_water.load(std::memory_order_relaxed);
 }
 
-uint64_t SinkWorker::errors() const
+uint64_t SinkWorker::errors() const noexcept
 {
   return _p->errors.load(std::memory_order_relaxed);
 }

@@ -180,20 +180,25 @@ public:
   {
     return dynamic_cast<T&>(sink());
   }
+  template <typename T>
+  const T& as() const
+  {
+    return dynamic_cast<const T&>(sink());
+  }
 
   /// Snapshots handed to the sink so far: onSnapshot() calls that returned.
-  [[nodiscard]] uint64_t delivered() const;
+  [[nodiscard]] uint64_t delivered() const noexcept;
 
   /// Number of onSnapshot(), onStop() and onStart() calls that threw, and the
   /// message of the last one.
-  [[nodiscard]] uint64_t errors() const;
+  [[nodiscard]] uint64_t errors() const noexcept;
   [[nodiscard]] std::string lastError() const;
 
   /// The most snapshots found waiting in one queue, over all channels attached to this
   /// worker (per worker, not per channel). It is a lower bound, and zero before the
   /// first delivery. A value near the largest pool capacity among those channels means
   /// the sink nearly exhausted a pool.
-  [[nodiscard]] uint64_t queueHighWater() const;
+  [[nodiscard]] uint64_t queueHighWater() const noexcept;
 
   /// Everything the worker counts, cumulative over the worker's life (stop() and
   /// start() do not reset it).
