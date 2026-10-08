@@ -2,14 +2,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <functional>
 #include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -1106,6 +1107,8 @@ BuilSchemaFromText(const std::string& txt, bool check_hash = false)
   return BuildSchemaFromText(txt, check_hash);
 }
 
+namespace detail
+{
 /// Wire size in bytes of a basic type (0 for OTHER).
 inline size_t SizeOf(BasicType type)
 {
@@ -1135,8 +1138,6 @@ inline size_t SizeOf(BasicType type)
 /// Nested custom types deeper than this are treated as a malformed (cyclic) schema.
 constexpr int kMaxSchemaDepth = 64;
 
-namespace detail
-{
 /// Fewest payload bytes one value of a custom type takes, by type name.
 using MinSizes = std::map<std::string, size_t>;
 
@@ -1203,13 +1204,11 @@ inline size_t MinFieldSize(const TypeField& field, const Schema& schema,
   const size_t count = field.is_vector ? field.array_size : 1;
   return (element != 0 && count > kHugeSize / element) ? kHugeSize : element * count;
 }
-}  // namespace detail
 
 template <typename NumberCallback>
-bool ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
+void ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
                             BufferSpan& buffer, const NumberCallback& callback_number,
-                            const std::string& prefix, detail::MinSizes& min_sizes,
-                            int depth = 0)
+                            const std::string& prefix, MinSizes& min_sizes, int depth = 0)
 {
   if(depth > kMaxSchemaDepth)
   {
@@ -1224,10 +1223,10 @@ bool ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
   {
     // An element takes at least min_size bytes: a count the payload cannot hold is
     // rejected. Elements of no byte hold no value, however many there are.
-    const size_t min_size = detail::MinElementSize(field, schema, min_sizes, depth);
+    const size_t min_size = MinElementSize(field, schema, min_sizes, depth);
     if(min_size == 0)
     {
-      return true;
+      return;
     }
     if(vect_size > buffer.size / min_size)
     {
@@ -1249,7 +1248,7 @@ bool ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
       const auto type_it = schema.custom_types.find(field.type_name);
       if(type_it == schema.custom_types.end())
       {
-        detail::UndecodableType(schema, field.type_name);
+        UndecodableType(schema, field.type_name);
       }
       for(const auto& sub_field : type_it->second)
       {
@@ -1271,8 +1270,8 @@ bool ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
       doParse(name);
     }
   }
-  return true;
 }
+}  // namespace detail
 
 template <typename NumberCallback>
 [[nodiscard]] inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
@@ -1294,7 +1293,8 @@ template <typename NumberCallback>
     const auto& field = schema.fields[i];
     if(GetBit(snapshot.active_mask, i))
     {
-      ParseSnapshotRecursive(field, schema, buffer, callback_number, "", min_sizes);
+      detail::ParseSnapshotRecursive(field, schema, buffer, callback_number, "",
+                                     min_sizes);
     }
   }
   // leftover bytes: the schema and the payload do not belong together
