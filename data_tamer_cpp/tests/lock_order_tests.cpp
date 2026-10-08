@@ -158,4 +158,45 @@ TEST(LockOrder, ConstQueryInsideATransactionWhileAControlOperationWaits)
     });
   }
 }
+
+// startLogging() waits for the writer's transaction without holding the control
+// mutex, which the writer's const query needs.
+TEST(LockOrder, StartLoggingWhileAWriterQueriesTheChannel)
+{
+  expectFinishes([] {
+    auto channel = LogChannel::create("lock_order");
+    double value = 1;
+    channel->registerValue("value", &value);
+    auto sink = DataTamerTest::manual<DummySink>();
+    channel->addDataSink(sink);
+    std::optional<ObservedThread> starter;
+    {
+      auto tx = channel->scopedWrite();
+      starter.emplace([&] { channel->startLogging(); });
+      ASSERT_TRUE(starter->sleeps()) << "startLogging() must wait for the transaction";
+      EXPECT_EQ(channel->getNumberOfSinks(), 1u);  // takes control_mutex
+    }
+    starter.reset();
+    EXPECT_TRUE(channel->isLoggingStarted());
+  });
+}
 #endif
+
+TEST(LockOrder, StartLoggingInsideATransaction)
+{
+  expectFinishes([] {
+    auto channel = LogChannel::create("lock_order");
+    auto value = channel->createLoggedValue<std::vector<double>>("value");
+    auto sink = DataTamerTest::manual<DummySink>();
+    channel->addDataSink(sink);
+    {
+      auto tx = channel->scopedWrite();
+      value->set({ 1.0, 2.0 });
+      channel->startLogging();
+    }
+    EXPECT_TRUE(channel->isLoggingStarted());
+    EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    sink.drain();
+    EXPECT_EQ(sink->snapshotsCount(channel->getSchema().hash), 1);
+  });
+}

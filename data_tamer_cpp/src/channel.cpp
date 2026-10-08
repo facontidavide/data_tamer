@@ -779,6 +779,14 @@ bool LogChannel::isLoggingStarted() const
 
 void LogChannel::startLogging()
 {
+  if(_p->logging_started.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  // Lock order: the write mutex, then start_mutex, then control_mutex, like a writer
+  // that queries the channel inside its transaction. A transaction nests in the
+  // caller's own, so startLogging() works inside scopedWrite().
+  std::optional<WriteTransaction> transaction(std::in_place, *_p->shared);
   std::lock_guard const serialize(_p->start_mutex);
   if(_p->logging_started.load(std::memory_order_relaxed))
   {
@@ -793,7 +801,6 @@ void LogChannel::startLogging()
   {
     if(!_p->pool)
     {
-      std::lock_guard<WriteMutex> write_lock(_p->shared->write_mutex);
       _p->active_mask.resize(_p->series.size() / 8 + (_p->series.size() % 8 != 0));
       _p->shared->mask_dirty.exchange(false, std::memory_order_seq_cst);
       _p->rebuildMask();
@@ -802,6 +809,7 @@ void LogChannel::startLogging()
       _p->pool = std::make_shared<SnapshotPool>(_p->pool_capacity, capacity,
                                                 _p->active_mask.size());
     }
+    transaction.reset();  // writers proceed while the sinks hear the schema
     // Announce to one sink at a time with the control mutex released: a sink
     // may query the channel from onSchema(), and other control operations
     // (including a concurrent addDataSink) proceed meanwhile.
