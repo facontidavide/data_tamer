@@ -182,6 +182,34 @@ foreach(case VALUE VECTOR MEMBER LOGGED)
         long_double_registration.cpp DT_LONG_DOUBLE_${case} "has no wire type")
 endforeach()
 
+# Compile-fail tests: a probe that ignores a [[nodiscard]] result or calls a deprecated
+# function, built with that diagnostic as an error. ctest builds the probe target and
+# passes only if the build fails with the expected diagnostic.
+function(data_tamer_add_compile_fail_test name source diagnostic_flag expected_text)
+    add_library(${name} OBJECT EXCLUDE_FROM_ALL ${source})
+    target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_compile_options(${name} PRIVATE ${diagnostic_flag})
+    target_compile_definitions(${name} PRIVATE ${ARGN})
+    set_target_properties(${name} PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    add_test(NAME compile_fail_${name}
+        COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DTARGET=${name}
+                -DEXPECTED=${expected_text}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_compile_error.cmake)
+    # The tests build in the same tree: run them one at a time.
+    set_tests_properties(compile_fail_${name} PROPERTIES RESOURCE_LOCK build_tree)
+endfunction()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(ignored_result_source ${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/ignored_result.cpp)
+    data_tamer_add_compile_fail_test(nodiscard_try_set_enabled ${ignored_result_source}
+        -Werror=unused-result nodiscard PROBE_TRY_SET_ENABLED)
+    data_tamer_add_compile_fail_test(nodiscard_create ${ignored_result_source}
+        -Werror=unused-result nodiscard PROBE_CREATE)
+    data_tamer_add_compile_fail_test(nodiscard_number_of_sinks ${ignored_result_source}
+        -Werror=unused-result nodiscard PROBE_NUMBER_OF_SINKS)
+endif()
+
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built
 # without optimization so that the calls are not inlined away, and is not

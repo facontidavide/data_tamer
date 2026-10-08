@@ -78,7 +78,7 @@ protected:
 public:
   /// Creates a channel. Prefer ChannelsRegistry::getChannel(), which also applies the
   /// registry's defaults and default sinks.
-  static std::shared_ptr<LogChannel> create(std::string name);
+  [[nodiscard]] static std::shared_ptr<LogChannel> create(std::string name);
 
   ~LogChannel();
 
@@ -162,7 +162,7 @@ public:
 
   /// Like setEnabled(), but returns false instead of throwing for a stale or invalid
   /// id. noexcept, lock-free and allocation-free: safe on real-time threads.
-  bool trySetEnabled(const RegistrationID& id, bool enable) noexcept;
+  [[nodiscard]] bool trySetEnabled(const RegistrationID& id, bool enable) noexcept;
 
   /// True if the value is registered and enabled; false after unregister() and for a
   /// stale or invalid id. Lock-free.
@@ -193,7 +193,7 @@ public:
   void removeDataSink(std::shared_ptr<SinkWorker> sink);
 
   /// Number of attached sinks.
-  size_t getNumberOfSinks() const;
+  [[nodiscard]] size_t getNumberOfSinks() const;
 
   /**
    * @brief Freezes the schema, allocates the snapshot pool and sends the schema to
