@@ -1174,8 +1174,47 @@ inline size_t SizeOf(BasicType type)
 /// Nested custom types deeper than this are treated as a malformed (cyclic) schema.
 constexpr int kMaxSchemaDepth = 64;
 
-/// Fewest payload bytes one value of a custom type takes, by type name.
-using MinSizes = std::map<std::string, size_t>;
+/// Fewest payload bytes one value of a custom type takes, by type name, for the types a
+/// decode has met so far. A schema has few custom types: the first ones are kept in the
+/// object, so that a decode allocates nothing for them. The names are the schema's own
+/// strings, which must outlive the object.
+class MinSizes
+{
+public:
+  /// The size stored for `type_name`, or nullptr.
+  const size_t* find(const std::string& type_name) const
+  {
+    for(size_t i = 0; i < in_place_; i++)
+    {
+      if(*names_[i] == type_name)
+      {
+        return &sizes_[i];
+      }
+    }
+    const auto it = more_.find(type_name);
+    return it == more_.end() ? nullptr : &it->second;
+  }
+
+  void insert(const std::string& type_name, size_t size)
+  {
+    if(in_place_ < kInPlace)
+    {
+      names_[in_place_] = &type_name;
+      sizes_[in_place_++] = size;
+    }
+    else
+    {
+      more_.emplace(type_name, size);
+    }
+  }
+
+private:
+  static constexpr size_t kInPlace = 4;
+  std::array<const std::string*, kInPlace> names_{};
+  std::array<size_t, kInPlace> sizes_{};
+  size_t in_place_ = 0;
+  std::map<std::string, size_t> more_;
+};
 
 /// Larger sizes saturate here, so that products of array extents cannot overflow.
 constexpr size_t kHugeSize = std::numeric_limits<size_t>::max() / 2;
@@ -1231,10 +1270,9 @@ inline size_t MinElementSize(const TypeField& field, const Schema& schema,
   {
     return SizeOf(field.type);
   }
-  const auto known = min_sizes.find(field.type_name);
-  if(known != min_sizes.end())
+  if(const size_t* known = min_sizes.find(field.type_name))
   {
-    return known->second;
+    return *known;
   }
   CheckDepth(depth);
   size_t total = 0;
@@ -1243,7 +1281,7 @@ inline size_t MinElementSize(const TypeField& field, const Schema& schema,
     const size_t size = MinFieldSize(sub_field, schema, min_sizes, depth + 1);
     total = size > kHugeSize - total ? kHugeSize : total + size;
   }
-  min_sizes.emplace(field.type_name, total);
+  min_sizes.insert(field.type_name, total);
   return total;
 }
 

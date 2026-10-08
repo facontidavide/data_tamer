@@ -1,8 +1,10 @@
 #include "data_tamer_parser/data_tamer_parser.hpp"
+#include "alloc_counter.hpp"
 #include "guarded_buffer.hpp"
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -223,6 +225,94 @@ TEST(ParserRobustness, NamesBeyondTheSmallStringBufferAreJoinedWhole)
                                               "robot/waypoints/planned_path[0]/y",
                                               "robot/waypoints/planned_path[1]/x",
                                               "robot/waypoints/planned_path[1]/y" }));
+}
+
+TEST(ParserRobustness, MinSizesFindsTheTypesStoredInPlaceAndBeyond)
+{
+  const std::array<std::string, 7> names = { "a", "b", "c", "d", "e", "f", "g" };
+  detail::MinSizes sizes;
+  for(size_t i = 0; i < names.size(); i++)
+  {
+    EXPECT_EQ(sizes.find(names[i]), nullptr) << names[i];
+    sizes.insert(names[i], 10 * i);
+    for(size_t j = 0; j <= i; j++)
+    {
+      ASSERT_NE(sizes.find(names[j]), nullptr) << names[j] << " after " << names[i];
+      EXPECT_EQ(*sizes.find(names[j]), 10 * j) << names[j] << " after " << names[i];
+    }
+  }
+  EXPECT_EQ(sizes.find("missing"), nullptr);
+}
+
+TEST(ParserRobustness, SizeOfATypeBeyondTheInPlaceMemoIsRememberedForTheNextField)
+{
+  // Types A to F take 4 bytes an element and G none. Two vector fields use each, so the
+  // second one takes the size from the memo, wherever the memo keeps it.
+  std::string fields;
+  std::string types;
+  for(char type = 'A'; type <= 'G'; type++)
+  {
+    const std::string name(1, type);
+    fields += name + "[] " + name + "1\n" + name + "[] " + name + "2\n";
+    types += kSeparator + "\nMSG: " + name + "\n" + (type == 'G' ? "" : "uint32 v\n");
+  }
+  const auto schema = BuildSchemaFromText(kHeader + fields + types);
+  const std::vector<uint8_t> mask = { 0xFF, 0x3F };  // 14 fields
+
+  auto payloadWith = [](uint32_t count_of_f2) {
+    std::vector<uint8_t> payload;
+    auto put = [&](uint32_t value) {
+      const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+      payload.insert(payload.end(), bytes, bytes + sizeof(value));
+    };
+    for(char type = 'A'; type <= 'F'; type++)
+    {
+      put(2);  // the first field: two elements
+      put(0);
+      put(0);
+      put(type == 'F' ? count_of_f2 : 1);  // the second: one element
+      put(0);
+    }
+    put(0xFFFFFFFF);  // G has no field: any count holds no value
+    put(0xFFFFFFFF);
+    return payload;
+  };
+
+  size_t values = 0;
+  auto count_values = [&](const std::string&, const VarNumber&) { values++; };
+  EXPECT_TRUE(ParseSnapshot(schema, viewOf(mask, payloadWith(1)), count_values));
+  EXPECT_EQ(values, 18u);
+
+  // F2 claims 4 elements, 16 bytes, and 12 follow: the stored size makes it fail
+  const auto truncated = payloadWith(4);
+  EXPECT_THROW((void)ParseSnapshot(schema, viewOf(mask, truncated), count_values),
+               std::runtime_error);
+}
+
+TEST(ParserRobustness, DecodeAllocatesNothingForLongTopLevelNamesAndAVectorOfACustomType)
+{
+  // A top-level name is passed on as it is, not copied, and the memo of the minimum size
+  // of Pose lives in the decoder's own frame. The names below the top level fit a small
+  // string, so nothing is left to allocate.
+  const auto schema =
+      BuildSchemaFromText(kHeader + "float64 robot/leg_front_left/knee_joint/position\n" +
+                          "float64 robot/leg_front_left/knee_joint/velocity\nPose[2] "
+                          "poses\n" +
+                          kSeparator + "\nMSG: Pose\nfloat64 x\nfloat64 y\n");
+  const std::vector<uint8_t> mask = { 0b111 };
+  const std::vector<uint8_t> payload(6 * sizeof(double));
+  size_t values = 0;
+  bool complete = false;
+  size_t allocations = 0;
+  {
+    DataTamerTest::AllocCounter::Scope scope;
+    complete = ParseSnapshot(schema, viewOf(mask, payload),
+                             [&](const std::string&, const VarNumber&) { values++; });
+    allocations = scope.allocations();
+  }
+  EXPECT_TRUE(complete);
+  EXPECT_EQ(values, 6u);
+  EXPECT_EQ(allocations, 0u);
 }
 
 // Schema text: headers and empty input
