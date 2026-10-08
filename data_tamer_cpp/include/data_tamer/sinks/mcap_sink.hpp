@@ -65,7 +65,8 @@ public:
   /// details::NumberedPath). Names that exist already, e.g. from a previous run, are
   /// skipped, never overwritten. Nothing is lost, but disk usage is unbounded.
   /// false: truncate and restart the same file. Everything recorded before the reset
-  /// is DISCARDED, so only the last `reset_time` of data survives.
+  /// is DISCARDED, so only the last `reset_time` of data survives. The recording stops
+  /// if the file cannot be opened again.
   void setCreateNewFileOnReset(bool create_new_file);
 
   /// Close the file and drop later snapshots, until restartRecording() or a
@@ -77,8 +78,9 @@ public:
    * @brief Close the current file, if still open, and record into `filepath`
    * (overwritten if it exists; `do_compression` as in the constructor). The known
    * schemas are written into the new file, and the rollover numbering restarts from
-   * `filepath`. If the file cannot be opened it throws std::runtime_error and changes
-   * nothing.
+   * `filepath`. If the file cannot be opened it throws std::runtime_error and keeps the
+   * current recording, except when `filepath` is the file in use: that one is closed
+   * first, so a failed open stops the sink.
    */
   void restartRecording(std::string const& filepath, bool do_compression = false);
 

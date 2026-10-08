@@ -97,7 +97,17 @@ MCAPSink::MCAPSink(const std::string& filepath, bool do_compression)
 void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compression)
 {
   std::scoped_lock lk(_p->mutex);
-  // Open the new file first: if that fails the current recording stays intact.
+  // Opening the file in use truncates it: close the old writer first, or its footer
+  // lands in the new file. A failed open then leaves the sink stopped.
+  std::error_code ignored;
+  const bool same_file =
+      _p->writer && std::filesystem::equivalent(filepath, _p->filepath, ignored);
+  if(same_file)
+  {
+    _p->writer.reset();
+    _p->forced_stop_recording = true;
+  }
+  // Any other file is opened first: if that fails the current recording stays intact.
   auto writer = std::make_unique<mcap::McapWriter>();
   mcap::McapWriterOptions options(mcap_encoding::kEncoding);
   options.compression =
@@ -112,6 +122,10 @@ void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compress
   _p->compression = do_compression;
   _p->start_time = std::chrono::system_clock::now();
   _p->hash_to_channel.clear();
+  if(same_file)
+  {
+    _p->forced_stop_recording = false;
+  }
 }
 
 MCAPSink::~MCAPSink() = default;

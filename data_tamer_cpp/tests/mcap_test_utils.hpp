@@ -24,6 +24,33 @@ inline std::string tempPath(const std::string& tag)
       .string();
 }
 
+/// A new directory in the temporary directory, removed with its content on destruction.
+class ScratchDir
+{
+public:
+  explicit ScratchDir(const std::string& tag)
+  {
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+    path_ = std::filesystem::temp_directory_path() /
+            ("data_tamer_" + tag + "_" + std::to_string(::getpid()) + "_" +
+             std::to_string(ticks));
+    std::filesystem::create_directory(path_);
+  }
+  ~ScratchDir()
+  {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+  ScratchDir(const ScratchDir&) = delete;
+  ScratchDir& operator=(const ScratchDir&) = delete;
+
+  const std::filesystem::path& path() const { return path_; }
+  std::string file(const std::string& name) const { return (path_ / name).string(); }
+
+private:
+  std::filesystem::path path_;
+};
+
 /// Number of messages in an MCAP file. With `finalized`, the file must also have
 /// its summary and footer, which only a closed writer writes.
 inline size_t countMessages(const std::string& path, bool finalized = false)
