@@ -48,19 +48,6 @@ int main(int argc, char** argv)
   using MessageCount = std::map<std::string, size_t>;
   std::map<std::string, MessageCount> message_counts_per_channel;
 
-  auto IncrementCounter = [&](const std::string& series_name,
-                              MessageCount& message_counts) {
-    auto it = message_counts.find(series_name);
-    if(it == message_counts.end())
-    {
-      message_counts[series_name] = 1;
-    }
-    else
-    {
-      it->second++;
-    }
-  };
-
   // parse all messages
   for(const auto& msg : reader.readMessages())
   {
@@ -75,6 +62,7 @@ int main(int argc, char** argv)
       series.push_back(series_name);
     };
 
+    std::string problem;  // why the message is corrupt; empty if it decoded
     try
     {
       // the message body holds the active mask and the payload, one after the other
@@ -85,13 +73,17 @@ int main(int argc, char** argv)
 
       if(!DataTamerParser::ParseSnapshot(dt_schema, snapshot, callback_number))
       {
-        throw std::runtime_error("the payload does not match the schema");
+        problem = "the payload does not match the schema";
       }
     }
     catch(const std::runtime_error& e)
     {
-      // a corrupt message: report it and go on with the next one
-      std::cerr << channel_name << ": skipped a corrupt message: " << e.what()
+      problem = e.what();
+    }
+    if(!problem.empty())
+    {
+      // report it and go on with the next message
+      std::cerr << channel_name << ": skipped a corrupt message: " << problem
                 << std::endl;
       continue;
     }
@@ -99,7 +91,7 @@ int main(int argc, char** argv)
     auto& message_counts = message_counts_per_channel[channel_name];
     for(const auto& series_name : series)
     {
-      IncrementCounter(series_name, message_counts);
+      ++message_counts[series_name];
     }
   }
 
