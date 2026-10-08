@@ -100,6 +100,11 @@ Unreleased
   written truncated. ``SerializeMe::enable_if_same_t`` is removed. Some error texts
   changed: a number that does not fit reports "Buffer overrun", and ``MCAPRingSink``
   reports a negative timestamp with the text of ``mcap_encoding::CheckTimestamp()``.
+* **Decoders**: the C++ parser reads a schema about twice as fast and decodes
+  20-26% faster (a top-level field name is no longer copied, and the minimum sizes of
+  custom types are kept per decode without heap allocation); the Python decoder keeps
+  them on the ``Schema``. Python reports a type the schema does not define as
+  "unknown type 'X'", as C++ does.
 * **Clang**: ``discoverTypes()`` and ``TypesRegistry`` no longer trigger
   ``-Wunused-lambda-capture`` and ``-Wpotentially-evaluated-expression``, which broke
   ``-Werror`` builds of consumers that register a custom type.
