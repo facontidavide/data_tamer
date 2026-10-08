@@ -24,10 +24,9 @@ struct is_std_atomic<std::atomic<T>> : std::true_type
 }  // namespace details
 
 /**
- * @brief The ValuePtr is a non-owning pointer to a variable, together with
- * the two functions needed to serialize it. Type-erased through plain
- * function pointers (no std::function, no heap): the serializer for custom
- * types is kept alive by a shared_ptr member.
+ * @brief Type-erased, non-owning pointer to a registered variable, with the functions
+ * that serialize it (plain function pointers, no heap). The serializer of a custom
+ * type is kept alive by a shared_ptr.
  */
 class ValuePtr
 {
@@ -38,13 +37,11 @@ public:
 
   ValuePtr() = default;
 
-  /// Plain value (numeric, or custom type with a serializer). std::atomic<T>
-  /// is excluded here so it can only match the dedicated constructor below.
+  /// Plain value: numeric, or a custom type with its serializer.
   template <typename T, std::enable_if_t<!details::is_std_atomic<T>::value, bool> = true>
   ValuePtr(const T* pointer, CustomSerializer::Ptr type_info = {});
 
-  /// Atomic scalar: serialized with a relaxed load. Same BasicType and wire
-  /// bytes as the plain T.
+  /// Atomic scalar, read with a relaxed load; recorded exactly like the plain T.
   template <typename T, std::enable_if_t<IsNumericType<T>(), bool> = true>
   ValuePtr(const std::atomic<T>* pointer);
 
@@ -72,10 +69,12 @@ public:
   ValuePtr(ValuePtr&& other) noexcept = default;
   ValuePtr& operator=(ValuePtr&& other) noexcept = default;
 
+  /// Same type and shape; the pointed-to variables are not compared.
   [[nodiscard]] bool operator==(const ValuePtr& other) const;
   [[nodiscard]] bool operator!=(const ValuePtr& other) const { return !(*this == other); }
 
-  /// Release serialization ownership after quiescence, retaining slot type identity.
+  /// Drops the pointer and the serializer but keeps the type, so the slot can be
+  /// registered again. Call only when no snapshot can be serializing this value.
   void detach()
   {
     v_ptr_ = nullptr;
@@ -84,13 +83,13 @@ public:
     serializer_.reset();
   }
 
+  /// Writes exactly getSerializedSize() bytes at the front of `dest` and advances it.
   void serialize(SerializeMe::SpanBytes& dest) const;
 
   [[nodiscard]] size_t getSerializedSize() const;
 
-  /// True when getSerializedSize() never changes: a scalar, a std::array, or a
-  /// custom type whose serializer is fixed-size. False for a dynamic container,
-  /// and for an unregistered (detached) value, whose size is not known.
+  /// True when getSerializedSize() never changes: a scalar, a std::array or a
+  /// fixed-size custom type. False for a dynamic container and a detached value.
   [[nodiscard]] bool isFixedSize() const
   {
     if(v_ptr_ == nullptr || (is_vector_ && array_size_ == 0))
@@ -108,7 +107,7 @@ private:
   const void* v_ptr_ = nullptr;
   SerializeFn serialize_fn_ = &ValuePtr::serializeNone;
   SizeFn size_fn_ = &ValuePtr::sizeNone;
-  CustomSerializer::Ptr serializer_;  // keeps the custom serializer alive
+  CustomSerializer::Ptr serializer_;
   std::type_index type_index_ = typeid(void);
   BasicType type_ = BasicType::OTHER;
   bool is_vector_ = false;
@@ -249,7 +248,7 @@ inline ValuePtr::ValuePtr(const std::atomic<T>* pointer)
   : v_ptr_(pointer)
   , serialize_fn_(&ValuePtr::serializeAtomic<T>)
   , size_fn_(&ValuePtr::sizeNumeric<T>)
-  , type_index_(typeid(T))  // identical identity to the plain T, on purpose
+  , type_index_(typeid(T))  // same identity as the plain T
   , type_(GetBasicType<T>())
   , is_vector_(false)
 {

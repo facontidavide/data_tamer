@@ -17,7 +17,7 @@ namespace DataTamer
 {
 using SerializeMe::has_TypeDefinition;
 
-// Utility
+/// System-clock time since the epoch: the default timestamp of a snapshot.
 inline std::chrono::nanoseconds NsecSinceEpoch()
 {
   auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
@@ -28,63 +28,56 @@ class SinkWorker;
 class LogChannel;
 class ChannelsRegistry;
 
-/// What LogChannel::scopedWrite() returns: holds the channel's write mutex for
-/// its scope; nested transactions on the same thread are no-ops.
+/// Returned by LogChannel::scopedWrite(): holds the channel's write mutex for its
+/// scope. A nested transaction on the same thread does nothing.
 using WriteTransaction = ChannelSharedState::Transaction;
 
 //---------------------------------------------------------
 
-/**
- * @brief A LogChannel is a class used to record multiple values in a single
- * "snapshot". Taking a snapshot is usually done in a periodic loop.
- *
- * Instances of LogChannel are accessed through the ChannelsRegistry.
- *
- * There is no limit to the number of tracked values, but sometimes you may
- * want to use different LogChannels in your application to:
- *
- * - aggregate them logically or
- * - take snapshots at different frequencies.
- *
- * Use the methods LogChannel::registerValue or LogChannel::createLoggedValue
- * to add a new value.
- * All you values must be registered before calling takeSnapshot for the first time.
- *
- */
-/// Outcome of LogChannel::takeSnapshot() / tryTakeSnapshot().
+/// Outcome of LogChannel::takeSnapshot() and tryTakeSnapshot().
 enum class SnapshotResult : uint8_t
 {
-  /// Captured and accepted by every attached sink.
+  /// Captured and queued on every attached sink.
   ok,
-  /// Captured; some sinks accepted it, others refused it because their
-  /// SinkWorker is stopped. Stats::dropped_by_sink tells which.
+  /// Captured, but some sinks refused it because their SinkWorker is stopped
+  /// (Stats::dropped_by_sink tells which).
   partial,
-  /// Captured, but every attached sink refused it (every SinkWorker stopped).
+  /// Captured, but every attached sink refused it (every SinkWorker is stopped).
   rejected,
-  /// No sink is attached: nothing captured. Before startLogging() this also leaves
-  /// the schema open.
+  /// No sink is attached: nothing captured. Before startLogging() the schema stays
+  /// open.
   no_sinks,
   /// tryTakeSnapshot() before startLogging(): nothing captured.
   not_started,
-  /// Every pool slot is still referenced by a sink; see poolExhausted().
+  /// Sinks still hold every pool slot, so the sample is lost (see poolExhausted()).
   pool_exhausted,
-  /// tryTakeSnapshot(): the payload outgrew the slot; see droppedOversize().
+  /// tryTakeSnapshot(): the payload outgrew the slot (see droppedOversize()).
   oversize,
-  /// tryTakeSnapshot(): the write mutex was held past the spin budget.
+  /// tryTakeSnapshot(): a writer held the write mutex past the spin budget.
   blocked
 };
 
+/**
+ * @brief Records the values registered in it as one snapshot per takeSnapshot() call
+ * and hands each snapshot to its sinks. Get channels from
+ * ChannelsRegistry::getChannel(); use one channel per rate or logical group.
+ *
+ * Register every value (registerValue(), createLoggedValue()) before startLogging(),
+ * which the first takeSnapshot() with a sink attached calls. One thread per channel
+ * takes the snapshots. Registration, unregister(), sink changes and startLogging()
+ * are control operations that can block, some until a snapshot in progress ends:
+ * never call them from a serializer, a sink callback or inside scopedWrite().
+ */
 class LogChannel : public std::enable_shared_from_this<LogChannel>
 {
 protected:
-  // We make this private because the object must be wrapped
-  // inside a std::shared_ptr.
-  // This allows us to use std::weak_ptr in LoggedValue
+  // Use create(): the channel must be owned by a std::shared_ptr, because
+  // LoggedValue keeps a std::weak_ptr to it.
   LogChannel(std::string name);
 
 public:
-  /// Use this static mentod do create an instance of LogChannel.
-  /// it is recommended to use ChannelsRegistry::getChannel() instead
+  /// Creates a channel. Prefer ChannelsRegistry::getChannel(), which also applies the
+  /// registry's defaults and default sinks.
   static std::shared_ptr<LogChannel> create(std::string name);
 
   ~LogChannel();
@@ -96,42 +89,33 @@ public:
   LogChannel& operator=(LogChannel&&) = delete;
 
   /**
-   * @brief registerValue add a value to be monitored.
-   * The channel borrows the pointer: it must stay valid until unregister()
-   * has returned (or the channel is destroyed). Writes from another thread
-   * than the snapshot thread must happen inside scopedWrite().
-   * If you want to change the pointer T* to a new one,
-   * you must first call unregister(), otherwise this method will throw
-   * an exception.
+   * @brief Registers a variable to be recorded in every snapshot.
    *
-   * A name must be unique in the channel and must not contain spaces;
-   * violations throw std::runtime_error naming the channel and the value, and
-   * leave the channel unchanged. Use JoinNames() to build hierarchical names
-   * without empty '/'-separated components, and IsCanonicalName() to assert
-   * on them: registration itself does not reject such names.
+   * The channel borrows the pointer: it must stay valid until unregister() has
+   * returned or the channel is destroyed. Threads other than the snapshot thread must
+   * write the variable inside scopedWrite().
    *
-   * @param name   name of the value
-   * @param value  pointer to the value
-   * @return       the ID to be used to unregister or enable/disable this value.
+   * The name must be unique in the channel and contain no spaces; JoinNames() builds
+   * hierarchical names. Throws std::runtime_error for a duplicate or invalid name,
+   * and for a new name once logging started. Not real-time safe.
+   *
+   * @return the ID for unregister(), setEnabled() and isEnabled()
    */
   template <typename T, bool = true>
   RegistrationID registerValue(const std::string& name, const T* value);
 
   /**
-   * @brief registerValue for an atomic scalar. The value is read with a
-   * relaxed load when the snapshot is taken; it serializes exactly like T.
+   * @brief registerValue() for an atomic scalar: read with a relaxed load at each
+   * snapshot and recorded like T. Any thread can write it; scopedWrite() is only
+   * needed to keep it consistent with other values.
    */
   template <typename T, std::enable_if_t<IsNumericType<T>(), bool> = true>
   RegistrationID registerValue(const std::string& name, const std::atomic<T>* value);
 
   /**
-   * @brief registerValue add a vectors of values.
-   * You must guaranty that the pointer to each value is still valid,
-   * when calling takeSnapshot.
-   *
-   * @param name   name of the vector
-   * @param value  pointer to the vectors of values.
-   * @return       the ID to be used to unregister or enable/disable the values.
+   * @brief registerValue() for a std::vector (or similar container) of numbers or
+   * custom types. Its size and elements are read at each snapshot, so it may grow
+   * between snapshots (see setPayloadCapacity()).
    */
   template <
       template <class, class> class Container, class T, class... TArgs,
@@ -139,107 +123,86 @@ public:
   RegistrationID registerValue(const std::string& name,
                                const Container<T, TArgs...>* value);
 
-  /**
-   * @brief registerValue add an array of values.
-   * You must guaranty that the pointer to the array is still valid,
-   * when calling takeSnapshot.
-   *
-   * @param name   name of the array
-   * @param value  pointer to the array of values.
-   * @return       the ID to be used to unregister or enable/disable the values.
-   */
+  /// registerValue() for a fixed-size std::array of numbers or custom types.
   template <typename T, size_t N,
             std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool> = true>
   RegistrationID registerValue(const std::string& name, const std::array<T, N>* value);
 
   /**
-   * @brief registerCustomValue should be used when you want to "bypass" the serialization
-   * provided by DataTamer and use your own.
+   * @brief Advanced: registers a value that your own CustomSerializer serializes,
+   * bypassing the built-in serialization. Generic decoders may not be able to read
+   * the result: prefer TypeDefinitionTrait<T> (or TypeDefinition()) when you can.
    *
-   * This is an ADVANCED usage: using this approach does **not** guaranty that the application parsing the
-   * data is able to deserialize it correctly. Sink mayl save the custom schema, but
-   * it may or may not be enough.
-   * Prefer the template specialization of RegisterVariable<T>, if you can.
-   *
-   * The value name follows the rules of registerValue().
-   *
-   * @param name      name of the array
-   * @param value     pointer to the array of values.
-   * @param type_info information needed to serialize this specific type.
-   * @return          the ID to be used to unregister or enable/disable the values.
+   * The name and the pointer follow the rules of registerValue(). Throws
+   * std::invalid_argument if `type_info` is null.
    */
   template <typename T>
   RegistrationID registerCustomValue(const std::string& name, const T* value,
                                      CustomSerializer::Ptr type_info);
 
   /**
-   * @brief createLoggedValue is similar to registerValue(), but
-   * the value is wrapped in a safer RAII interface. See LoggedValue for details.
-   *
-   * @param name of the value
-   * @param initial_value  initial value to give to the LoggedValue
-   *
-   * @return the instance of LoggedValue, wrapped in a shared_ptr
+   * @brief Creates a variable that registers `name` now and unregisters it when the
+   * returned LoggedValue is destroyed. Name rules and exceptions as registerValue();
+   * see LoggedValue for the threading rules.
    */
   template <typename T = double>
   [[nodiscard]] std::shared_ptr<LoggedValue<T>> createLoggedValue(std::string const& name,
                                                                   T initial_value = T{});
 
-  /// Name of this channel (passed to the constructor)
+  /// Name of this channel.
   [[nodiscard]] const std::string& channelName() const;
 
-  /** Enabling / disabling a value is much faster than
-   *  registering / unregistering.
-   *  It should be preferred when we want to temporary remove a
-   *  value from the snapshot. Callable from any thread; lock-free and
-   *  allocation-free for a valid id. Throws std::invalid_argument for a stale
-   *  or invalid id (see trySetEnabled for a noexcept variant).
+  /**
+   * @brief Includes or excludes a value from the snapshots. Much cheaper than
+   * unregister(), and allowed after logging started. Callable from any thread,
+   * lock-free and allocation-free. Throws std::invalid_argument for a stale or
+   * invalid id: on a real-time thread use trySetEnabled().
    */
   void setEnabled(const RegistrationID& id, bool enable);
 
-  /// Same as setEnabled(), but returns false instead of throwing for a stale
-  /// or invalid id. Lock-free, never allocates: safe on real-time threads that
-  /// may race with re-registration.
+  /// Like setEnabled(), but returns false instead of throwing for a stale or invalid
+  /// id. noexcept, lock-free and allocation-free: safe on real-time threads.
   bool trySetEnabled(const RegistrationID& id, bool enable) noexcept;
 
-  /// Whether the value is registered and enabled (false after unregister()).
+  /// True if the value is registered and enabled; false after unregister() and for a
+  /// stale or invalid id.
   [[nodiscard]] bool isEnabled(const RegistrationID& id) const;
 
-  /// NOTE: the unregistered value will not be removed from the Schema.
-  /// Waits for a snapshot in progress; do not call from a real-time thread.
-  /// Throws std::invalid_argument for a stale or invalid id.
+  /// Stops recording the value; the pointer may be freed once this returns. The value
+  /// stays in the schema (as disabled), and its name can be registered again with the
+  /// same type. Waits for a snapshot in progress: not real-time safe. Throws
+  /// std::invalid_argument for a stale or invalid id.
   void unregister(const RegistrationID& id);
 
   /**
-   * @brief addDataSink attaches a sink (a SinkWorker owning a DataSink, see
-   * MCAPSink::create or SinkWorker::create<T>) that will receive our snapshots.
-   * A channel holds at most eight sinks; adding a ninth throws. Adding the
-   * same sink twice is a no-op. Once logging started, it allocates the
-   * channel's queue on that sink (as many entries as pool slots) and calls
-   * onSchema(); otherwise startLogging() does both.
-   * @return true if this call attached the sink, false if the channel held it
-   * already.
+   * @brief Attaches a sink (a SinkWorker, see MCAPSink::create() or
+   * SinkWorker::create<T>()) that receives this channel's snapshots.
+   *
+   * A channel holds at most kMaxSinks sinks: one more throws std::runtime_error.
+   * If logging started, this allocates the sink's queue and calls its onSchema() on
+   * the calling thread: not real-time safe. Otherwise startLogging() does both.
+   * @return false if the sink was attached already, true otherwise.
    */
   bool addDataSink(std::shared_ptr<SinkWorker> sink);
 
   /**
-   * @brief removeDataSink remove a sink, i.e. a class collecting our snapshots.
-   * Snapshots the channel already queued on it are still delivered, before any
-   * it publishes after attaching the sink again; then the queue is freed.
+   * @brief Detaches a sink. Snapshots already queued on it are still delivered.
+   * Does nothing if the sink is not attached. Waits for a snapshot in progress: not
+   * real-time safe.
    */
   void removeDataSink(std::shared_ptr<SinkWorker> sink);
 
-  /**
-  * @brief getNumberOfSinks returns the number of registered sinks.
-  */
+  /// Number of attached sinks.
   size_t getNumberOfSinks() const;
 
   /**
-   * @brief Freezes the schema, allocates the snapshot pool and announces the
-   * schema to the sinks: the channel is then ready to take snapshots. Call it
-   * once all values are registered; otherwise the first takeSnapshot() with a
-   * sink attached calls it. Throws if a sink rejects the schema or the pool
-   * can't be allocated; calling it again retries.
+   * @brief Freezes the schema, allocates the snapshot pool and sends the schema to
+   * the sinks (onSchema(), on the calling thread).
+   *
+   * Call it once after registering all values and before the snapshot loop. It
+   * allocates and runs sink callbacks: not real-time safe. Does nothing if logging
+   * started already. Throws if a sink's onSchema() throws or an allocation fails;
+   * calling it again retries.
    */
   void startLogging();
 
@@ -247,132 +210,106 @@ public:
   [[nodiscard]] bool isLoggingStarted() const;
 
   /**
-   * @brief Copies the registered values and sends the snapshot to every sink.
-   * Call it from one thread per channel. The first call with a sink attached
-   * calls startLogging(). It can wait for a writer and allocate: on a real-time
-   * thread, use tryTakeSnapshot(). Registration and sink changes wait for an
-   * active snapshot, so never call them inside scopedWrite() or a serializer.
-   * @param timestamp time since epoch, by default.
+   * @brief Serializes the enabled values and queues the snapshot on every sink.
+   *
+   * Call it from one thread per channel. The first call with a sink attached calls
+   * startLogging(). It can block on a writer and allocate: on a real-time thread use
+   * tryTakeSnapshot().
+   * @param timestamp time of the snapshot; by default the system clock.
    */
   [[nodiscard]] SnapshotResult
   takeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
 
   /**
-   * @brief Lock-free takeSnapshot() for real-time threads: it never blocks and
-   * never allocates. Where takeSnapshot() would wait or allocate, it returns
-   * `blocked` (a writer holds the mutex), `oversize` (the payload outgrew its
-   * slot) or `not_started` (call startLogging() before the loop). It reports
-   * failures, never throws; custom serializers must not throw, allocate or
-   * block either.
+   * @brief Lock-free takeSnapshot() for real-time threads: it never blocks or
+   * allocates. Where takeSnapshot() would wait or allocate, it returns `blocked`
+   * (a writer holds the mutex), `oversize` (the payload outgrew its slot) or
+   * `not_started` (call startLogging() before the loop). Serializers run on this
+   * path: they must not throw, allocate or block.
    */
   [[nodiscard]] SnapshotResult
   tryTakeSnapshot(std::chrono::nanoseconds timestamp = NsecSinceEpoch());
 
-  /**
-   * @brief getSchema. See description of class Schema
-   */
+  /// A copy of the channel's schema. Takes the control mutex: not real-time safe.
   [[nodiscard]] Schema getSchema() const;
 
   /**
-   * @brief Hold the channel write mutex for the scope of the returned object,
-   * so that a group of writes appears in one snapshot or in none.
+   * @brief Holds the channel's write mutex for the scope of the returned object, so
+   * that a group of writes appears in one snapshot or in none:
+   * `auto tx = channel->scopedWrite();` then write.
    *
-   * When to use it: the values are written by a thread other than the one
-   * calling takeSnapshot(), and you need several of them to be consistent with
-   * each other in the recorded snapshot (for instance a position and the
-   * velocity computed from it). Without a transaction each LoggedValue is
-   * captured untorn on its own, but a snapshot may see the new position with
-   * the old velocity. Inside a transaction the snapshot thread waits until the
-   * scope ends, and sees either all of the writes or none of them.
+   * Use it when a thread other than the snapshot thread must keep several values
+   * consistent with each other (a position and the velocity computed from it); a lone
+   * write is only captured untorn. It is also the only correct way for such a thread
+   * to write a variable registered with registerValue(): the snapshot thread reads it
+   * without a lock of its own.
    *
-   * It is also the only correct way to write, from another thread, a variable
-   * registered with registerValue(): those are read directly by the snapshot
-   * thread and have no lock of their own.
-   *
-   * Keep the scope short and free of blocking calls: the snapshot thread spins
-   * briefly, then blocks on it (priority inheritance where available). Nested
-   * transactions and LoggedValue guards on the same thread are safe.
-   *
-   * @code
-   * {
-   *   auto tx = channel->scopedWrite();
-   *   position->set(p);
-   *   velocity->set(v);   // both, or neither, in the next snapshot
-   * }
-   * @endcode
+   * Keep the scope short and free of blocking calls: the snapshot thread waits for it
+   * (takeSnapshot() blocks, tryTakeSnapshot() returns `blocked`). Nested transactions
+   * and LoggedValue guards on the same thread are safe, but that thread must not take
+   * a snapshot meanwhile: takeSnapshot() would deadlock.
    */
   [[nodiscard]] WriteTransaction scopedWrite();
 
-  /// Snapshots that exhausted the write-mutex spin budget: takeSnapshot() then
-  /// blocked, tryTakeSnapshot() returned `blocked`.
+  /// Snapshots delayed by a writer past the spin budget: takeSnapshot() blocked,
+  /// tryTakeSnapshot() returned `blocked`.
   [[nodiscard]] uint64_t writeLockContended() const;
 
-  /// Longest blocking mutex acquisition after spin exhaustion, in nanoseconds.
+  /// Longest time takeSnapshot() blocked on the write mutex, in nanoseconds.
   [[nodiscard]] uint64_t writeLockWaitMaxNs() const;
 
-  /// Snapshot attempts that could not acquire a free pool slot.
+  /// Snapshot attempts that found no free pool slot. Takes the control mutex: not
+  /// real-time safe.
   [[nodiscard]] uint64_t poolExhausted() const;
 
-  /// Minimum payload bytes each pool slot reserves; configure before startLogging().
-  /// startLogging() reserves at least this much, and more when the schema needs it:
-  /// exactly the payload with every value enabled when all registered values
-  /// are fixed-size (scalars, std::array, fixed-size custom types), otherwise
-  /// max(2 x payload size at startLogging(), 256). Zero (the default) is automatic.
+  /// Sets the minimum payload bytes reserved by each pool slot. Zero (the default)
+  /// sizes the slots from the registered values at startLogging(); raise it if
+  /// vectors grow at run time, or tryTakeSnapshot() returns `oversize`. Call it
+  /// before startLogging(): it throws std::runtime_error afterwards.
   void setPayloadCapacity(size_t bytes);
 
-  /// Number of pool slots, i.e. snapshots that may be queued in or retained by
-  /// sinks at the same time; default 64 (SnapshotPool::kDefaultCapacity).
-  /// Configure before startLogging(). Zero is invalid. Each attached sink gets a
-  /// queue of the same size, so the pool is the only bound on in-flight
-  /// snapshots.
+  /// Sets the number of pool slots: how many snapshots sinks may hold or have queued
+  /// at the same time (default 64). Each attached sink gets a queue of the same size.
+  /// Call it before startLogging(): it throws std::runtime_error afterwards, and
+  /// std::invalid_argument for zero.
   void setPoolCapacity(size_t count);
 
-  /// Pool sized in time: enough slots to absorb a sink stall of
-  /// `stall_tolerance` while snapshots are taken every `snapshot_period`, i.e.
-  /// ceil(stall_tolerance / snapshot_period). Configure before startLogging(). Both
-  /// arguments must be positive (std::invalid_argument, checked first); a
-  /// result too large for setPoolCapacity(count) throws std::length_error, and
-  /// a call after startLogging() throws std::runtime_error, like the count overload.
-  /// Example: 200 ms at 1 kHz gives 200 slots.
+  /// Sets the pool size in time: ceil(stall_tolerance / snapshot_period) slots, enough
+  /// to absorb a sink stall of that length (200 ms at 1 kHz gives 200 slots). Both
+  /// arguments must be positive (std::invalid_argument); otherwise as the count
+  /// overload.
   void setPoolCapacity(std::chrono::nanoseconds stall_tolerance,
                        std::chrono::nanoseconds snapshot_period);
 
-  /// Successful per-slot payload growth allocations by takeSnapshot().
+  /// Slots that takeSnapshot() grew because the payload outgrew them.
   [[nodiscard]] uint64_t payloadReallocations() const;
 
-  /// tryTakeSnapshot() attempts rejected because the payload outgrew the slot.
+  /// tryTakeSnapshot() calls that returned `oversize`.
   [[nodiscard]] uint64_t droppedOversize() const;
 
-  /// Calls of takeSnapshot() and tryTakeSnapshot() so far, whatever their
-  /// result (a call that throws, e.g. from startLogging(), counts too). Without
-  /// such calls, attempts equal the sum of the results: ok + partial + rejected
-  /// + no_sinks + not_started + pool_exhausted + oversize + blocked.
+  /// Calls of takeSnapshot() and tryTakeSnapshot() so far, whatever the result
+  /// (calls that threw count too).
   [[nodiscard]] uint64_t snapshotAttempts() const;
 
-  /// Snapshots at least one attached sink took: the results `ok` and `partial`.
-  /// The acquire load pairs with the release increment so that a read of this
-  /// counter followed by snapshotAttempts() never sees more accepted than
-  /// attempts (stats() reads them in that order). Handing a snapshot to a sink
-  /// is not delivering it: SinkWorker::delivered() counts that.
+  /// Snapshots that at least one sink took: the results `ok` and `partial`. Queued is
+  /// not delivered: SinkWorker::delivered() counts deliveries. Read it before
+  /// snapshotAttempts() so that it never exceeds them (stats() does).
   [[nodiscard]] uint64_t snapshotsAccepted() const;
 
   /// The most sinks a channel holds.
   static constexpr size_t kMaxSinks = 8;
 
-  /// Building block of Stats::dropped_by_sink. Under one acquisition of the
-  /// control mutex, writes the attached sinks to `sinks` and their drop counts
-  /// to `dropped` (arrays of `capacity` entries each) and returns the number of
-  /// attached sinks; when that is more than `capacity`, only `capacity`
-  /// entries are written. `dropped` counts the publications a sink refused
-  /// because its SinkWorker was stopped. The order is the channel's own, not
-  /// attachment order: tell sinks apart by the pointer, which is only an
-  /// identity (do not dereference it unless you hold the worker; the address of
-  /// a removed worker can be reused by a new one). Not for a real-time thread.
+  /// Building block of Stats::dropped_by_sink: prefer stats(). Writes up to `capacity`
+  /// attached sinks to `sinks` and, to `dropped`, the publications each refused because
+  /// its SinkWorker is stopped. Returns the number of attached sinks, which may exceed
+  /// `capacity`. The order is unspecified, and the pointers only tell sinks apart (a
+  /// removed worker's address can be reused): do not dereference them. Takes the
+  /// control mutex: not real-time safe.
   [[nodiscard]] size_t sinkDropped(const SinkWorker** sinks, uint64_t* dropped,
                                    size_t capacity) const;
 
-  /// Failed publications to this attachment; zero if sink is not attached.
-  /// Deprecated, kept for one release: read Stats::dropped_by_sink instead.
+  /// Deprecated: read Stats::dropped_by_sink. Publications this sink refused; zero if
+  /// it is not attached.
   [[nodiscard]] uint64_t droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const;
 
   /// Publications one attached sink refused. See sinkDropped().
@@ -382,10 +319,8 @@ public:
     uint64_t dropped = 0;
   };
 
-  /// Every counter of the channel, read one by one (the values are not a
-  /// coherent snapshot of one instant, except that accepted <= attempts holds
-  /// within one Stats). New fields are appended at the end. Holds a vector, so
-  /// it is not trivially copyable.
+  /// The channel's counters, read one by one rather than at one instant: only
+  /// accepted <= attempts is guaranteed. Not trivially copyable (holds a vector).
   struct Stats
   {
     uint64_t write_lock_contended = 0;
@@ -402,17 +337,10 @@ public:
     std::vector<SinkDrops> dropped_by_sink;
   };
 
-  /// Inline on purpose: the struct is built in the caller from the exported
-  /// getters above, so it never crosses the library boundary and can gain
-  /// fields in any release. Hidden (DATA_TAMER_INLINE_LOCAL) so that each
-  /// binary uses the copy built against its own header, whatever other
-  /// versions of this header are loaded in the process. Takes the control mutex
-  /// twice and allocates; not for a real-time thread.
-  ///
-  /// accepted is read before attempts, and the snapshot path increments them in
-  /// the opposite order, so accepted <= attempts within one result. A
-  /// difference between two results, or attempts - accepted over a window, is
-  /// approximate by the calls in flight: clamp it at zero.
+  /// Reads every counter. Takes the control mutex and allocates: not for a real-time
+  /// thread. A difference between two results, or `attempts - accepted` over a window,
+  /// is approximate by the calls in flight: clamp it at zero. Inline on purpose: see
+  /// DATA_TAMER_INLINE_LOCAL (details/abi.hpp).
   [[nodiscard]] DATA_TAMER_INLINE_LOCAL Stats stats() const
   {
     Stats result;
@@ -446,8 +374,7 @@ private:
   SnapshotResult takeSnapshotImpl(std::chrono::nanoseconds timestamp, bool real_time);
   std::unique_ptr<Pimpl> _p;
 
-  /// The channel's custom-type serializers, kept in the Pimpl. Control path only
-  /// (registration templates); the snapshot path never uses it.
+  /// The channel's custom-type serializers. Control path only.
   TypesRegistry& typeRegistry();
 
   std::mutex& controlMutex();
@@ -462,8 +389,8 @@ private:
 
   void addCustomType(const std::string& custom_type_name, const FieldsVector& fields);
 
-  /// Throws std::runtime_error, naming the channel, if `name` contains a space.
-  /// Called before type discovery, so a rejected name leaves the channel unchanged.
+  /// Throws std::runtime_error if `name` contains a space. Called before type
+  /// discovery, so that a rejected name leaves the channel unchanged.
   void checkValueName(const std::string& name) const;
 
   [[nodiscard]] RegistrationID registerValueImpl(const std::string& name,
@@ -484,8 +411,8 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
 
   if constexpr(container_info<T>::is_container)
   {
-    // A container member is described by its element type, like a top-level
-    // registerValue() of the same container: "float64[3] axis", "Pose[] poses".
+    // A container member is described by its element type: "float64[3] axis",
+    // "Pose[] poses".
     using Type = typename container_info<T>::value_type;
     field.is_vector = true;
     field.array_size = container_info<T>::size;

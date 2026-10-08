@@ -13,13 +13,10 @@ namespace DataTamer
 {
 
 /**
- * @brief Append-only table of atomic words with stable addresses. The control
- * thread appends (one writer); any thread may read an existing index or size()
- * concurrently without locks: blocks are never moved or freed until
- * destruction, and each block pointer and the size are published with release
- * semantics after the new word has been written.
- *
- * Block i holds kFirstBlock << i words, so 26 blocks cover 2^31 series.
+ * @brief Append-only table of atomic words at stable addresses. One thread appends;
+ * any thread may read existing words and size() without locks. Blocks are never moved
+ * or freed before destruction, and size and block pointers are published with release.
+ * Block i holds kFirstBlock << i words, 2^32 - 64 in all.
  */
 class AtomicWordTable
 {
@@ -38,7 +35,6 @@ public:
     }
   }
 
-  /// Number of words appended so far (acquire: their contents are visible).
   size_t size() const { return size_.load(std::memory_order_acquire); }
 
   /// Precondition: index < size() as observed by this thread.
@@ -48,7 +44,7 @@ public:
     return blocks_[block].load(std::memory_order_acquire)[offset];
   }
 
-  /// Control thread only.
+  /// Control thread only. Throws std::length_error when the table is full.
   void push_back(uint32_t value)
   {
     const size_t index = size_.load(std::memory_order_relaxed);
@@ -85,28 +81,21 @@ private:
 };
 
 /**
- * @brief State shared between a LogChannel and every LoggedValue registered
- * in it. Owned through shared_ptr by both, so writer-side operations
- * (set, setEnabled, transactions) never need the channel object and keep
- * working if the channel is destroyed first.
- *
- * Series flags are appended during registration (single control thread) and
- * read lock-free by the snapshot thread and by writers; AtomicWordTable keeps
- * them at stable addresses and makes appends safe to race with reads.
+ * @brief State shared by a LogChannel and its LoggedValues (a shared_ptr in each), so
+ * LoggedValue operations keep working after the channel is destroyed. Holds the write
+ * mutex and one atomic flag word per series, appended by the control thread and read
+ * lock-free by the snapshot thread and the writers.
  */
 class ChannelSharedState
 {
 public:
   /**
-   * @brief Scoped ownership of this state's write mutex.
-   *
-   * A nested transaction for the same state is a no-op. The thread-local
-   * linked chain is allocation-free and has no nesting-depth limit.
-   * Transactions (and the LoggedValue guards built on them) belong to the
-   * thread that created them: destroying one on another thread, or suspending
-   * a coroutine while holding one, is undefined. Destruction out of creation
-   * order on the same thread is supported: the node is unlinked and mutex
-   * ownership passes to a younger transaction on the same state, if any.
+   * @brief Scoped ownership of the state's write mutex. A nested transaction on the
+   * same state and thread is a no-op; the thread-local chain does not allocate.
+   * Destroy it on the creating thread (never across a coroutine suspension) and before
+   * the channel or LoggedValue it came from: it does not keep the state alive.
+   * Out-of-order destruction is supported: the mutex passes to the next younger
+   * transaction on the same state.
    */
   class Transaction
   {
@@ -129,14 +118,14 @@ public:
       }
       else
       {
-        // Out-of-order destruction: unlink this node; a younger transaction on
-        // the same state (never owning, since we do) inherits the mutex.
+        // Out of order: unlink this node. If we own the mutex, the oldest younger
+        // transaction on the same state (`heir`; it cannot own, we do) inherits it.
         Transaction* heir = nullptr;
         for(auto* node = active(); node; node = node->previous_)
         {
           if(node->state_ == state_)
           {
-            heir = node;  // younger than us: it was created after us
+            heir = node;
           }
           if(node->previous_ == this)
           {
@@ -175,27 +164,28 @@ public:
     bool owns_ = false;
   };
 
-  /// The transaction lock: writers hold it for a scopedWrite(); the snapshot
-  /// thread holds it for serialization. Priority-inheriting where available.
+  /// Held by writers inside a transaction and by the snapshot thread while it serializes.
   WriteMutex write_mutex;
 
-  /// SC publication pairs with the snapshot's SC load/exchange and reader epoch.
+  /// Set after every flag change; the snapshot thread clears it and rebuilds its active
+  /// mask. Keep every access seq_cst: it pairs with the channel's reader epoch.
   std::atomic<bool> mask_dirty{ true };
 
-  /// Controller only. Returns the generation of the new slot (always 1).
+  /// Control thread only. Appends a registered, enabled series; returns its generation
+  /// (always 1).
   uint32_t addSeries()
   {
     flags_.push_back(kFirstGeneration | kRegistered | kEnabled);
     return 1;
   }
 
-  /// Generation currently occupying a slot (bumped on every re-registration).
+  /// Generation of the registration in a slot; each re-registration bumps it.
   uint32_t generation(size_t index) const
   {
     return flags_[index].load(std::memory_order_seq_cst) >> kGenerationShift;
   }
 
-  /// Whether `id` denotes the registration currently occupying its slot.
+  /// Whether `id` denotes the registration currently in its slot.
   bool isCurrent(const RegistrationID& id) const
   {
     return id.index_ < flags_.size() && generation(id.index_) == id.generation_;
@@ -226,24 +216,23 @@ public:
     return flags_[index].load(std::memory_order_seq_cst) & kRegistered;
   }
 
-  /// Controller only: clear registration and wait for the reader before
-  /// detaching the holder. The generation is kept, so the id stays valid for
-  /// isEnabled() (false) until the slot is registered again.
+  /// Control thread only. Clears the registered flag; the caller then waits for the
+  /// snapshot in progress before detaching the holder. The generation is kept: the id
+  /// stays current (isEnabled() is false) until the slot is registered again.
   void setUnregistered(size_t index)
   {
     flags_[index].fetch_and(~uint32_t(kRegistered), std::memory_order_seq_cst);
     mask_dirty.store(true, std::memory_order_seq_cst);
   }
 
-  /// Highest generation a slot can reach (24 bits); see canReregister().
   static constexpr uint32_t kMaxGeneration = (uint32_t(1) << 24) - 1;
 
-  /// Controller only: true if the slot can still take a replacement (its
-  /// generation counter is not exhausted). Check before touching the holder.
+  /// Control thread only. False once the slot's generation counter is exhausted; check
+  /// it before replacing the holder.
   bool canReregister(size_t index) const { return generation(index) < kMaxGeneration; }
 
-  /// Controller only: publish a replacement registration in a slot whose holder
-  /// is already initialized. Returns the new generation; older ids are stale.
+  /// Control thread only. Publishes a replacement registration once its holder is
+  /// initialized; returns the new generation, which makes older ids stale.
   /// Precondition: canReregister(index).
   uint32_t setReregistered(size_t index)
   {
@@ -260,7 +249,7 @@ public:
     return generation;
   }
 
-  /// Lock-free; changes requested enablement only, never registration liveness.
+  /// Lock-free. Changes the enabled bit only, with no staleness check.
   void setEnabled(size_t index, bool enable)
   {
     const auto old =
@@ -272,9 +261,8 @@ public:
     }
   }
 
-  /// Lock-free and noexcept. Returns false, changing nothing, if `id` is stale
-  /// or invalid: the generation check and the flag update are one atomic
-  /// exchange, so a concurrent re-registration cannot slip in between.
+  /// Lock-free and noexcept. Returns false, changing nothing, for a stale or invalid id:
+  /// the generation check and the update are one atomic compare-exchange.
   bool setEnabled(const RegistrationID& id, bool enable) noexcept
   {
     if(id.index_ >= flags_.size())
@@ -317,7 +305,8 @@ public:
   }
 
 private:
-  // One word per series: low byte holds the flags, the rest the generation.
+  // One word per series: low byte holds the flags, the rest the generation. Accesses
+  // are seq_cst: a reader that sees a registration also sees its initialized holder.
   static constexpr uint32_t kRegistered = 1;
   static constexpr uint32_t kEnabled = 2;
   static constexpr uint32_t kFlagsMask = 0xFF;

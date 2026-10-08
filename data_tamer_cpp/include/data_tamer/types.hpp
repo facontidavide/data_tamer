@@ -50,16 +50,17 @@ using VarNumber = std::variant<
     float, double >;
 // clang-format on
 
-/// Reverse operation of ValuePtr::serialize
+/// Reads one scalar of `type` from `data` (the reverse of ValuePtr::serialize); NaN
+/// for BasicType::OTHER.
 [[nodiscard]] VarNumber DeserializeAsVarType(const BasicType& type, const void* data);
 
-/// Return the number of bytes needed to serialize the type
+/// Serialized size of a scalar type in bytes; 0 for BasicType::OTHER.
 [[nodiscard]] size_t SizeOf(const BasicType& type);
 
-/// Return the name of the type
+/// Name of the type in the schema, e.g. "float64".
 [[nodiscard]] const std::string& ToStr(const BasicType& type);
 
-/// Convert string to its type
+/// Inverse of ToStr(); BasicType::OTHER for an unknown name.
 [[nodiscard]] BasicType FromStr(const std::string& str);
 
 template <typename T>
@@ -104,11 +105,10 @@ template <typename T>
 class LoggedValue;
 
 /**
- * @brief Opaque handle returned by LogChannel::registerValue and friends.
- * It denotes one registration: after unregister() and a new registration of
- * the same name, the old handle is stale and LogChannel::setEnabled/unregister
- * reject it instead of acting on the replacement. A default-constructed handle
- * is never valid. Handles from another channel are not detected.
+ * @brief Handle to one registration, returned by LogChannel::registerValue and friends.
+ * After unregister() and a new registration of the same name the old handle is stale
+ * and is rejected. A default-constructed handle is never valid. A handle from another
+ * channel is not detected.
  */
 class RegistrationID
 {
@@ -161,7 +161,8 @@ struct CustomSchema
 };
 
 /**
- * @brief DataTamer uses a simple "flat" schema of key/value pairs (each pair is a "field").
+ * @brief The schema of a channel: a flat list of fields plus the custom types they
+ * use. `hash` must equal ComputeSchemaHash().
  */
 struct Schema
 {
@@ -178,22 +179,18 @@ struct Schema
 std::string ToStr(const Schema& schema);
 
 /**
- * @brief The same schema as ToStr(), rendered as YAML (docs/wire_format.md,
- * section 2.1). Field names that share a "/"-separated prefix are nested under
- * it, which makes the text shorter when names are paths. Schema::hash is
- * unchanged: it is always computed over the ToStr() text.
+ * @brief The schema as YAML, schema version 6 (docs/wire_format.md, section 2.1):
+ * shorter when field names are "/"-separated paths. Schema::hash is the same as for
+ * ToStr(), because it is always computed over that text.
  */
 std::string ToYaml(const Schema& schema);
 
-/// Text rendering of a schema. Both carry the same Schema::hash and are read by
-/// the parsers, which detect the format.
+/// Rendering of a schema text. Both carry the same Schema::hash; parsers detect which.
 enum class SchemaFormat
 {
   /// ToStr(): the line format, schema version 5. Every reader understands it.
   Text,
-  /// ToYaml(): schema version 6 (docs/wire_format.md, section 2.1). Shorter when
-  /// field names are "/"-separated paths; readers that predate it (e.g. older
-  /// PlotJuggler releases) cannot read it.
+  /// ToYaml(): schema version 6. Older readers (e.g. older PlotJuggler) cannot read it.
   Yaml,
 };
 
@@ -201,10 +198,8 @@ enum class SchemaFormat
 std::string RenderSchema(const Schema& schema, SchemaFormat format);
 
 /**
- * @brief Hash of a schema text (see docs/wire_format.md, section 5): FNV-1a 64 over
- * the text with its "### hash:" line removed. Defined byte for byte, so any decoder
- * can recompute it and two schemas that differ anywhere, including inside a custom
- * type, get different hashes.
+ * @brief FNV-1a 64 over a schema text without its "### hash:" line (docs/wire_format.md,
+ * section 5). Any decoder can recompute it.
  */
 [[nodiscard]] uint64_t SchemaTextHash(std::string_view schema_text);
 
@@ -218,8 +213,7 @@ struct std::hash<DataTamer::RegistrationID>
 {
   std::size_t operator()(const DataTamer::RegistrationID& id) const
   {
-    // Compute individual hash values for first, second and third
-    // http://stackoverflow.com/a/1646913/126995
+    // Combines index and generation as in http://stackoverflow.com/a/1646913/126995
     std::size_t res = 17;
     res = res * 31 + hash<uint32_t>()(id.index_);
     res = res * 31 + hash<uint32_t>()(id.generation_);

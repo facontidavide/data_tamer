@@ -37,7 +37,7 @@
 namespace SerializeMe
 {
 
-// Poor man version of Span
+// Minimal non-owning view of contiguous memory (a subset of std::span).
 template <typename T>
 class Span
 {
@@ -64,6 +64,7 @@ public:
 
   size_t size() const;
 
+  /// Drops the first `offset` elements; throws std::runtime_error if there are fewer.
   void trimFront(size_t offset);
 
 private:
@@ -88,8 +89,8 @@ namespace DataTamer
 /**
  * @brief Customization point that describes a type without reopening its namespace.
  *
- * Specialize it (fully, or partially using the second parameter for
- * std::enable_if / std::void_t) in namespace DataTamer:
+ * Specialize it in namespace DataTamer. define() calls add("name", &member) for each
+ * field and returns the type name:
  *
  *   template <>
  *   struct DataTamer::TypeDefinitionTrait<third_party::Point>
@@ -103,26 +104,14 @@ namespace DataTamer
  *     }
  *   };
  *
- * Optionally, the specialization may also provide
- *
- *   static std::string name();
- *
- * to build the type name at runtime (useful for class templates, e.g.
- * "Vector" + std::to_string(N)). It is evaluated once per type (per shared
- * library, as for any function-local static) and cached;
- * when present, the value returned by define() is ignored and define() may
- * return void.
- *
- * define() may also return an owning string (e.g. std::string): it is then
- * evaluated once per type and cached.
- *
- * If a type has both a TypeDefinitionTrait specialization and a
- * TypeDefinition() overload found by argument-dependent lookup, the trait wins.
- * A specialization whose define() can not be called as
- * define(T&, AddField&) is a compile error (it is never silently ignored).
- *
- * The specialization must be visible before the type is first used with
- * DataTamer (as for any template specialization).
+ * - The name is a view of static storage (a string literal) or an owning std::string,
+ *   which is evaluated once per type and cached.
+ * - An optional `static std::string name()` builds the name at runtime (class
+ *   templates); define()'s return value is then ignored and may be void.
+ * - The second template parameter allows partial specializations (std::enable_if).
+ * - The trait wins over an ADL TypeDefinition(). A define() that cannot be called as
+ *   define(T&, AddField&) is a compile error.
+ * - The specialization must be visible before the type is first used.
  */
 template <typename T, typename = void>
 struct TypeDefinitionTrait
@@ -135,8 +124,7 @@ struct TypeDefinitionTrait
 namespace SerializeMe
 {
 
-// True if DataTamer::TypeDefinitionTrait<T> is specialized with a
-// static define(T&, AddField&) function.
+// True if DataTamer::TypeDefinitionTrait<T> has a static define(T&, AddField&).
 template <typename T, class = void>
 struct has_TypeDefinitionTrait : std::false_type
 {
@@ -176,8 +164,7 @@ struct has_TypeDefinitionTraitName<
 {
 };
 
-// Check if a Function like this is implemented in the namespace of T
-// (found by argument-dependent lookup):
+// True if a TypeDefinition() overload is found for T by argument-dependent lookup:
 //
 // template <typename Func> std::string_view TypeDefinition(T&, Func&);
 
@@ -195,9 +182,8 @@ struct has_TypeDefinitionADL<
 {
 };
 
-// True if T is described either by DataTamer::TypeDefinitionTrait<T> or by
-// a TypeDefinition() overload found by ADL.
-// (The second parameter is unused; kept for source compatibility.)
+// True if T is described by DataTamer::TypeDefinitionTrait<T> or by an ADL
+// TypeDefinition() overload. The second parameter is unused (source compatibility).
 template <typename T, class = void>
 struct has_TypeDefinition : std::bool_constant<has_TypeDefinitionTrait<T>::value ||
                                                has_TypeDefinitionADL<T>::value>
@@ -208,9 +194,8 @@ struct has_TypeDefinition : std::bool_constant<has_TypeDefinitionTrait<T>::value
                 "static define(T&, AddField&) callable with a generic AddField");
 };
 
-// Call the definition of T: DataTamer::TypeDefinitionTrait<T>::define() if
-// specialized, otherwise the ADL overload TypeDefinition(obj, add_field).
-// Every place that walks the fields of a custom type must go through this.
+// Calls the definition of T: the trait's define() if specialized, otherwise the ADL
+// TypeDefinition(). Every walk over the fields of a custom type must go through it.
 template <typename T, typename AddField>
 inline decltype(auto) InvokeTypeDefinition(T& obj, AddField& add_field)
 {
@@ -227,6 +212,7 @@ inline decltype(auto) InvokeTypeDefinition(T& obj, AddField& add_field)
 
 //------------- Forward declarations of BufferSize ------------------
 
+/// Number of bytes SerializeIntoBuffer() writes for `val`.
 template <typename T, bool = true>
 size_t BufferSize(const T& val);
 
@@ -244,6 +230,8 @@ size_t BufferSize(const Container<T, TArgs...>& vect);
 
 //---------- Forward declarations of DeserializeFromBuffer -----------
 
+/// Reads `dest` from the front of `buffer` and advances the span past the bytes read.
+/// Throws std::runtime_error if the buffer is too short.
 template <typename T, bool = true>
 void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest);
 
@@ -261,6 +249,8 @@ void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>& dest)
 
 //---------- Forward declarations of SerializeIntoBuffer -----------
 
+/// Writes `value` at the front of `buffer` and advances the span past the bytes written
+/// (encoding: docs/wire_format.md). Throws std::runtime_error if the buffer is too small.
 template <typename T, bool = true>
 void SerializeIntoBuffer(SpanBytes& buffer, const T& value);
 
@@ -309,8 +299,7 @@ inline void Span<T>::trimFront(size_t offset)
   data_ += offset;
 }
 
-// The wire format uses a little endian encoding (since that's efficient for
-// the common platforms).
+// The wire format is little endian (docs/wire_format.md); big endian hosts byte-swap.
 #if defined(__s390x__)
 #define SERIALIZE_LITTLEENDIAN 0
 #endif  // __s390x__
@@ -343,7 +332,7 @@ inline T EndianSwap(T t)
 #define DESERIALIZE_ME_BYTESWAP64 _byteswap_uint64
 #else
 #if defined(__GNUC__) && __GNUC__ * 100 + __GNUC_MINOR__ < 408 && !defined(__clang__)
-// __builtin_bswap16 was missing prior to GCC 4.8.
+// GCC before 4.8 has no __builtin_bswap16.
 #define DESERIALIZE_ME_BYTESWAP16(x)                                                     \
   static_cast<uint16_t>(__builtin_bswap32(static_cast<uint32_t>(x) << 16))
 #else
@@ -353,7 +342,7 @@ inline T EndianSwap(T t)
 #define DESERIALIZE_ME_BYTESWAP64 __builtin_bswap64
 #endif
   if constexpr(sizeof(T) == 1)
-  {  // Compile-time if-then's.
+  {
     return t;
   }
   else if constexpr(sizeof(T) == 2)
@@ -586,7 +575,7 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
   uint32_t num_values = 0;
   DeserializeFromBuffer(buffer, num_values);
 
-  // if the container offers contiguous memory, you can just use memcpy
+  // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
     if constexpr(container_info<Container<T, TArgs...>>::size == 0)
@@ -708,7 +697,7 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, Container<T, TArgs...> const&
   const auto num_values = static_cast<uint32_t>(vect.size());
   SerializeIntoBuffer(buffer, num_values);
 
-  // can use memcpy if the size of T is 1
+  // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
     const size_t size = num_values;

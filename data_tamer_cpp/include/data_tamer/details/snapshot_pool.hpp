@@ -11,13 +11,10 @@
 namespace DataTamer
 {
 
-/// One pre-allocated snapshot plus its intrusive reference count.
-/// refs == 0 means free. Only the snapshot thread makes the 0 -> 1 transition.
-///
-/// The counter is the only field touched concurrently by sinks (release) and
-/// the snapshot thread (acquire); it gets its own cache line so that traffic
-/// never invalidates the snapshot data next to it. The snapshot itself is
-/// written only by the snapshot thread while refs == 1.
+/// One pre-allocated snapshot plus its reference count (0 means free). Only the
+/// snapshot thread moves refs from 0 to 1 and writes the snapshot, while it holds the
+/// only reference; sinks read it and release. refs has its own cache line, so sink
+/// traffic does not touch the snapshot data.
 struct PoolSlot
 {
   Snapshot snapshot;
@@ -25,8 +22,8 @@ struct PoolSlot
 };
 
 /**
- * @brief Fixed-size pool of PoolSlot, owned by a LogChannel (shared with every
- * SnapshotRef handed to a sink). Allocation happens only in the constructor.
+ * @brief Fixed-size pool of PoolSlot, shared by its LogChannel and every SnapshotRef
+ * handed to a sink. Allocates only in the constructor.
  */
 class SnapshotPool
 {
@@ -47,9 +44,8 @@ public:
   SnapshotPool& operator=(const SnapshotPool&) = delete;
 
   /**
-   * @brief Find a free slot and take one reference on it.
-   * Must be called from a single thread (the snapshot thread).
-   * @return the slot, or nullptr (and exhausted() incremented) if all are in use.
+   * @brief Takes a free slot with one reference. Snapshot thread only; real-time safe.
+   * @return the slot, or nullptr (counted in exhausted()) if every slot is in use.
    */
   PoolSlot* tryAcquire()
   {
@@ -60,8 +56,7 @@ public:
         scan_from_ = 0;
       }
       PoolSlot& slot = slots_[scan_from_];
-      // acquire: synchronizes with the last release() by a consumer, so that
-      // consumer's reads of the slot happen-before our next writes into it.
+      // acquire: pairs with release(), so a sink's reads of the slot precede our writes.
       if(slot.refs.load(std::memory_order_acquire) == 0)
       {
         slot.refs.store(1, std::memory_order_relaxed);
@@ -72,8 +67,7 @@ public:
     return nullptr;
   }
 
-  /// Wrap one reference already taken on `slot` (by tryAcquire() or addRef())
-  /// in a SnapshotRef that releases it. Library internal.
+  /// Wraps a reference already taken on `slot` in a SnapshotRef. Library internal.
   static SnapshotRef adopt(std::shared_ptr<SnapshotPool> pool, PoolSlot* slot)
   {
     return SnapshotRef(std::move(pool), slot);
@@ -91,7 +85,7 @@ public:
 
   size_t capacity() const { return capacity_; }
 
-  /// Number of slots with refs != 0. Diagnostic only; racy by nature.
+  /// Number of slots in use. Diagnostic only: the count is racy.
   size_t inUse() const
   {
     size_t count = 0;

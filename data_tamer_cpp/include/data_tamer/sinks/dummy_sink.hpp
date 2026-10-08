@@ -10,33 +10,31 @@ namespace DataTamer
 {
 
 /**
- * @brief The DummySink does nothing, only counting the number of snapshots received.
- * Used mostly for testing and debugging.
+ * @brief Counts the snapshots it receives and keeps the latest one. For tests.
  *
- * All accessors take the internal mutex, so they may be called from any thread
- * while the worker is delivering snapshots. Use SinkWorker::drain() instead of
- * sleeping to observe every snapshot taken so far.
+ * The accessors lock internally, so they can be called from any thread. Call
+ * SinkWorker::drain() before asserting, instead of sleeping.
  */
 class DummySink : public DataSink
 {
 public:
   static std::shared_ptr<SinkWorker> create() { return SinkWorker::create<DummySink>(); }
 
-  /// Copy of the most recent snapshot delivered to onSnapshot().
+  /// Copy of the latest snapshot delivered.
   Snapshot latestSnapshot() const
   {
     std::scoped_lock lk(mutex_);
     return latest_snapshot_;
   }
 
-  /// Size in bytes of the latest snapshot's payload (no copy).
+  /// Payload size in bytes of the latest snapshot (no copy).
   size_t latestPayloadSize() const
   {
     std::scoped_lock lk(mutex_);
     return latest_snapshot_.payload.size();
   }
 
-  /// Copy of the latest snapshot's active mask (small; avoids copying the payload).
+  /// Copy of the latest snapshot's active mask (cheaper than latestSnapshot()).
   ActiveMask latestActiveMask() const
   {
     std::scoped_lock lk(mutex_);
@@ -57,7 +55,8 @@ public:
     return schemas_.size();
   }
 
-  /// Hash of the first registered schema. Precondition: schemasCount() >= 1.
+  /// Hash of one registered schema, which one is unspecified when there are several.
+  /// Precondition: schemasCount() >= 1.
   uint64_t firstSchemaHash() const
   {
     std::scoped_lock lk(mutex_);

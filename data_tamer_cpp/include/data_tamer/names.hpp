@@ -34,24 +34,20 @@ inline void AppendNameComponents(std::string& out, std::string_view part)
 }  // namespace details
 
 /**
- * @brief Builds a hierarchical value name from its components.
- *
- * Components are joined with a single '/'. Leading, trailing and repeated
- * slashes are collapsed and empty components dropped, so namespaces may be
- * passed with or without a trailing slash:
+ * @brief Builds a hierarchical value name for LogChannel::registerValue(): joins the
+ * components with '/', dropping empty components and leading, trailing and repeated
+ * slashes.
  *
  *   JoinNames("/loco/", "LF/", "x")  == "loco/LF/x"
  *   JoinNames("loco", "", "torso")   == "loco/torso"
  *   JoinNames("loco//torso/")        == "loco/torso"
  *
- * LogChannel::registerValue() accepts names with empty components (leading,
- * trailing or repeated '/'), but PlotJuggler shows them as empty path
- * elements. The result of this helper is always a canonical name (see
- * IsCanonicalName()), unless it is empty or a component contains a space.
+ * The result is canonical (see IsCanonicalName()) unless it is empty or a component
+ * contains a space.
  *
- * @param parts anything convertible to std::string_view (std::string, const char*, ...).
- *              Passing a null `const char*` is undefined behaviour, as for
- *              std::string_view itself.
+ * @param parts anything convertible to std::string_view (std::string, const char*,
+ *              ...). A null `const char*` is undefined behaviour, as for
+ *              std::string_view.
  */
 template <typename... Parts>
 [[nodiscard]] std::string JoinNames(const Parts&... parts)
@@ -62,15 +58,9 @@ template <typename... Parts>
 }
 
 /**
- * @brief True if `name` is a canonical hierarchical name: non-empty, without
- * spaces and without empty '/'-separated components (no leading, trailing or
- * repeated '/').
- *
- * Registration only rejects spaces; this is an opt-in check for code that
- * wants to enforce canonical names, e.g. in a debug build:
- *
- *   assert(DataTamer::IsCanonicalName(name));
- *   channel->registerValue(name, &value);
+ * @brief True if `name` is non-empty, has no spaces and no empty '/'-separated
+ * component (no leading, trailing or repeated '/'). Registration only rejects
+ * spaces: use this to assert on names, e.g. in a debug build.
  *
  *   IsCanonicalName("loco/LF/x")   == true
  *   IsCanonicalName("/loco//LF/x") == false

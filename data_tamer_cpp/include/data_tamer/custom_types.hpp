@@ -11,12 +11,12 @@ namespace DataTamer
 
 /**
  * @brief Serializes a type the library does not know (registerCustomValue()).
+ * The snapshot path, tryTakeSnapshot() included, calls serializedSize(),
+ * isFixedSize() and serialize(): they must not allocate, block or throw.
  *
- * ABI: the virtual functions below are frozen for 2.x. The library calls them
- * through vtables compiled into user binaries, so adding, removing or
- * reordering one breaks every serializer built against an earlier 2.x release.
- * New behaviour arrives as a separate interface; CustomSerializer keeps no
- * data members.
+ * ABI: the virtual functions are frozen for 2.x (the library calls them through
+ * vtables compiled into user binaries) and the class keeps no data members. New
+ * behaviour goes into a separate interface.
  */
 class CustomSerializer
 {
@@ -24,26 +24,25 @@ public:
   using Ptr = std::shared_ptr<CustomSerializer>;
 
   virtual ~CustomSerializer() = default;
-  // name of the type, to be written in the schema string.
+  // Name of the type, as written in the schema.
   virtual const std::string& typeName() const = 0;
 
-  // optional custom schema of the type
+  // Optional opaque schema (encoding name and text) stored with the type.
   virtual std::optional<CustomSchema> typeSchema() const { return std::nullopt; }
-  // size in bytes of the serialized object.
-  // Needed to pre-allocate memory in the buffer
+  // Bytes serialize() writes for this instance; the snapshot buffer is sized with it.
   virtual size_t serializedSize(const void* instance) const = 0;
 
-  // true if the method serializedSize will ALWAYS return the same value
+  // True if serializedSize() returns the same value for every instance.
   virtual bool isFixedSize() const = 0;
 
-  // serialize an object into a buffer.
+  // Writes exactly serializedSize(instance) bytes at the front of the buffer and
+  // advances it.
   virtual void serialize(const void* instance, SerializeMe::SpanBytes&) const = 0;
 };
 
 //------------------------------------------------------------------
 
-// This derived class is used automatically by all the types
-// that have a template specialization of TypeDefinition<T>
+// Serializer that TypesRegistry builds for every type with a TypeDefinition.
 template <typename T>
 class CustomSerializerT : public CustomSerializer
 {
@@ -64,10 +63,10 @@ private:
   size_t _fixed_size = 0;
 };
 
+/// Serializers of custom types by type name. Thread-safe.
 class TypesRegistry
 {
 public:
-  // The state lives behind a Pimpl, which does not allow default special members.
   TypesRegistry();
   ~TypesRegistry();
 
@@ -76,25 +75,24 @@ public:
   TypesRegistry(TypesRegistry&&) = delete;
   TypesRegistry& operator=(TypesRegistry&&) = delete;
 
+  /// Stores a serializer of T under `type_name`, replacing any previous one. With
+  /// skip_if_present an existing entry is kept and nullptr is returned.
   template <typename T>
   CustomSerializer::Ptr addType(const std::string& type_name,
                                 bool skip_if_present = false);
 
+  /// The serializer stored under T's type name, created on first use.
   template <typename T>
   [[nodiscard]] CustomSerializer::Ptr getSerializer();
 
 private:
-  // Builds the CustomSerializerT<T> of a type; the registry stores the result.
   using MakeSerializer = CustomSerializer::Ptr (*)(const std::string& type_name);
 
   template <typename T>
   static CustomSerializer::Ptr makeSerializer(const std::string& type_name);
 
   // Both lock the registry and call make while holding the lock.
-  // Returns the stored serializer, creating it first when missing.
   CustomSerializer::Ptr findOrCreate(const std::string& type_name, MakeSerializer make);
-  // Stores a new serializer, replacing a previous one. Returns {} without touching
-  // the registry when skip_if_present is set and the type is already there.
   CustomSerializer::Ptr replace(const std::string& type_name, MakeSerializer make,
                                 bool skip_if_present);
 
@@ -106,13 +104,10 @@ private:
 //------------------------------------------------------------------
 //------------------------------------------------------------------
 
-// Name of a custom type, as written in the schema.
-// It comes from DataTamer::TypeDefinitionTrait<T>::name() when provided,
-// otherwise from the value returned by the definition of T.
-// A definition returning std::string_view or const char* must point to
-// storage that outlives the program (e.g. a string literal). If it returns
-// an owning string (e.g. std::string), it is evaluated once and the result is
-// cached, like name().
+// Name of a custom type as written in the schema: TypeDefinitionTrait<T>::name() if
+// provided, else the value returned by the definition of T. A std::string_view or
+// const char* must outlive the program (a string literal); an owning string is
+// evaluated once and cached.
 template <typename T>
 struct CustomTypeName
 {
@@ -138,7 +133,7 @@ struct CustomTypeName
       }
       else
       {
-        // An owning result would dangle once returned as a view: keep it.
+        // An owning result would dangle as a view: cache it.
         static_assert(std::is_constructible_v<std::string, Result>, "TypeDefinition must "
                                                                     "return the type "
                                                                     "name");
@@ -168,8 +163,8 @@ struct CustomTypeName<std::array<T, N>>
 template <class C, typename T>
 T getPointerType(T C::*v);
 
-// Recursive function to compute if a type has fixed size (at compile time).
-// Used mainly by the CustomSerializerT constructor.
+// Adds the serialized size of T to fixed_size, and clears is_fixed_size if T contains a
+// vector. Used by the CustomSerializerT constructor.
 template <typename T>
 inline void GetFixedSize(bool& is_fixed_size, size_t& fixed_size)
 {

@@ -2,15 +2,13 @@
 
 /**
  * Forward declarations of the main DataTamer types, in the spirit of <iosfwd>.
+ * Include it from headers that only name these types (pointers, references,
+ * std::shared_ptr<T>); include the full header (channel.hpp, data_sink.hpp, ...)
+ * wherever a type is used by value or its members are called. It has no includes and
+ * can be combined with the full headers in any order.
  *
- * Include this header, instead of declaring the classes by hand, from headers
- * that only name these types (as pointers, references, std::shared_ptr<T> in
- * signatures, ...) and do not need their definitions. It has no includes and
- * always matches the real declarations, so it cannot drift from them.
- *
- * Include the full header (channel.hpp, data_sink.hpp, ...) wherever a type is
- * used by value or its members are called. This header and the full headers can
- * be included in any order.
+ * Declare each type with the same class or struct key as its definition (the
+ * fwd_header_* build targets check it).
  */
 
 namespace DataTamer

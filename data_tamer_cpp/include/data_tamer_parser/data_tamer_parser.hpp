@@ -19,7 +19,7 @@ namespace DataTamerParser
 {
 
 constexpr int SCHEMA_VERSION = 5;
-/// The YAML rendering of a schema (wire format, section 2.1).
+/// Version of the YAML rendering of a schema (docs/wire_format.md, section 2.1).
 constexpr int SCHEMA_YAML_VERSION = 6;
 
 enum class BasicType : uint8_t
@@ -48,11 +48,13 @@ constexpr size_t TypesCount = 13;
 using VarNumber = std::variant<bool, char, int8_t, uint8_t, int16_t, uint16_t, int32_t,
                                uint32_t, int64_t, uint64_t, float, double>;
 
+/// Non-owning view of bytes: the owner must keep them alive while the view is in use.
 struct BufferSpan
 {
   const uint8_t* data = nullptr;
   size_t size = 0;
 
+  /// Drops the first `n` bytes; throws std::runtime_error if there are fewer.
   void trimFront(size_t n)
   {
     if(n > size)
@@ -67,6 +69,8 @@ struct BufferSpan
 VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer);
 
 //---------------------------------------------------------
+/// A schema field. `is_vector` covers `T[]` (array_size 0, a uint32 count precedes the
+/// elements) and `T[N]` (array_size N, no count). `type` is OTHER for a custom type.
 struct TypeField
 {
   std::string field_name;
@@ -89,7 +93,8 @@ struct CustomSchema
 };
 
 /**
- * @brief DataTamer uses a simple "flat" schema of key/value pairs (each pair is a "field").
+ * @brief A parsed schema (docs/wire_format.md, section 2). `fields[i]` is bit i of the
+ * active mask.
  */
 struct Schema
 {
@@ -104,18 +109,17 @@ struct Schema
 
 struct SnapshotView
 {
-  /// Unique identifier of the schema
+  /// Hash of the schema that decodes this snapshot.
   uint64_t schema_hash;
 
-  /// snapshot timestamp
+  /// Timestamp in nanoseconds, unused by the parser.
   uint64_t timestamp;
 
-  /// Vector that tell us if a field of the schema is
-  /// active or not. It is basically an optimized vector
-  /// of bools, where each byte contains 8 boolean flags.
+  /// One bit per top-level field, least significant bit first (docs/wire_format.md,
+  /// section 3.1).
   BufferSpan active_mask;
 
-  /// serialized data containing all the values, ordered as in the schema
+  /// Values of the active fields, in schema order (docs/wire_format.md, section 3.2).
   BufferSpan payload;
 };
 
@@ -124,25 +128,25 @@ bool GetBit(BufferSpan mask, size_t index);
 constexpr auto NullCustomCallback = [](const std::string&, const BufferSpan,
                                        const std::string&) {};
 
-// Callback must be a std::function or lambda with signature:
-//
-// void(const std::string& name_field, const VarNumber& value)
-//
-// void(const std::string& name_field, const BufferSpan payload, const std::string& type_name)
-//
+/// Decodes `snapshot` with `schema`, calling
+///   callback_number(const std::string& name, const VarNumber& value)
+/// for each value of each active field, in schema order. Names join nested fields with
+/// '/' and index container elements: "pose/position/x", "points[1]/z".
+/// Returns false if the hash is not the schema's (nothing is decoded) or if bytes are
+/// left after the last field (the callback has already run). Throws std::runtime_error
+/// on malformed data. `callback_custom` is unused.
 template <typename NumberCallback, typename CustomCallback = decltype(NullCustomCallback)>
 bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
                    const NumberCallback& callback_number,
                    const CustomCallback& callback_custom = NullCustomCallback);
 
 //---------------------------------------------------------
-// Helpers for the data_tamer_msgs messages published by ROS2PublisherSink.
-// They are templates on the message type, so this header does not depend on
-// ROS: any type with the same field names works.
+// Helpers for the data_tamer_msgs messages of ROS2PublisherSink. They are templates on
+// the message type, so this header needs no ROS: any type with the same fields works.
 
 /**
- * @brief Schemas by hash. Fill it from the `<prefix>/schemas` topic and/or from
- * batches with embedded schemas, then look up the schema of each snapshot.
+ * @brief Schemas by hash, filled from the `<prefix>/schemas` topic and/or from the
+ * schemas embedded in batches.
  */
 class SchemaRegistry
 {
@@ -171,15 +175,13 @@ template <typename SnapshotMsgT>
 SnapshotView ToSnapshotView(const SnapshotMsgT& msg);
 
 /**
- * @brief Visits every snapshot of a data_tamer_msgs SnapshotBatch, in order.
- * The schemas embedded in the batch are added to `registry` first (a malformed
- * one throws, see SchemaRegistry::add, before any snapshot is visited).
- * Snapshots whose schema is not in the registry are skipped.
+ * @brief Calls `callback(const Schema&, const SnapshotView&)` for each snapshot of a
+ * data_tamer_msgs SnapshotBatch, in order.
+ * The schemas embedded in the batch are added to `registry` first; a malformed one
+ * throws (see SchemaRegistry::add) before any snapshot is visited. Snapshots whose
+ * schema is not in the registry are skipped.
  *
- * Callback signature: void(const Schema& schema, const SnapshotView& snapshot),
- * typically calling ParseSnapshot(schema, snapshot, ...).
- *
- * @return the number of snapshots visited (skipped ones excluded).
+ * @return the number of snapshots visited.
  */
 template <typename BatchMsgT, typename SnapshotCallback>
 size_t ForEachSnapshotInBatch(SchemaRegistry& registry, const BatchMsgT& batch,
@@ -189,6 +191,8 @@ size_t ForEachSnapshotInBatch(SchemaRegistry& registry, const BatchMsgT& batch,
 //---------------------------------------------------------
 //---------------------------------------------------------
 
+/// Reads a T from the front of `buffer` and advances it; throws std::runtime_error if
+/// it is too short. Copies the bytes as they are, so the host must be little endian.
 template <typename T>
 inline T Deserialize(BufferSpan& buffer)
 {
@@ -254,9 +258,8 @@ inline bool GetBit(BufferSpan mask, size_t index)
   return 0 != (byte & uint8_t(1 << (index % 8)));
 }
 
-/// Hash recipe of schema version 4 (std::hash based, so only reproducible on the
-/// writer's platform). Kept so that version 4 texts are read and verified exactly
-/// as before.
+/// Folds `field` into a running schema hash with the version 4 recipe. It is std::hash
+/// based, so it only reproduces the hash on the writer's platform.
 [[nodiscard]] inline uint64_t AddFieldToHash(const TypeField& field, uint64_t hash)
 {
   // https://stackoverflow.com/questions/2590677/how-do-i-combine-hash-values-in-c0x
@@ -281,7 +284,7 @@ inline bool GetBit(BufferSpan mask, size_t index)
 }
 
 /// Hash recipe of schema version 5: FNV-1a 64 of the schema text without its
-/// "### hash:" line (wire format, section 5). Platform independent.
+/// "### hash:" line (docs/wire_format.md, section 5). Platform independent.
 [[nodiscard]] inline uint64_t SchemaTextHash(const std::string& text)
 {
   uint64_t hash = 0xcbf29ce484222325ULL;
@@ -398,8 +401,7 @@ inline void AppendUtf8(std::string& out, uint32_t cp)
   }
 }
 
-/// Decodes the double-quoted scalar starting at s[pos] == '"'; returns the
-/// index just past the closing quote.
+/// Decodes the double-quoted scalar at s[pos] == '"'; returns the index past its end.
 inline size_t ReadQuoted(const std::string& s, size_t pos, std::string& out,
                          const std::string& line)
 {
@@ -558,8 +560,7 @@ inline BasicType BasicTypeFromName(const std::string& name)
   return BasicType::OTHER;
 }
 
-/// Strict unsigned decimal: digits only, no sign or spaces. nullopt if invalid
-/// or if it does not fit in 64 bits.
+/// Unsigned decimal, digits only. nullopt if invalid or above 2^64 - 1.
 inline std::optional<uint64_t> ParseUnsigned(const std::string& value)
 {
   if(value.empty() || value.size() > 20 ||
@@ -721,8 +722,8 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
 }
 }  // namespace detail
 
-/// Parses a YAML schema (version 6, wire format section 2.1). BuildSchemaFromText()
-/// calls it when the text starts with "version:".
+/// Parses a YAML schema (version 6, docs/wire_format.md section 2.1).
+/// BuildSchemaFromText() calls it when the text starts with "version:".
 inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = false)
 {
   using detail::FindYamlKey;
@@ -799,6 +800,9 @@ inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = fals
   return schema;
 }
 
+/// Parses a schema text in the line format (versions 4 and 5) or YAML (version 6), see
+/// docs/wire_format.md section 2. Throws std::runtime_error on a malformed text or
+/// another version; `check_hash` also throws if the declared hash is wrong.
 inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = false)
 {
   auto trimString = [](std::string& str) {
@@ -852,7 +856,6 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     }
     if(line.find("==============================") != std::string::npos)
     {
-      // get "MSG:" in the next line
       std::getline(ss, line);
       auto msg_pos = line.find("MSG: ");
       if(msg_pos == std::string::npos)
@@ -865,7 +868,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       continue;
     }
 
-    // a single space is expected
+    // Split at the first space: "<type> <name>", or "### key: value" after the key.
     auto space_pos = line.find(' ');
     if(space_pos == std::string::npos)
     {
@@ -896,14 +899,12 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     }
     if(str_left == "### hash:")
     {
-      // check compatibility
       declared_schema = std::stoull(str_right);
       continue;
     }
 
     if(str_left == "### channel_name:")
     {
-      // check compatibility
       schema.channel_name = str_right;
       legacy_hash = std::hash<std::string>()(schema.channel_name);
       continue;
@@ -912,14 +913,13 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     TypeField field;
 
     const auto& kNamesNew = detail::BasicTypeNames();
-    // backcompatibility to old format
+    // Legacy files (before version 4): upper-case type names after the field name.
     static const std::array<std::string, TypesCount> kNamesOld = {
       "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
       "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
     };
 
-    // The type token is everything before an optional "[...]": compare it exactly,
-    // otherwise a custom type named e.g. "float64Pose" would parse as float64.
+    // Compare the whole type token (before any "[...]"): "float64Pose" is a custom type.
     auto typeToken = [](const std::string& spec) {
       return spec.substr(0, spec.find('['));
     };
@@ -982,9 +982,8 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     }
     field_vector->push_back(field);
   }
-  // Snapshots carry the writer's declared hash: that is what to match against.
-  // check_hash verifies it against the recomputation of the text's own version
-  // (version 4's std::hash recipe only agrees on the writer's platform).
+  // The declared hash is the one snapshots carry. check_hash recomputes it with the
+  // recipe of the text's version.
   const uint64_t computed = version == 4 ? legacy_hash : SchemaTextHash(txt);
   if(check_hash && declared_schema != 0 && declared_schema != computed)
   {
@@ -1043,7 +1042,7 @@ bool ParseSnapshotRecursive(const TypeField& field,
   uint32_t vect_size = field.array_size;
   if(field.is_vector && field.array_size == 0)
   {
-    // dynamic vector: the count cannot exceed what the payload can hold
+    // dynamic vector of a basic type: reject a count the payload cannot hold
     vect_size = Deserialize<uint32_t>(buffer);
     if(field.type != BasicType::OTHER &&
        size_t(vect_size) * SizeOf(field.type) > buffer.size)
@@ -1114,7 +1113,7 @@ inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
       ParseSnapshotRecursive(field, schema.custom_types, buffer, callback_number, "");
     }
   }
-  // every enabled field consumed exactly its bytes; leftovers mean schema/payload mismatch
+  // leftover bytes: the schema and the payload do not belong together
   return buffer.size == 0;
 }
 

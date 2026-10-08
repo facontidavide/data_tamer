@@ -25,28 +25,24 @@ using PayloadVector = std::vector<uint8_t>;
 bool GetBit(const ActiveMask& mask, size_t index);
 void SetBit(ActiveMask& mask, size_t index, bool val);
 
-/// One captured sample of a channel. Fully owning: a copy is an independent record.
-/// The channel is identified by schema_hash (the hash covers the channel name).
+/// One captured sample of a channel. Fully owning: a copy is independent of the pool.
 struct Snapshot
 {
-  /// Unique identifier of the schema
+  /// Identifies the schema, and with it the channel (the hash covers the channel name).
   uint64_t schema_hash;
-  /// snapshot timestamp
+  /// Timestamp passed to takeSnapshot().
   std::chrono::nanoseconds timestamp;
-  /// Vector that tell us if a field of the schema is
-  /// active or not. It is basically an optimized vector
-  /// of bools, where each byte contains 8 boolean flags.
+  /// One bit per schema field (bit i % 8 of byte i / 8), set if the field is enabled.
   ActiveMask active_mask;
-  /// serialized dat containing all the values, ordered as in the schema
+  /// Serialized values of the enabled fields, in schema order.
   PayloadVector payload;
 };
 
 /**
- * @brief Move-only handle to a pooled Snapshot. Holds one reference on the
- * pool slot, so a sink may keep it for as long as it likes: the slot is not
- * reused until the last handle is destroyed, even if the channel is gone.
- * clone() adds a reference without copying the data; `Snapshot copy = *ref;`
- * makes an independent copy.
+ * @brief Move-only handle to a pooled Snapshot. It holds one reference on the pool
+ * slot, which is not reused until the last handle is released, even if the channel
+ * is gone. clone() adds a reference to the same slot. `Snapshot copy = *ref;` makes
+ * an independent copy.
  */
 class SnapshotRef
 {
@@ -76,47 +72,34 @@ private:
 };
 
 /**
- * @brief Interface implemented by a sink. The callbacks are invoked only by
- * the SinkWorker that owns the sink and are serialized with each other, so a
- * sink needs no lock of its own for the state they touch:
+ * @brief Interface implemented by a sink. Only the owning SinkWorker calls the
+ * callbacks, and it serializes them, so state they alone touch needs no lock.
  *
- * - onSchema() runs on the thread that attaches the channel to the sink
- *   (addDataSink or the first takeSnapshot), once per channel schema.
- * - onSnapshot() runs on the worker thread (or in drain()), in the order each
- *   channel took its snapshots. Throw to report a failure: the worker counts
- *   it and keeps the message (see SinkWorker).
- * - onStop() runs on the thread calling SinkWorker::stop() (or destroying the
- *   worker), after the last snapshot has been delivered: the place to close a
- *   file, publish a partial batch or write a pending dump. It runs once per
- *   stop: a second stop() without start() in between does not call it again.
- *   A throw is counted like one from onSnapshot(). The default does nothing.
- * - onStart() runs on the thread calling SinkWorker::start() after a stop()
- *   that called onStop(), before the worker accepts snapshots again: the place
- *   to reopen what onStop() closed. It is not called when the worker is
- *   constructed. A throw is counted like one from onSnapshot(). The default
- *   does nothing.
+ * - onSchema() runs on the thread that calls LogChannel::startLogging() or
+ *   addDataSink(), when a channel's schema reaches the sink (again after a re-attach).
+ * - onSnapshot() runs on the worker thread (or in drain()), in the order each channel
+ *   took its snapshots. A throw is caught and counted (SinkWorker::errors()).
+ * - onStop() runs once per stop, on the thread that calls SinkWorker::stop() (or
+ *   destroys the worker), after the last snapshot: close files, write what is pending.
+ * - onStart() runs on the thread that calls SinkWorker::start() after a stop(), before
+ *   snapshots are accepted again: reopen what onStop() closed. It is not called when
+ *   the worker is constructed.
  *
- * Keep onSnapshot() short. Every queued or retained SnapshotRef holds a slot of
- * the channel's snapshot pool, which all sinks of that channel share
- * (SnapshotPool::kDefaultCapacity = 64 slots, see LogChannel::setPoolCapacity).
- * A sink that blocks in onSnapshot(), or retains its references, lets the
- * snapshots queued behind it pile up; once they occupy every slot,
- * takeSnapshot() and tryTakeSnapshot() return SnapshotResult::pool_exhausted
- * and the sample is lost for EVERY sink of the channel, not only the slow one.
- * At a 1 kHz control rate, 64 slots last 64 ms. A sink that needs to do slow
- * work (network, disk flushes, batching) should copy what it needs
- * (`Snapshot copy = *ref;`), hand the copy to its own thread and return, or
- * raise the pool capacity before startLogging().
+ * onStop() and onStart() do nothing by default, and a throw from them is counted too.
  *
- * A callback may use the channel's const queries (getSchema(), stats(), ...)
- * but must never call anything that changes it (registration, sinks,
- * startLogging()): those wait for callbacks to finish and would deadlock.
+ * Keep onSnapshot() short. Every queued or retained SnapshotRef holds a slot of the
+ * channel's snapshot pool, which all its sinks share (LogChannel::setPoolCapacity(),
+ * 64 slots by default). A sink that blocks or retains references exhausts the pool, and
+ * the samples are then lost for EVERY sink of the channel
+ * (SnapshotResult::pool_exhausted). For slow work, copy the snapshot
+ * (`Snapshot copy = *ref;`) and hand the copy to a thread of your own.
  *
- * ABI: the virtual functions below are frozen for 2.x. The library calls them
- * through vtables compiled into user binaries, so adding, removing or
- * reordering one breaks every sink built against an earlier 2.x release.
- * New behaviour arrives as non-virtual functions of SinkWorker or as a
- * separate interface; DataSink keeps no data members.
+ * A callback can call the channel's const queries (getSchema(), stats(), ...) but
+ * never anything that changes it (registration, sinks, startLogging()): that deadlocks.
+ *
+ * ABI: the virtual functions are frozen for 2.x, because the library calls them through
+ * vtables compiled into user binaries. New behaviour goes into non-virtual functions of
+ * SinkWorker or into a separate interface, and DataSink keeps no data members.
  */
 class DataSink
 {
@@ -132,25 +115,15 @@ protected:
 };
 
 /**
- * @brief Owns a DataSink and the thread that delivers snapshots to it. It is
- * what LogChannel::addDataSink takes. The worker is stopped before the sink is
- * destroyed, so a sink never receives a callback while it is being torn down.
+ * @brief Owns a DataSink and the thread that delivers snapshots to it. It is what
+ * LogChannel::addDataSink() takes. The worker is stopped before the sink is destroyed,
+ * so a callback never runs on a sink being torn down.
  *
- * Each channel attached to the worker publishes into a queue of its own, which
- * holds exactly as many snapshots as the channel's pool has slots
- * (LogChannel::setPoolCapacity) and is allocated with the pool, in startLogging(),
- * or in addDataSink() on a started channel. A queued snapshot holds a pool slot,
- * so the queue cannot fill while the pool has a free slot: the pool is the only
- * bound, and there is no queue size to configure. Snapshots of one channel are
- * delivered in the order they were taken; the worker serves the channels in turn,
- * so snapshots of different channels interleave in no guaranteed order. A channel
- * detached from the worker (removeDataSink(), channel destroyed) has its queued
- * snapshots delivered before its queue is freed, and before what it publishes
- * after attaching to the worker again.
- *
- * An idle worker thread polls for about 20 us before it sleeps. A snapshot
- * pushed while it polls costs the snapshot thread an atomic increment and a
- * load; one pushed while it sleeps also wakes it (one futex wake on Linux).
+ * Each attached channel has its own queue, as large as the channel's pool. A queued
+ * snapshot holds a pool slot, so the pool is the only bound and there is no queue size
+ * to configure. Snapshots of one channel are delivered in the order they were taken, also
+ * across removeDataSink() and addDataSink(). Snapshots of different channels interleave
+ * in no guaranteed order. The queued snapshots of a detached channel are still delivered.
  */
 class SinkWorker
 {
@@ -159,12 +132,9 @@ public:
   {
     /// A worker thread delivers queued snapshots as they arrive (default).
     Threaded,
-    /// No thread: the application delivers by calling drain() itself. The
-    /// queue of a detached channel is freed by the next drain() (or stop(), or
-    /// destruction), so a loop that detaches and attaches channels, or creates
-    /// and destroys them, without draining keeps (pool slots + 1) x 24 bytes
-    /// per cycle until then. A stopped Threaded worker behaves the same until
-    /// start().
+    /// No thread: the application calls drain(). The queue of a detached channel is
+    /// freed only by the next drain(), stop() or destruction, so attaching and
+    /// detaching channels in a loop without draining accumulates memory.
     Manual
   };
 
@@ -181,22 +151,19 @@ public:
     return std::make_shared<SinkWorker>(std::make_unique<T>(std::forward<Args>(args)...));
   }
 
-  /// Stop accepting snapshots, wait for the callback in progress, join the
-  /// worker thread, deliver everything still queued, then call the sink's
-  /// onStop() on this thread (MCAPSink closes its file, MCAPRingSink writes a
-  /// pending dump, ROS2PublisherSink publishes its partial batch). Idempotent:
-  /// calling it again before start() does not call onStop() a second time.
-  /// The destructor calls it. Never call it from a callback. stop(), start()
-  /// and the destructor must not run concurrently on the same worker: call
-  /// them from one thread, or serialize them yourself.
+  /// Stop accepting snapshots, wait for the callback in progress, deliver everything
+  /// still queued, then call the sink's onStop() on this thread (MCAPSink closes its
+  /// file, MCAPRingSink writes a pending dump, ROS2PublisherSink publishes its partial
+  /// batch). A second stop() before start() does nothing. The destructor calls it.
+  /// Never call it from a callback. Calls to stop(), start() and the destructor must
+  /// not overlap.
   void stop();
-  /// Resume after stop(): call the sink's onStart() on this thread (MCAPSink
-  /// opens its next numbered file), restart the worker thread and accept
-  /// snapshots again. Without a stop() since the last start, it does nothing.
+  /// Resume after stop(): call the sink's onStart() on this thread (MCAPSink opens its
+  /// next numbered file), restart the worker thread and accept snapshots again. Does
+  /// nothing if the worker is not stopped. Never call it from a callback.
   void start();
-  /// Deliver every snapshot queued so far on the calling thread. Returns after
-  /// a callback in progress on the worker has finished, so everything taken
-  /// before the call has been delivered when it returns.
+  /// Deliver, on the calling thread, every snapshot taken before the call. Waits for a
+  /// callback in progress on the worker. Never call it from a callback.
   void drain();
 
   DataSink& sink();
@@ -210,7 +177,6 @@ public:
   }
 
   /// Snapshots handed to the sink so far: onSnapshot() calls that returned.
-  /// Cumulative over the worker's life (stop() and start() do not reset it).
   [[nodiscard]] uint64_t delivered() const;
 
   /// Number of onSnapshot(), onStop() and onStart() calls that threw, and the
@@ -218,35 +184,28 @@ public:
   [[nodiscard]] uint64_t errors() const;
   [[nodiscard]] std::string lastError() const;
 
-  /// The most snapshots the delivery side has found waiting in a queue, taken
-  /// over all the channels attached to this worker (it is per worker, not per
-  /// channel). Compare it with the largest pool capacity among those channels:
-  /// a value near it means the sink nearly made a pool run out. It is a lower
-  /// bound: the deliverer measures a queue from its last look at the producer's
-  /// position, refreshed whenever it runs the queue empty, so a peak built and
-  /// drained between two looks can be under-read. It is updated as soon as it
-  /// rises, on the delivery thread (never on the real-time path), and is zero
-  /// before the first delivery.
+  /// The most snapshots found waiting in one queue, over all channels attached to this
+  /// worker (per worker, not per channel). It is a lower bound, and zero before the
+  /// first delivery. A value near the largest pool capacity among those channels means
+  /// the sink nearly exhausted a pool.
   [[nodiscard]] uint64_t queueHighWater() const;
 
-  /// Everything the worker counts. Cumulative over the worker's life.
+  /// Everything the worker counts, cumulative over the worker's life (stop() and
+  /// start() do not reset it).
   struct Stats
   {
     uint64_t delivered = 0;
     uint64_t errors = 0;
     /// Per worker, across all its channels; see queueHighWater().
     uint64_t queue_high_water = 0;
-    /// The last error is at least as recent as the `errors` count.
+    /// Message of the last throw, never older than `errors`.
     std::string last_error;
   };
 
-  /// Inline on purpose: built in the caller from the exported getters above, so
-  /// the struct never crosses the library boundary and can gain fields in any
-  /// release. Hidden (DATA_TAMER_INLINE_LOCAL) so that each binary uses the copy
-  /// built against its own header. The fields are read one by one, not as one
-  /// instant. Not real-time safe: lastError() takes a mutex and copies a string
-  /// (it allocates). On a real-time thread read delivered(), errors() and
-  /// queueHighWater(), which are relaxed atomic loads.
+  /// The fields are read one by one, not as one instant. Not real-time safe:
+  /// lastError() locks a mutex and allocates. On a real-time thread call delivered(),
+  /// errors() and queueHighWater(), which are atomic loads. Inline on purpose (built
+  /// from the getters above), so Stats can gain fields without an ABI break.
   [[nodiscard]] DATA_TAMER_INLINE_LOCAL Stats stats() const
   {
     return { delivered(), errors(), queueHighWater(), lastError() };
@@ -258,8 +217,7 @@ private:
   struct Attachment;
   /// Allocates a queue of `capacity` snapshots. Control path; may throw.
   Attachment* attach(size_t capacity);
-  /// Ends an attachment: no push may follow. Its queued snapshots are still
-  /// delivered; the queue is freed by the delivery pass that finds it empty.
+  /// No push may follow. Queued snapshots are still delivered, then the queue is freed.
   void detach(Attachment* attachment) noexcept;
   /// Real-time path: no allocation, no lock. False when the worker is stopped.
   bool tryPush(Attachment& attachment, SnapshotRef&& snapshot);
