@@ -200,7 +200,7 @@ function(data_tamer_compile_fail_test name source definition)
     add_test(NAME ${name}
         COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${name}_fail)
     # The nested builds share one build directory: run them one at a time.
-    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK data_tamer_compile_fail)
+    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK build_tree)
     if(ARGC GREATER 3)
         set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARGV3}")
     else()
@@ -234,36 +234,13 @@ endforeach()
 data_tamer_compile_fail_test(request_dump_result_is_nodiscard
     request_dump_nodiscard.cpp DT_IGNORE_REQUEST_DUMP)
 
-# Compile-fail tests: a probe that ignores a [[nodiscard]] result or calls a deprecated
-# function, built with that diagnostic as an error. ctest builds the probe target and
-# passes only if the build fails with the expected diagnostic.
-function(data_tamer_add_compile_fail_test name source diagnostic_flag expected_text)
-    add_library(${name} OBJECT EXCLUDE_FROM_ALL ${source})
-    target_include_directories(${name} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-    target_compile_options(${name} PRIVATE ${diagnostic_flag})
-    target_compile_definitions(${name} PRIVATE ${ARGN})
-    set_target_properties(${name} PROPERTIES
-        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-    add_test(NAME compile_fail_${name}
-        COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DTARGET=${name}
-                -DEXPECTED=${expected_text}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/expect_compile_error.cmake)
-    # The tests build in the same tree: run them one at a time.
-    set_tests_properties(compile_fail_${name} PROPERTIES RESOURCE_LOCK build_tree)
-endfunction()
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(ignored_result_source ${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/ignored_result.cpp)
-    data_tamer_add_compile_fail_test(nodiscard_try_set_enabled ${ignored_result_source}
-        -Werror=unused-result nodiscard PROBE_TRY_SET_ENABLED)
-    data_tamer_add_compile_fail_test(nodiscard_create ${ignored_result_source}
-        -Werror=unused-result nodiscard PROBE_CREATE)
-    data_tamer_add_compile_fail_test(nodiscard_number_of_sinks ${ignored_result_source}
-        -Werror=unused-result nodiscard PROBE_NUMBER_OF_SINKS)
-    data_tamer_add_compile_fail_test(deprecated_dropped_snapshots
-        ${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/deprecated_call.cpp
-        -Werror=deprecated-declarations deprecated)
-endif()
+foreach(function TRY_SET_ENABLED CREATE NUMBER_OF_SINKS)
+    string(TOLOWER ${function} function_name)
+    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
+        channel_nodiscard.cpp DT_IGNORE_${function} "ignoring return value")
+endforeach()
+data_tamer_compile_fail_test(dropped_snapshots_is_deprecated
+    dropped_snapshots_deprecated.cpp DT_CALL_DEPRECATED "deprecated-declarations")
 
 # logged_value.hpp must work on its own. The program includes nothing else, so it links
 # only if the header defines the members it calls; a test builds it on demand.
