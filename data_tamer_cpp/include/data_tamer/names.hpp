@@ -7,6 +7,13 @@ namespace DataTamer
 {
 namespace details
 {
+// Whitespace and control characters cannot be part of a name: the schema is text with
+// one field per line. Bytes above 0x7f (UTF-8) are allowed.
+inline bool IsForbiddenNameByte(unsigned char byte)
+{
+  return byte <= 0x20 || byte == 0x7F;
+}
+
 // Appends the non-empty '/'-separated components of `part` to `out`.
 inline void AppendNameComponents(std::string& out, std::string_view part)
 {
@@ -58,17 +65,24 @@ template <typename... Parts>
 }
 
 /**
- * @brief True if `name` is non-empty, has no spaces and no empty '/'-separated
- * component (no leading, trailing or repeated '/'). Registration only rejects
- * spaces: use this to assert on names, e.g. in a debug build.
+ * @brief True if `name` is non-empty, has no whitespace or control character and no
+ * empty '/'-separated component (no leading, trailing or repeated '/'). Registration
+ * rejects the first two kinds only: use this to assert on the last, e.g. in a debug
+ * build.
  *
  *   IsCanonicalName("loco/LF/x")   == true
  *   IsCanonicalName("/loco//LF/x") == false
  */
 [[nodiscard]] inline bool IsCanonicalName(std::string_view name)
 {
-  return !name.empty() && name.find(' ') == std::string_view::npos &&
-         name.front() != '/' && name.back() != '/' &&
+  for(const char c : name)
+  {
+    if(details::IsForbiddenNameByte(static_cast<unsigned char>(c)))
+    {
+      return false;
+    }
+  }
+  return !name.empty() && name.front() != '/' && name.back() != '/' &&
          name.find("//") == std::string_view::npos;
 }
 

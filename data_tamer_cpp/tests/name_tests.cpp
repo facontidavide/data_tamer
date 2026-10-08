@@ -10,7 +10,9 @@
 
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -170,6 +172,11 @@ TEST(Names, IsCanonicalName)
   EXPECT_FALSE(IsCanonicalName("loco/x/"));
   EXPECT_FALSE(IsCanonicalName("loco//x"));
   EXPECT_FALSE(IsCanonicalName("loco x"));
+  EXPECT_FALSE(IsCanonicalName("loco\tx"));
+  EXPECT_FALSE(IsCanonicalName("loco\nx"));
+  EXPECT_FALSE(IsCanonicalName("loco\x01x"));
+  EXPECT_FALSE(IsCanonicalName("loco\x7f"));
+  EXPECT_TRUE(IsCanonicalName("temp\xc3\xa9rature/\xc3\xa4"));  // UTF-8 is a name
   EXPECT_FALSE(IsCanonicalName(JoinNames("/", "")));
 }
 
@@ -187,8 +194,8 @@ TEST(Names, AcceptsHierarchicalNames)
   EXPECT_EQ(channel->getSchema().fields.at(1).field_name, "loco/LF/y");
 }
 
-// Registration only rejects spaces: names with empty '/'-separated components,
-// and the empty name, are accepted unchanged (IsCanonicalName() is opt-in).
+// Names with empty '/'-separated components are accepted unchanged
+// (IsCanonicalName() is opt-in).
 TEST(Names, AcceptsNonCanonicalNamesInEveryOverload)
 {
   double scalar = 0;
@@ -199,7 +206,7 @@ TEST(Names, AcceptsNonCanonicalNamesInEveryOverload)
   std::vector<Point3D> points(2);
   auto serializer = std::make_shared<CustomSerializerT<Point3D>>("Point3D");
 
-  for(const std::string name : { "/loco/x", "loco/x/", "loco//x", "" })
+  for(const std::string name : { "/loco/x", "loco/x/", "loco//x" })
   {
     const std::vector<std::function<void(LogChannel&)>> registrations = {
       [&](LogChannel& c) { (void)c.registerValue(name, &scalar); },
@@ -256,6 +263,102 @@ TEST(Names, RejectsSpacesInEveryOverload)
   const auto schema = channel->getSchema();
   EXPECT_TRUE(schema.fields.empty());
   EXPECT_TRUE(schema.custom_types.empty());
+}
+
+namespace
+{
+// One registration per overload, for the name tests below.
+struct NameRegistrations
+{
+  double scalar = 0;
+  std::atomic<int32_t> atomic{ 0 };
+  std::vector<double> vect = std::vector<double>(2);
+  std::array<double, 3> array{};
+  Point3D point;
+  std::vector<Point3D> points = std::vector<Point3D>(2);
+  std::shared_ptr<CustomSerializerT<Point3D>> serializer =
+      std::make_shared<CustomSerializerT<Point3D>>("Point3D");
+
+  std::vector<std::function<void(LogChannel&, const std::string&)>> all()
+  {
+    return {
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &scalar); },
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &atomic); },
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &vect); },
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &array); },
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &point); },
+      [&](LogChannel& c, const std::string& n) { (void)c.registerValue(n, &points); },
+      [&](LogChannel& c, const std::string& n) {
+        (void)c.registerCustomValue(n, &point, serializer);
+      },
+      [&](LogChannel& c, const std::string& n) { (void)c.createLoggedValue<double>(n); },
+    };
+  }
+};
+}  // namespace
+
+// The schema is a text with one field per line, so a name must be non-empty and free
+// of whitespace and control characters; the error names the channel and the value.
+TEST(Names, RejectsEmptyAndWhitespaceOrControlNamesInEveryOverload)
+{
+  // Octal escapes: \001 is 0x01, \037 is 0x1f, \177 is 0x7f.
+  const std::vector<std::string> bad_names = {
+    "",
+    "\t",
+    "a\tb",
+    "a\nb",
+    "a\rb",
+    "a\vb",
+    "a\fb",
+    "a\001b",
+    "a\037b",
+    "a\177b",
+    " a",
+    "a ",
+    std::string("a\0b", 3),
+  };
+  NameRegistrations values;
+  for(const auto& name : bad_names)
+  {
+    for(const auto& registration : values.all())
+    {
+      auto channel = LogChannel::create("controller/walk");
+      const auto msg = RegistrationError([&] { registration(*channel, name); });
+      EXPECT_TRUE(Contains(msg, "channel 'controller/walk'")) << msg;
+      EXPECT_TRUE(Contains(msg, "invalid value name")) << msg;
+      // The message stays on one line and still shows which name it was.
+      for(const char c : msg)
+      {
+        EXPECT_FALSE(c != ' ' && static_cast<unsigned char>(c) <= 0x20) << msg;
+      }
+      if(!name.empty() && std::isalpha(static_cast<unsigned char>(name.front())) != 0)
+      {
+        EXPECT_TRUE(Contains(msg, "'" + name.substr(0, 1))) << msg;
+      }
+      if(!name.empty() && std::isalpha(static_cast<unsigned char>(name.back())) != 0)
+      {
+        EXPECT_TRUE(Contains(msg, name.substr(name.size() - 1) + "'")) << msg;
+      }
+      // A rejected name leaves nothing behind, custom types included.
+      const auto schema = channel->getSchema();
+      EXPECT_TRUE(schema.fields.empty());
+      EXPECT_TRUE(schema.custom_types.empty());
+    }
+  }
+}
+
+// Bytes above 0x7f are UTF-8, not control characters.
+TEST(Names, AcceptsUtf8Names)
+{
+  NameRegistrations values;
+  for(const auto& registration : values.all())
+  {
+    auto channel = LogChannel::create("chan");
+    const std::string name = "temp\xc3\xa9rature/\xc3\xa4\xe2\x82\xac";
+    EXPECT_NO_THROW(registration(*channel, name));
+    ASSERT_EQ(channel->getSchema().fields.size(), 1u);
+    EXPECT_EQ(channel->getSchema().fields.front().field_name, name);
+  }
 }
 
 // The field names of a TypeDefinition / TypeDefinitionTrait (nested types

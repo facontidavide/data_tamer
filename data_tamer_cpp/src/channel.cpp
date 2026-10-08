@@ -40,6 +40,28 @@ std::string ChannelPrefix(const std::string& channel_name)
 {
   return "channel '" + channel_name + "': ";
 }
+
+// The name with the bytes it cannot hold shown as \xNN, so an error stays on one line.
+std::string Printable(const std::string& name)
+{
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string text;
+  for(const char c : name)
+  {
+    const auto byte = static_cast<unsigned char>(c);
+    if(byte != ' ' && details::IsForbiddenNameByte(byte))
+    {
+      text += "\\x";
+      text += kHex[byte >> 4];
+      text += kHex[byte & 0xF];
+    }
+    else
+    {
+      text += c;
+    }
+  }
+  return text;
+}
 }  // namespace
 
 struct LogChannel::Pimpl
@@ -647,10 +669,26 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
 
 void LogChannel::checkValueName(const std::string& name) const
 {
-  if(name.find(' ') != std::string::npos)
+  const char* problem = nullptr;
+  if(name.empty())
+  {
+    problem = "it is empty";
+  }
+  else
+  {
+    const auto bad = std::find_if(name.begin(), name.end(), [](char c) {
+      return details::IsForbiddenNameByte(static_cast<unsigned char>(c));
+    });
+    if(bad != name.end())
+    {
+      problem = *bad == ' ' ? "it contains a space" :
+                              "it contains a whitespace or control character";
+    }
+  }
+  if(problem != nullptr)
   {
     throw std::runtime_error(ChannelPrefix(_p->channel_name) + "invalid value name '" +
-                             name + "': it contains a space");
+                             Printable(name) + "': " + problem);
   }
 }
 

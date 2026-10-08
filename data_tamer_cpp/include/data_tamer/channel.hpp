@@ -95,9 +95,10 @@ public:
    * returned or the channel is destroyed. Threads other than the snapshot thread must
    * write the variable inside scopedWrite().
    *
-   * The name must be unique in the channel and contain no spaces; JoinNames() builds
-   * hierarchical names. Throws std::runtime_error for a duplicate or invalid name,
-   * and for a new name once logging started. Not real-time safe.
+   * The name must be unique in the channel, non-empty and free of whitespace and
+   * control characters; JoinNames() builds hierarchical names. Throws
+   * std::runtime_error for a duplicate or invalid name, and for a new name once
+   * logging started. Not real-time safe.
    *
    * @return the ID for unregister(), setEnabled() and isEnabled()
    */
@@ -390,8 +391,9 @@ private:
 
   void addCustomType(const std::string& custom_type_name, const FieldsVector& fields);
 
-  /// Throws std::runtime_error if `name` contains a space. Called before type
-  /// discovery, so that a rejected name leaves the channel unchanged.
+  /// Throws std::runtime_error if `name` is empty or contains whitespace or control
+  /// characters. Called before type discovery, so that a rejected name leaves the
+  /// channel unchanged.
   void checkValueName(const std::string& name) const;
 
   [[nodiscard]] RegistrationID registerValueImpl(const std::string& name,
