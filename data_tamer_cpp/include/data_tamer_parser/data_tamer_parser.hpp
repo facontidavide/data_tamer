@@ -1143,14 +1143,23 @@ using MinSizes = std::map<std::string, size_t>;
 /// Larger sizes saturate here, so that products of array extents cannot overflow.
 constexpr size_t kHugeSize = std::numeric_limits<size_t>::max() / 2;
 
-inline size_t MinFieldSize(const TypeField& field,
-                           const std::map<std::string, FieldsVector>& types_list,
+inline size_t MinFieldSize(const TypeField& field, const Schema& schema,
                            MinSizes& min_sizes, int depth);
+
+/// The error for a custom type the schema does not describe field by field.
+[[noreturn]] inline void UndecodableType(const Schema& schema, const std::string& name)
+{
+  if(schema.custom_schemas.count(name) != 0)
+  {
+    throw std::runtime_error("DataTamerParser: type " + name +
+                             " has an opaque encoding; cannot continue");
+  }
+  throw std::runtime_error("DataTamerParser: unknown type " + name);
+}
 
 /// Fewest payload bytes one element of `field` takes: a basic type's size, or the sum
 /// of the fewest bytes of each field of the custom type.
-inline size_t MinElementSize(const TypeField& field,
-                             const std::map<std::string, FieldsVector>& types_list,
+inline size_t MinElementSize(const TypeField& field, const Schema& schema,
                              MinSizes& min_sizes, int depth)
 {
   if(field.type != BasicType::OTHER)
@@ -1166,15 +1175,15 @@ inline size_t MinElementSize(const TypeField& field,
   {
     throw std::runtime_error("DataTamerParser: custom types nested too deeply (cycle?)");
   }
-  const auto type_it = types_list.find(field.type_name);
-  if(type_it == types_list.end())
+  const auto type_it = schema.custom_types.find(field.type_name);
+  if(type_it == schema.custom_types.end())
   {
-    throw std::runtime_error("DataTamerParser: unknown type " + field.type_name);
+    UndecodableType(schema, field.type_name);
   }
   size_t total = 0;
   for(const auto& sub_field : type_it->second)
   {
-    const size_t size = MinFieldSize(sub_field, types_list, min_sizes, depth + 1);
+    const size_t size = MinFieldSize(sub_field, schema, min_sizes, depth + 1);
     total = size > kHugeSize - total ? kHugeSize : total + size;
   }
   min_sizes.emplace(field.type_name, total);
@@ -1183,23 +1192,21 @@ inline size_t MinElementSize(const TypeField& field,
 
 /// Fewest payload bytes `field` takes: its elements at their fewest bytes, or only the
 /// 4 byte count for a dynamic vector.
-inline size_t MinFieldSize(const TypeField& field,
-                           const std::map<std::string, FieldsVector>& types_list,
+inline size_t MinFieldSize(const TypeField& field, const Schema& schema,
                            MinSizes& min_sizes, int depth)
 {
   if(field.is_vector && field.array_size == 0)
   {
     return sizeof(uint32_t);
   }
-  const size_t element = MinElementSize(field, types_list, min_sizes, depth);
+  const size_t element = MinElementSize(field, schema, min_sizes, depth);
   const size_t count = field.is_vector ? field.array_size : 1;
   return (element != 0 && count > kHugeSize / element) ? kHugeSize : element * count;
 }
 }  // namespace detail
 
 template <typename NumberCallback>
-bool ParseSnapshotRecursive(const TypeField& field,
-                            const std::map<std::string, FieldsVector>& types_list,
+bool ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
                             BufferSpan& buffer, const NumberCallback& callback_number,
                             const std::string& prefix, detail::MinSizes& min_sizes,
                             int depth = 0)
@@ -1217,7 +1224,7 @@ bool ParseSnapshotRecursive(const TypeField& field,
   {
     // An element takes at least min_size bytes: a count the payload cannot hold is
     // rejected. Elements of no byte hold no value, however many there are.
-    const size_t min_size = detail::MinElementSize(field, types_list, min_sizes, depth);
+    const size_t min_size = detail::MinElementSize(field, schema, min_sizes, depth);
     if(min_size == 0)
     {
       return true;
@@ -1239,14 +1246,14 @@ bool ParseSnapshotRecursive(const TypeField& field,
     }
     else
     {
-      const auto type_it = types_list.find(field.type_name);
-      if(type_it == types_list.end())
+      const auto type_it = schema.custom_types.find(field.type_name);
+      if(type_it == schema.custom_types.end())
       {
-        throw std::runtime_error("DataTamerParser: unknown type " + field.type_name);
+        detail::UndecodableType(schema, field.type_name);
       }
       for(const auto& sub_field : type_it->second)
       {
-        ParseSnapshotRecursive(sub_field, types_list, buffer, callback_number, var_name,
+        ParseSnapshotRecursive(sub_field, schema, buffer, callback_number, var_name,
                                min_sizes, depth + 1);
       }
     }
@@ -1287,8 +1294,7 @@ template <typename NumberCallback>
     const auto& field = schema.fields[i];
     if(GetBit(snapshot.active_mask, i))
     {
-      ParseSnapshotRecursive(field, schema.custom_types, buffer, callback_number, "",
-                             min_sizes);
+      ParseSnapshotRecursive(field, schema, buffer, callback_number, "", min_sizes);
     }
   }
   // leftover bytes: the schema and the payload do not belong together

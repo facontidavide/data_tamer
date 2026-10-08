@@ -198,7 +198,7 @@ TEST(ParserRobustness, MinimumSizeOfNestedArraysSaturatesInsteadOfWrapping)
   const auto schema = BuildSchemaFromText(text);
 
   detail::MinSizes cache;
-  EXPECT_EQ(detail::MinFieldSize(schema.fields.at(0), schema.custom_types, cache, 0),
+  EXPECT_EQ(detail::MinFieldSize(schema.fields.at(0), schema, cache, 0),
             detail::kHugeSize);
 }
 
@@ -532,4 +532,34 @@ TEST(ParserRobustness, DefaultConstructedViewsAndFieldsAreEmpty)
   EXPECT_EQ(field->array_size, 0u);
   EXPECT_EQ(field->type, BasicType::OTHER);
   field->~TypeField();
+}
+
+TEST(ParserRobustness, ActiveFieldOfAnOpaqueTypeSaysItCannotBeDecoded)
+{
+  const auto schema =
+      BuildSchemaFromText(kHeader + "Foreign f\nForeign[] fs\n" + kSeparator +
+                          "\nMSG: Foreign\nENCODING: proto\nmessage Foreign {}\n");
+  const std::vector<uint8_t> no_field = { 0 };
+  EXPECT_TRUE(ParseSnapshot(schema, viewOf(no_field, {}),
+                            [](const std::string&, const VarNumber&) {}));
+
+  // the field, and a non-empty vector of the type: neither can be decoded
+  const std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> cases = {
+    { { 1 }, std::vector<uint8_t>(8) },
+    { { 2 }, { 1, 0, 0, 0, 0, 0, 0, 0 } },
+  };
+  for(const auto& [mask, payload] : cases)
+  {
+    try
+    {
+      (void)ParseSnapshot(schema, viewOf(mask, payload),
+                          [](const std::string&, const VarNumber&) {});
+      ADD_FAILURE() << "decoded a field of an opaque type";
+    }
+    catch(const std::runtime_error& e)
+    {
+      EXPECT_NE(std::string(e.what()).find("opaque encoding"), std::string::npos)
+          << e.what();
+    }
+  }
 }
