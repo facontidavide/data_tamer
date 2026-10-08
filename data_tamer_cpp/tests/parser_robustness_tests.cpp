@@ -416,3 +416,20 @@ TEST(ParserRobustness, LegacyTextWithoutAVersionLineIsRead)
                                        "uint64[] stamp" }));
   EXPECT_EQ(schema.fields[1].type, BasicType::INT32);
 }
+
+// Schema text: cost
+
+TEST(ParserRobustness, LongRunOfSpacesIsTrimmedInLinearTime)
+{
+  // a million leading spaces took the old trimming (one erase per space) seconds
+  const std::string spaces(1'000'000, ' ');
+  const std::string text = kHeader + spaces + "\n" + spaces + "float64 x" + spaces + "\n";
+
+  const auto start = std::chrono::steady_clock::now();
+  const auto schema = BuildSchemaFromText(text);
+  const std::chrono::duration<double> seconds = std::chrono::steady_clock::now() - start;
+
+  ASSERT_EQ(schema.fields.size(), 1u);
+  EXPECT_EQ(schema.fields[0].field_name, "x");
+  EXPECT_LT(seconds.count(), kInstant);
+}

@@ -816,14 +816,14 @@ inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = fals
 inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = false)
 {
   auto trimString = [](std::string& str) {
-    while(!str.empty() && (str.back() == ' ' || str.back() == '\r'))
+    const auto last = str.find_last_not_of(" \r");
+    if(last == std::string::npos)
     {
-      str.pop_back();
+      str.clear();
+      return;
     }
-    while(!str.empty() && (str.front() == ' ' || str.front() == '\r'))
-    {
-      str.erase(0, 1);
-    }
+    str.erase(last + 1);
+    str.erase(0, str.find_first_not_of(" \r"));
   };
 
   {
