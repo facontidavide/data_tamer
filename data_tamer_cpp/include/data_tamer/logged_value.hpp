@@ -1,17 +1,17 @@
 #pragma once
 
+#include "data_tamer/fwd.hpp"
 #include "data_tamer/types.hpp"
 #include "data_tamer/details/locked_reference.hpp"
 #include "data_tamer/details/shared_state.hpp"
 
 #include <atomic>
 #include <memory>
+#include <string>
 #include <type_traits>
 
 namespace DataTamer
 {
-
-class LogChannel;
 
 namespace details
 {
