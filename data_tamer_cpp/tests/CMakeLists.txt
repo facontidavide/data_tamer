@@ -36,7 +36,8 @@ set(DATATAMER_TEST_SOURCES
     mcap_ring_sink_tests.cpp
     wire_format_tests.cpp
     name_tests.cpp
-    registry_limit_tests.cpp)
+    registry_limit_tests.cpp
+    lock_order_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)

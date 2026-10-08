@@ -874,6 +874,50 @@ SnapshotResult LogChannel::tryTakeSnapshot(std::chrono::nanoseconds timestamp)
 SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
                                             bool real_time)
 {
+  // Without sinks, return before touching the pool or the write mutex. The links
+  // are loaded again inside the epoch.
+  if(std::none_of(_p->published_sinks.begin(), _p->published_sinks.end(),
+                  [](const auto& link) { return link.load(std::memory_order_relaxed); }))
+  {
+    return SnapshotResult::no_sinks;
+  }
+
+  auto* slot = _p->pool->tryAcquire();  // counts exhaustion itself
+  if(!slot)
+  {
+    return SnapshotResult::pool_exhausted;
+  }
+  SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
+  auto& snapshot = slot->snapshot;
+
+  // The write mutex before the epoch: a control operation waiting for the epoch
+  // (it may run inside a transaction) never waits for a snapshot that waits for it.
+  auto& write_mutex = _p->shared->write_mutex;
+  uint64_t blocked_wait_ns = 0;
+  bool blocked = false;
+  if(real_time)
+  {
+    if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
+    {
+      _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+      return SnapshotResult::blocked;
+    }
+  }
+  else
+  {
+    blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
+  }
+  std::unique_lock<WriteMutex> write_lock(write_mutex, std::adopt_lock);
+  if(blocked)
+  {
+    _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+    auto previous = _p->write_lock_wait_max_ns.load(std::memory_order_relaxed);
+    while(previous < blocked_wait_ns &&
+          !_p->write_lock_wait_max_ns.compare_exchange_weak(previous, blocked_wait_ns,
+                                                            std::memory_order_relaxed))
+    {
+    }
+  }
   Pimpl::EpochGuard guard(_p->epoch);
 
   std::array<Pimpl::SinkLink*, Pimpl::kMaxSinks> links{};
@@ -888,73 +932,38 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   }
   if(last == links.size())
   {
-    return SnapshotResult::no_sinks;
+    return SnapshotResult::no_sinks;  // removed while this call waited for the mutex
   }
 
-  auto* slot = _p->pool->tryAcquire();  // counts exhaustion itself
-  if(!slot)
+  // Under the write mutex, so enable changes made inside a scopedWrite()
+  // transaction are seen together with the values they belong to. A rebuilt
+  // active bit acquires registration's initialized holder through its SC flag
+  // load; see refreshMaskIfDirty() for the ordering argument.
+  _p->refreshMaskIfDirty();
+  // The RT path sizes against the slot: it neither throws nor allocates.
+  const auto payload_size =
+      real_time ? _p->payloadSize(snapshot.payload.capacity()) : _p->payloadSize();
+  if(payload_size > snapshot.payload.capacity())
   {
-    return SnapshotResult::pool_exhausted;
-  }
-  SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
-  auto& snapshot = slot->snapshot;
-
-  {
-    auto& write_mutex = _p->shared->write_mutex;
-    uint64_t blocked_wait_ns = 0;
-    bool blocked = false;
     if(real_time)
     {
-      if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
-      {
-        _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
-        return SnapshotResult::blocked;
-      }
+      _p->dropped_oversize.fetch_add(1, std::memory_order_relaxed);
+      return SnapshotResult::oversize;
     }
-    else
-    {
-      blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
-    }
-    std::lock_guard<WriteMutex> write_lock(write_mutex, std::adopt_lock);
-    // Under the write mutex, so enable changes made inside a scopedWrite()
-    // transaction are seen together with the values they belong to. A rebuilt
-    // active bit acquires registration's initialized holder through its SC flag
-    // load; see refreshMaskIfDirty() for the ordering argument.
-    _p->refreshMaskIfDirty();
-    if(blocked)
-    {
-      _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
-      auto previous = _p->write_lock_wait_max_ns.load(std::memory_order_relaxed);
-      while(previous < blocked_wait_ns &&
-            !_p->write_lock_wait_max_ns.compare_exchange_weak(previous, blocked_wait_ns,
-                                                              std::memory_order_relaxed))
-      {
-      }
-    }
-    // The RT path sizes against the slot: it neither throws nor allocates.
-    const auto payload_size =
-        real_time ? _p->payloadSize(snapshot.payload.capacity()) : _p->payloadSize();
-    if(payload_size > snapshot.payload.capacity())
-    {
-      if(real_time)
-      {
-        _p->dropped_oversize.fetch_add(1, std::memory_order_relaxed);
-        return SnapshotResult::oversize;
-      }
-      snapshot.payload.reserve(checkedDouble(payload_size));
-      _p->payload_reallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    snapshot.payload.resize(payload_size);
-    SerializeMe::SpanBytes payload_buffer(snapshot.payload);
-    for(size_t i = 0; i < _p->series.size(); i++)
-    {
-      if(GetBit(_p->active_mask, i))
-      {
-        _p->series[i].holder.serialize(payload_buffer);
-      }
-    }
-    snapshot.payload.resize(snapshot.payload.size() - payload_buffer.size());
+    snapshot.payload.reserve(checkedDouble(payload_size));
+    _p->payload_reallocations.fetch_add(1, std::memory_order_relaxed);
   }
+  snapshot.payload.resize(payload_size);
+  SerializeMe::SpanBytes payload_buffer(snapshot.payload);
+  for(size_t i = 0; i < _p->series.size(); i++)
+  {
+    if(GetBit(_p->active_mask, i))
+    {
+      _p->series[i].holder.serialize(payload_buffer);
+    }
+  }
+  snapshot.payload.resize(snapshot.payload.size() - payload_buffer.size());
+  write_lock.unlock();
 
   snapshot.active_mask = _p->active_mask;
   snapshot.schema_hash = _p->schema.hash;
