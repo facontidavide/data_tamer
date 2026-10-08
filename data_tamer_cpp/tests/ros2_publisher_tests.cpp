@@ -221,6 +221,52 @@ TEST(DataTamerROS2Publisher, AggregateBySize)
   }
 }
 
+TEST(DataTamerROS2Publisher, AggregatePreservesSnapshotTimestamps)
+{
+  auto node = std::make_shared<rclcpp::Node>("test_datatamer_aggregate_stamps");
+  ROS2PublisherOptions options;
+  options.aggregate = true;
+  options.max_batch_size = 5;
+  options.max_batch_delay = std::chrono::milliseconds(0);
+  auto ros2_sink = ROS2PublisherSink::create(node, "test_aggregate_stamps", options);
+
+  auto channel = ChannelsRegistry::Global().getChannel("channel_aggregate_stamps");
+  channel->addDataSink(ros2_sink);
+  double value = 1.;
+  channel->registerValue("value", &value);
+
+  // uneven, explicit timestamps: each snapshot of the batch keeps its own
+  const std::vector<uint64_t> stamps = { 1'000'000'001, 1'000'000'002, 1'000'123'456,
+                                         1'002'000'000, 9'000'000'000 };
+  auto batch = receiveBatch(node, "test_aggregate_stamps", [&] {
+    for(const auto stamp : stamps)
+    {
+      ASSERT_EQ(channel->takeSnapshot(std::chrono::nanoseconds(stamp)),
+                SnapshotResult::ok);
+    }
+    ros2_sink->drain();
+  });
+
+  ASSERT_TRUE(batch.has_value());
+  ASSERT_EQ(batch->snapshots.size(), stamps.size());
+  for(size_t i = 0; i < stamps.size(); i++)
+  {
+    EXPECT_EQ(batch->snapshots[i].timestamp_nsec, stamps[i]);
+  }
+
+  // the decoder hands the same timestamps to its callback
+  DataTamerParser::SchemaRegistry registry;
+  std::vector<uint64_t> decoded;
+  EXPECT_EQ(
+      DataTamerParser::ForEachSnapshotInBatch(
+          registry, *batch,
+          [&](const DataTamerParser::Schema&, const DataTamerParser::SnapshotView& view) {
+            decoded.push_back(view.timestamp);
+          }),
+      stamps.size());
+  EXPECT_EQ(decoded, stamps);
+}
+
 // A batch below max_batch_size goes out on flush() after drain(), and on
 // SinkWorker::stop() (DataSink::onStop()); without embedded schemas.
 TEST(DataTamerROS2Publisher, AggregatePartialBatchOnFlushOrStop)

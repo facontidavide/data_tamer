@@ -485,7 +485,8 @@ TEST(DataTamerParser, SnapshotBatchHelpers)
   {
     v1 = i;
     v2 = 0.5 * i;
-    ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
+    ASSERT_EQ(channel->takeSnapshot(std::chrono::nanoseconds(1000 + 7 * i)),
+              DataTamer::SnapshotResult::ok);
     dummy_sink.drain();
     const auto snapshot = dummy_sink->latestSnapshot();
     batch.snapshots.push_back({ uint64_t(snapshot.timestamp.count()),
@@ -497,11 +498,13 @@ TEST(DataTamerParser, SnapshotBatchHelpers)
 
   DataTamerParser::SchemaRegistry registry;
   std::vector<std::map<std::string, double>> decoded;
+  std::vector<uint64_t> stamps;
   const size_t visited = DataTamerParser::ForEachSnapshotInBatch(
       registry, batch,
       [&](const DataTamerParser::Schema& schema,
           const DataTamerParser::SnapshotView& view) {
         EXPECT_EQ(schema.channel_name, "batch_channel");
+        stamps.push_back(view.timestamp);
         auto& values = decoded.emplace_back();
         EXPECT_TRUE(DataTamerParser::ParseSnapshot(
             schema, view,
@@ -518,6 +521,7 @@ TEST(DataTamerParser, SnapshotBatchHelpers)
   {
     EXPECT_EQ(decoded[size_t(i)].at("v1"), i);
     EXPECT_EQ(decoded[size_t(i)].at("v2"), 0.5 * i);
+    EXPECT_EQ(stamps[size_t(i)], uint64_t(1000 + 7 * i));
   }
 
   // without embedded schemas, a registry filled earlier (e.g. from the
