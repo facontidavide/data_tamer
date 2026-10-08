@@ -60,6 +60,12 @@ void ChannelsRegistry::addDefaultSink(std::shared_ptr<SinkWorker> sink)
   std::vector<std::shared_ptr<LogChannel>> channels;
   {
     std::scoped_lock lk(_p->mutex);
+    if(_p->default_sinks.size() >= LogChannel::kMaxSinks &&
+       !_p->default_sinks.count(sink))
+    {
+      throw std::runtime_error("A registry supports at most eight default sinks: a "
+                               "channel holds no more");
+    }
     inserted = _p->default_sinks.insert(sink).second;
     channels.reserve(_p->channels.size());
     for(const auto& [name, channel] : _p->channels)
