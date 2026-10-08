@@ -7,8 +7,10 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace DataTamerTest
 {
@@ -69,6 +71,20 @@ inline size_t countMessages(const std::string& path, bool finalized = false)
   }
   reader.close();
   return count;
+}
+
+/// The log time of each message of an MCAP file, in file order.
+inline std::vector<uint64_t> logTimes(const std::string& path)
+{
+  mcap::McapReader reader;
+  EXPECT_TRUE(reader.open(path).ok()) << path;
+  std::vector<uint64_t> times;
+  for(const auto& message : reader.readMessages())
+  {
+    times.push_back(message.message.logTime);
+  }
+  reader.close();
+  return times;
 }
 
 }  // namespace DataTamerTest

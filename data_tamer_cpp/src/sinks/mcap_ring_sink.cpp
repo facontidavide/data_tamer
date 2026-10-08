@@ -176,7 +176,17 @@ struct MCAPRingSink::Pimpl
   bool retry_counted = false;  // the active dump already found the writer busy
   nanoseconds trigger_time{ 0 }, dump_start{ 0 }, dump_end{ 0 };
   bool has_snapshot = false;
-  nanoseconds max_timestamp = kMinTime;
+  nanoseconds max_timestamp = kMinTime;  // newest timestamp seen
+  // Timestamp of the last snapshot of each channel, added by onSchema() so that
+  // onSnapshot() does not allocate. When one channel's clock steps back (a simulation
+  // reset) a new run starts, and run_max restarts from that snapshot.
+  struct ChannelClock
+  {
+    uint64_t schema_hash;
+    nanoseconds last;
+  };
+  std::vector<ChannelClock> clocks;
+  nanoseconds run_max = kMinTime;  // newest timestamp of the current run
   // Newest timestamp evicted by capacity: a dump starting at or before it lost data.
   nanoseconds capacity_evicted_until = kMinTime;
   // The active dump lost a record of [dump_start, dump_end] to capacity
@@ -212,6 +222,7 @@ struct MCAPRingSink::Pimpl
   std::thread writer_thread;
 
   void store(const Snapshot& snapshot);
+  void trackClock(const Snapshot& snapshot);
   bool tryHandOff();
   void writerLoop();
   void writeDump(MCAPRingDump& dump);
@@ -263,6 +274,24 @@ void MCAPRingSink::Pimpl::store(const Snapshot& snapshot)
                              static_cast<uint32_t>(snapshot.active_mask.size()),
                              static_cast<uint32_t>(snapshot.payload.size()) };
   ring.push(header, snapshot.active_mask.data(), snapshot.payload.data());
+}
+
+// Caller holds ring_mutex.
+void MCAPRingSink::Pimpl::trackClock(const Snapshot& snapshot)
+{
+  max_timestamp = std::max(max_timestamp, snapshot.timestamp);
+  const auto clock = std::find_if(clocks.begin(), clocks.end(), [&](const auto& entry) {
+    return entry.schema_hash == snapshot.schema_hash;
+  });
+  if(clock != clocks.end())
+  {
+    if(snapshot.timestamp < clock->last)
+    {
+      run_max = kMinTime;
+    }
+    clock->last = snapshot.timestamp;
+  }
+  run_max = std::max(run_max, snapshot.timestamp);
 }
 
 // Caller holds ring_mutex and phase == Ready. Never waits: returns false if
@@ -493,8 +522,18 @@ bool MCAPRingSink::dumpRequested() const
 
 void MCAPRingSink::onSchema(const Schema& schema)
 {
-  std::scoped_lock lock(_p->schema_mutex);
-  _p->schemas.try_emplace(schema.hash, schema);
+  {
+    std::scoped_lock lock(_p->schema_mutex);
+    _p->schemas.try_emplace(schema.hash, schema);
+  }
+  std::scoped_lock lock(_p->ring_mutex);
+  const auto known =
+      std::any_of(_p->clocks.begin(), _p->clocks.end(),
+                  [&](const auto& entry) { return entry.schema_hash == schema.hash; });
+  if(!known)
+  {
+    _p->clocks.push_back({ schema.hash, kMinTime });
+  }
 }
 
 void MCAPRingSink::onSnapshot(const SnapshotRef& ref)
@@ -503,7 +542,7 @@ void MCAPRingSink::onSnapshot(const SnapshotRef& ref)
   auto& p = *_p;
   std::scoped_lock lock(p.ring_mutex);
   p.has_snapshot = true;
-  p.max_timestamp = std::max(p.max_timestamp, snapshot.timestamp);
+  p.trackClock(snapshot);
 
   if(p.phase == Pimpl::Phase::Idle)
   {
@@ -560,9 +599,9 @@ bool MCAPRingSink::flushPendingDump()
     }
     if(p.phase == Pimpl::Phase::Idle)  // requested, not triggered yet
     {
-      p.trigger_time = p.max_timestamp;
-      p.dump_start = saturatingSub(p.max_timestamp, p.options.window);
-      p.dump_end = p.max_timestamp;
+      p.trigger_time = p.run_max;
+      p.dump_start = saturatingSub(p.run_max, p.options.window);
+      p.dump_end = p.run_max;
     }
     p.dump_end = std::min(p.dump_end, p.max_timestamp);
     p.phase = Pimpl::Phase::Ready;
