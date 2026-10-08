@@ -155,15 +155,17 @@ public:
   /// still queued, then call the sink's onStop() on this thread (MCAPSink closes its
   /// file, MCAPRingSink writes a pending dump, ROS2PublisherSink publishes its partial
   /// batch). A second stop() before start() does nothing. The destructor calls it.
-  /// Never call it from a callback. Calls to stop(), start() and the destructor must
-  /// not overlap.
+  /// Throws std::logic_error, changing nothing, when called from a callback of this
+  /// worker's sink. Calls to stop(), start() and the destructor must not overlap.
   void stop();
   /// Resume after stop(): call the sink's onStart() on this thread (MCAPSink opens its
   /// next numbered file), restart the worker thread and accept snapshots again. Does
-  /// nothing if the worker is not stopped. Never call it from a callback.
+  /// nothing if the worker is not stopped. Throws std::logic_error from a callback of
+  /// this worker's sink.
   void start();
   /// Deliver, on the calling thread, every snapshot taken before the call. Waits for a
-  /// callback in progress on the worker. Never call it from a callback.
+  /// callback in progress on the worker. Throws std::logic_error from a callback of
+  /// this worker's sink.
   void drain();
 
   DataSink& sink();

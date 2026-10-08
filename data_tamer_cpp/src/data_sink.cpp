@@ -9,6 +9,7 @@
 #include <mutex>
 #include <semaphore>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -242,16 +243,43 @@ struct SinkWorker::Pimpl
 {
   explicit Pimpl(std::unique_ptr<DataSink> owned) : sink(std::move(owned)) {}
 
+  // Names the calling thread as the deliverer while it holds store_mutex, the only
+  // thread that runs sink callbacks.
+  struct DelivererMark
+  {
+    explicit DelivererMark(Pimpl& p) : id(p.deliverer)
+    {
+      id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    }
+    ~DelivererMark() { id.store(std::thread::id{}, std::memory_order_relaxed); }
+    DelivererMark(const DelivererMark&) = delete;
+    DelivererMark& operator=(const DelivererMark&) = delete;
+    std::atomic<std::thread::id>& id;
+  };
+
   // handoff_mutex, then store_mutex: how every caller other than the worker
   // thread enters the store. Holding handoff while it waits for store_mutex
   // keeps the worker, which releases handoff once it holds store_mutex, from
   // barging back in after its current pass.
   struct StoreLock
   {
-    explicit StoreLock(Pimpl& p) : handoff(p.handoff_mutex), store(p.store_mutex) {}
+    explicit StoreLock(Pimpl& p) : handoff(p.handoff_mutex), store(p.store_mutex), mark(p)
+    {}
     std::lock_guard<std::mutex> handoff;
     std::lock_guard<std::mutex> store;
+    DelivererMark mark;
   };
+
+  // stop(), start() and drain() called from a callback would wait for that callback.
+  // Only the deliverer itself can read its own id here.
+  void throwIfDeliverer(const char* function) const
+  {
+    if(deliverer.load(std::memory_order_relaxed) == std::this_thread::get_id())
+    {
+      throw std::logic_error(std::string("SinkWorker::") + function +
+                             " called from a callback of its own sink");
+    }
+  }
 
   // What one delivery pass reports to its caller.
   struct Pass
@@ -401,6 +429,7 @@ struct SinkWorker::Pimpl
           std::unique_lock handoff(handoff_mutex);
           std::unique_lock lock(store_mutex);
           handoff.unlock();
+          DelivererMark mark(*this);
           pass = deliverPass();
         }
         // An incomplete pass runs again at once. joinThread() requests the
@@ -429,7 +458,8 @@ struct SinkWorker::Pimpl
   // Worker side: written by whoever delivers.
   std::mutex handoff_mutex;
   std::mutex store_mutex;
-  SnapshotRef current_ref;  // store_mutex
+  std::atomic<std::thread::id> deliverer{};  // see DelivererMark
+  SnapshotRef current_ref;                   // store_mutex
   // store_mutex: false from onStop() until start().
   bool sink_running = true;
   // The owned queues, attached and detached-but-not-yet-drained, oldest first.
@@ -537,6 +567,7 @@ void SinkWorker::addSchema(const Schema& schema)
 
 void SinkWorker::stop()
 {
+  _p->throwIfDeliverer("stop()");
   _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
   // Wait until every admitted push has finished: block on the counter instead
   // of spinning; a release made after the close notifies.
@@ -552,6 +583,7 @@ void SinkWorker::stop()
 
 void SinkWorker::start()
 {
+  _p->throwIfDeliverer("start()");
   {
     Pimpl::StoreLock lock(*_p);
     if(!_p->sink_running)
@@ -569,6 +601,7 @@ void SinkWorker::start()
 
 void SinkWorker::drain()
 {
+  _p->throwIfDeliverer("drain()");
   Pimpl::StoreLock lock(*_p);
   // A complete pass ends with a round that found every queue empty, so what
   // was pushed before the call has been delivered.

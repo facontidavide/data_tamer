@@ -38,7 +38,8 @@ set(DATATAMER_TEST_SOURCES
     name_tests.cpp
     registry_limit_tests.cpp
     lock_order_tests.cpp
-    visibility_tests.cpp)
+    visibility_tests.cpp
+    worker_lifecycle_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)
