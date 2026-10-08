@@ -2,6 +2,7 @@
 #include "data_tamer/details/snapshot_pool.hpp"
 
 #include "alloc_counter.hpp"
+#include "gate.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -42,31 +43,7 @@ std::string_view TypeDefinition(RejectedCustom& value, AddField& add)
   return "RejectedCustom";
 }
 
-struct Gate
-{
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool entered = false;
-  bool released = false;
-  void pause()
-  {
-    std::unique_lock lock(mutex);
-    entered = true;
-    cv.notify_all();
-    cv.wait(lock, [&] { return released; });
-  }
-  bool wait()
-  {
-    std::unique_lock lock(mutex);
-    return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
-  }
-  void release()
-  {
-    std::lock_guard lock(mutex);
-    released = true;
-    cv.notify_all();
-  }
-};
+using DataTamerTest::Gate;
 
 class PausedSerializer : public CustomSerializer
 {
@@ -293,7 +270,7 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
   serializer->gate = &gate;
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   std::atomic<bool> returned{ false };
   auto removal = std::async(std::launch::async, [&] {
     channel->unregister(id);
@@ -331,7 +308,7 @@ TEST(ChannelControl, BlockedAddChannelDoesNotBlockExistingSnapshots)
   auto added = controlSink();
   added->add_gate = &gate;
   auto add = std::async(std::launch::async, [&] { channel->addDataSink(added); });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
   EXPECT_EQ(snapshot.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -362,7 +339,7 @@ TEST(ChannelControl, RemovalWaitsForPausedReaderAndReferencesSurvive)
   serializer->gate = &gate;
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   auto removal = std::async(std::launch::async, [&] { channel->removeDataSink(sink); });
   EXPECT_EQ(removal.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
   gate.release();
@@ -474,7 +451,7 @@ TEST(ChannelControl, LateAttachmentAnnouncesWithoutTheControlMutex)
   Gate gate;
   sink->add_gate = &gate;
   auto add = std::async(std::launch::async, [&] { channel->addDataSink(sink); });
-  ASSERT_TRUE(gate.wait());                    // inside onSchema
+  ASSERT_TRUE(gate.waitEntered());             // inside onSchema
   EXPECT_EQ(channel->getNumberOfSinks(), 0u);  // not published yet, mutex free
   auto other = controlSink();
   channel->addDataSink(other);  // proceeds while the first callback is parked
