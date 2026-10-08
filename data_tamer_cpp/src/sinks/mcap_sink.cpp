@@ -81,7 +81,6 @@ struct MCAPSink::Pimpl
   std::chrono::system_clock::time_point start_time;
 
   std::vector<uint8_t> message_body;  // reused, see mcap_encoding::WriteMessage
-  bool forced_stop_recording = false;
   std::recursive_mutex mutex;
 };
 
@@ -105,7 +104,6 @@ void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compress
   if(same_file)
   {
     _p->writer.reset();
-    _p->forced_stop_recording = true;
   }
   // Any other file is opened first: if that fails the current recording stays intact.
   auto writer = std::make_unique<mcap::McapWriter>();
@@ -122,10 +120,6 @@ void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compress
   _p->compression = do_compression;
   _p->start_time = std::chrono::system_clock::now();
   _p->hash_to_channel.clear();
-  if(same_file)
-  {
-    _p->forced_stop_recording = false;
-  }
 }
 
 MCAPSink::~MCAPSink() = default;
@@ -146,7 +140,7 @@ void MCAPSink::onSchema(Schema const& schema)
 void MCAPSink::onSnapshot(const SnapshotRef& ref)
 {
   std::scoped_lock lk(_p->mutex);
-  if(_p->forced_stop_recording)
+  if(!_p->writer)
   {
     return;
   }
@@ -192,7 +186,6 @@ void MCAPSink::setCreateNewFileOnReset(bool create_file_on_reset)
 void MCAPSink::stopRecording()
 {
   std::scoped_lock lk(_p->mutex);
-  _p->forced_stop_recording = true;
   if(_p->writer)  // idempotent
   {
     _p->writer->close();
@@ -213,7 +206,6 @@ void MCAPSink::onStart()
     return;  // restartRecording() reopened it already
   }
   openNextNumberedFile();
-  _p->forced_stop_recording = false;
 }
 
 void MCAPSink::openNextNumberedFile()
@@ -253,11 +245,6 @@ void MCAPSink::restartRecordingImpl(const std::string& filepath, bool do_compres
   for(auto const& [hash, schema] : _p->schemas)
   {
     onSchema(schema);
-  }
-
-  if(new_file)
-  {
-    _p->forced_stop_recording = false;
   }
 }
 
