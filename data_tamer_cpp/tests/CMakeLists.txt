@@ -122,46 +122,6 @@ target_include_directories(serialize_me_big_endian_test
 set_target_properties(serialize_me_big_endian_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 
-# Sources that must not compile. SOURCE holds a block under `#ifdef FAIL_CASE`, or fails
-# through FAIL_OPTIONS. The check is two tests: SOURCE builds (with OPTIONS), so that a
-# typo cannot pass for the failure, and it does not build with FAIL_CASE defined and
-# FAIL_OPTIONS added.
-function(data_tamer_compile_fail NAME SOURCE)
-    cmake_parse_arguments(ARG "" "" "OPTIONS;FAIL_OPTIONS" ${ARGN})
-    foreach(case compiles rejected)
-        set(target ${NAME}_${case})
-        add_library(${target} OBJECT EXCLUDE_FROM_ALL ${SOURCE})
-        target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-        target_compile_options(${target} PRIVATE ${ARG_OPTIONS})
-        set_target_properties(${target} PROPERTIES
-            CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-        add_test(NAME ${target}
-            COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
-                    --target ${target})
-        # one build at a time: the tests would race on the shared build tree
-        set_tests_properties(${target} PROPERTIES RESOURCE_LOCK data_tamer_compile_fail)
-    endforeach()
-    target_compile_definitions(${NAME}_rejected PRIVATE FAIL_CASE)
-    target_compile_options(${NAME}_rejected PRIVATE ${ARG_FAIL_OPTIONS})
-    set_tests_properties(${NAME}_rejected PROPERTIES WILL_FAIL TRUE)
-endfunction()
-
-data_tamer_compile_fail(endian_swap_size compile_fail_endian_swap.cpp
-    OPTIONS -DSERIALIZE_LITTLEENDIAN=0)
-data_tamer_compile_fail(parse_snapshot_result compile_fail_parse_snapshot_result.cpp
-    OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>)
-foreach(function BUILD_SCHEMA_FROM_TEXT BUILD_SCHEMA_FROM_YAML TO_TEXT GET_BIT
-                 SPLIT_MCAP_MESSAGE)
-    string(TOLOWER ${function} name)
-    data_tamer_compile_fail(${name}_result compile_fail_nodiscard.cpp
-        OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>
-        FAIL_OPTIONS -DIGNORE_${function})
-endforeach()
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    data_tamer_compile_fail(parser_byte_order compile_fail_byte_order.cpp
-        FAIL_OPTIONS -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__)
-endif()
-
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
     DATA_TAMER_WIRE_FORMAT_DIR="${PROJECT_SOURCE_DIR}/../docs/wire_format")
@@ -234,11 +194,10 @@ foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
 endforeach()
 
 # Compile-fail checks. A probe in tests/compile_fail/ compiles as written
-# (<stem>_control, part of the default build). The test defines a macro that breaks
-# the probe: <name>_fail is left out of the default build, and the test passes when
-# building it fails. Both variants share the flags, so the macro is the only cause.
-# With a fourth argument the test passes when the build output matches that regular
-# expression instead, which also checks the message the user gets.
+# (<stem>_control, part of the default build). <name>_fail adds `definition`, which
+# breaks the probe; the test builds it and passes when that build fails or, with
+# REGEX, when its output matches, which also checks the message the user gets.
+# OPTIONS are compile options of both variants, FAIL_OPTIONS of the failing one.
 function(data_tamer_add_probe target source)
     add_library(${target} OBJECT ${ARGN} compile_fail/${source})
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
@@ -251,18 +210,24 @@ function(data_tamer_add_probe target source)
 endfunction()
 
 function(data_tamer_compile_fail_test name source definition)
+    cmake_parse_arguments(ARG "" "REGEX" "OPTIONS;FAIL_OPTIONS" ${ARGN})
     get_filename_component(stem ${source} NAME_WE)
     if(NOT TARGET ${stem}_control)
         data_tamer_add_probe(${stem}_control ${source})
+        target_compile_options(${stem}_control PRIVATE ${ARG_OPTIONS})
     endif()
     data_tamer_add_probe(${name}_fail ${source} EXCLUDE_FROM_ALL)
-    target_compile_definitions(${name}_fail PRIVATE ${definition})
+    target_compile_options(${name}_fail PRIVATE ${ARG_OPTIONS} ${ARG_FAIL_OPTIONS})
+    if(definition)
+        target_compile_definitions(${name}_fail PRIVATE ${definition})
+    endif()
     add_test(NAME ${name}
-        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${name}_fail)
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
+                --target ${name}_fail)
     # The nested builds share one build directory: run them one at a time.
     set_tests_properties(${name} PROPERTIES RESOURCE_LOCK build_tree)
-    if(ARGC GREATER 3)
-        set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARGV3}")
+    if(ARG_REGEX)
+        set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARG_REGEX}")
     else()
         set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE)
     endif()
@@ -288,7 +253,7 @@ endforeach()
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)
     data_tamer_compile_fail_test(long_double_${case_name}_is_rejected
-        long_double_registration.cpp DT_LONG_DOUBLE_${case} "has no wire type")
+        long_double_registration.cpp DT_LONG_DOUBLE_${case} REGEX "has no wire type")
 endforeach()
 
 data_tamer_compile_fail_test(request_dump_result_is_nodiscard
@@ -297,10 +262,32 @@ data_tamer_compile_fail_test(request_dump_result_is_nodiscard
 foreach(function TRY_SET_ENABLED CREATE NUMBER_OF_SINKS)
     string(TOLOWER ${function} function_name)
     data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
-        channel_nodiscard.cpp DT_IGNORE_${function} "ignoring return value")
+        channel_nodiscard.cpp DT_IGNORE_${function}
+        REGEX "ignoring return value|discarding return value")
 endforeach()
 data_tamer_compile_fail_test(dropped_snapshots_is_deprecated
-    dropped_snapshots_deprecated.cpp DT_CALL_DEPRECATED "deprecated-declarations")
+    dropped_snapshots_deprecated.cpp DT_CALL_DEPRECATED
+    REGEX "deprecated-declarations|declared deprecated")
+
+data_tamer_compile_fail_test(endian_swap_of_long_double_is_rejected
+    endian_swap_size.cpp DT_SWAP_LONG_DOUBLE OPTIONS -DSERIALIZE_LITTLEENDIAN=0
+    REGEX "accepts only 1, 2, 4 and 8 byte types")
+data_tamer_compile_fail_test(parse_snapshot_result_is_nodiscard
+    parse_snapshot_nodiscard.cpp DT_IGNORE_PARSE_SNAPSHOT
+    REGEX "ignoring return value|discarding return value")
+foreach(function BUILD_SCHEMA_FROM_TEXT BUILD_SCHEMA_FROM_YAML TO_TEXT GET_BIT
+                 SPLIT_MCAP_MESSAGE)
+    string(TOLOWER ${function} function_name)
+    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
+        parser_nodiscard.cpp DT_IGNORE_${function}
+        REGEX "ignoring return value|discarding return value")
+endforeach()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    data_tamer_compile_fail_test(parser_needs_a_little_endian_host
+        parser_byte_order.cpp ""
+        FAIL_OPTIONS -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__
+        REGEX "needs a little endian host")
+endif()
 
 # logged_value.hpp must work on its own. The program includes nothing else, so it links
 # only if the header defines the members it calls; a test builds it on demand.
