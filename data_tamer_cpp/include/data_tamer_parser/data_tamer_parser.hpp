@@ -134,20 +134,16 @@ bool GetBit(BufferSpan mask, size_t index);
 /// lengths it declares or holds bytes after the payload.
 SnapshotView SplitMcapMessage(BufferSpan body);
 
-constexpr auto NullCustomCallback = [](const std::string&, const BufferSpan,
-                                       const std::string&) {};
-
 /// Decodes `snapshot` with `schema`, calling
 ///   callback_number(const std::string& name, const VarNumber& value)
 /// for each value of each active field, in schema order. Names join nested fields with
 /// '/' and index container elements: "pose/position/x", "points[1]/z".
 /// Returns false if the hash is not the schema's (nothing is decoded) or if bytes are
 /// left after the last field (the callback has already run). Throws std::runtime_error
-/// on malformed data. `callback_custom` is unused.
-template <typename NumberCallback, typename CustomCallback = decltype(NullCustomCallback)>
+/// on malformed data.
+template <typename NumberCallback>
 bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                   const NumberCallback& callback_number,
-                   const CustomCallback& callback_custom = NullCustomCallback);
+                   const NumberCallback& callback_number);
 
 //---------------------------------------------------------
 // Helpers for the data_tamer_msgs messages of ROS2PublisherSink. They are templates on
@@ -1265,10 +1261,9 @@ bool ParseSnapshotRecursive(const TypeField& field,
   return true;
 }
 
-template <typename NumberCallback, typename CustomCallback>
+template <typename NumberCallback>
 inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                          const NumberCallback& callback_number,
-                          const CustomCallback& callback_custom)
+                          const NumberCallback& callback_number)
 {
   if(schema.hash != snapshot.schema_hash)
   {

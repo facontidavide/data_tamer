@@ -295,6 +295,17 @@ add_test(NAME logged_value_header_alone
     COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target logged_value_alone)
 set_tests_properties(logged_value_header_alone PROPERTIES RESOURCE_LOCK build_tree)
 
+# The standalone parser is copied into other projects: with its templates instantiated
+# it must compile without a warning under the strict flags of this library.
+add_library(parser_header_warnings OBJECT parser_header_warnings.cpp)
+target_include_directories(parser_header_warnings PRIVATE ${PROJECT_SOURCE_DIR}/include)
+set_target_properties(parser_header_warnings PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(parser_header_warnings PRIVATE
+    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wconversion
+        -Wno-sign-conversion -Werror>)
+
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built
 # without optimization so that the calls are not inlined away, and is not
