@@ -74,7 +74,7 @@ private:
 
 using SpanBytes = Span<uint8_t>;
 using SpanBytesConst = Span<uint8_t const>;
-using StringSize = uint16_t;
+using StringSize = uint32_t;
 
 const auto EmptyFuncion = [](const char*, void*) {};
 using EmptyFunc = decltype(EmptyFuncion);

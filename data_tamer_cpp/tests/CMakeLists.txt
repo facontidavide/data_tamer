@@ -34,6 +34,7 @@ set(DATATAMER_TEST_SOURCES
     serialize_me_tests.cpp
     serialize_me_bounds_tests.cpp
     serialize_me_size_tests.cpp
+    string_encoding_tests.cpp
     mcap_encoding_tests.cpp
     mcap_ring_sink_tests.cpp
     mcap_sink_reopen_tests.cpp
