@@ -510,7 +510,7 @@ std::string ToYaml(const Schema& schema)
 struct TypesRegistry::Impl
 {
   std::unordered_map<std::string, CustomSerializer::Ptr> types;
-  std::recursive_mutex mutex;
+  std::mutex mutex;
 };
 
 TypesRegistry::TypesRegistry() : _impl(std::make_unique<Impl>()) {}
