@@ -475,7 +475,8 @@ struct SinkWorker::Pimpl
   std::atomic<uint64_t> errors{ 0 };
   std::mutex error_mutex;
   std::string last_error;
-  std::jthread thread;  // its stop token replaces a run flag
+  std::mutex lifecycle_mutex;  // serializes stop() and start()
+  std::jthread thread;         // its stop token replaces a run flag
   Delivery delivery = Delivery::Threaded;
   // Written by every push, each on a line of its own (the alignment pads the
   // struct to whole lines). Posted after every push, and by detach() and stop().
@@ -568,6 +569,7 @@ void SinkWorker::addSchema(const Schema& schema)
 void SinkWorker::stop()
 {
   _p->throwIfDeliverer("stop()");
+  std::lock_guard lifecycle(_p->lifecycle_mutex);
   _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
   // Wait until every admitted push has finished: block on the counter instead
   // of spinning; a release made after the close notifies.
@@ -584,6 +586,7 @@ void SinkWorker::stop()
 void SinkWorker::start()
 {
   _p->throwIfDeliverer("start()");
+  std::lock_guard lifecycle(_p->lifecycle_mutex);
   {
     Pimpl::StoreLock lock(*_p);
     if(!_p->sink_running)

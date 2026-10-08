@@ -2,6 +2,7 @@
 // callbacks and from several threads at once.
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
+#include "data_tamer/data_tamer.hpp"
 #include "hang_watchdog.hpp"
 #include "test_sinks.hpp"
 
@@ -14,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace DataTamer;
 using DataTamerTest::expectFinishes;
@@ -102,6 +104,46 @@ constexpr Call kCalls[] = { { "drain()", [](SinkWorker& w) { w.drain(); } },
                             { "start()", [](SinkWorker& w) { w.start(); } },
                             { "stop()", [](SinkWorker& w) { w.stop(); } } };
 
+/// Counts its onStop() and onStart() calls.
+class CountingSink : public DataSink
+{
+public:
+  std::atomic<int> stops{ 0 };
+  std::atomic<int> starts{ 0 };
+
+protected:
+  void onSchema(const Schema&) override {}
+  void onSnapshot(const SnapshotRef&) override {}
+  void onStop() override { ++stops; }
+  void onStart() override { ++starts; }
+};
+
+/// Runs `function` on two threads released together; returns how many calls threw.
+int runTwiceAtOnce(const std::function<void()>& function)
+{
+  std::atomic<int> ready{ 0 };
+  std::atomic<int> thrown{ 0 };
+  const auto run = [&] {
+    ready.fetch_add(1);
+    while(ready.load() < 2)
+    {
+    }
+    try
+    {
+      function();
+    }
+    catch(...)
+    {
+      ++thrown;
+    }
+  };
+  std::thread first(run);
+  std::thread second(run);
+  first.join();
+  second.join();
+  return thrown;
+}
+
 bool waitFor(const std::function<bool()>& condition)
 {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -148,4 +190,51 @@ TEST(WorkerLifecycle, LifecycleCallsFromOwnCallbacksThrowLogicError)
       });
     }
   }
+}
+
+// Two shutdown paths stopping the same workers at once, through stopAll() or
+// stop(), or a stop() racing a start(): every call returns and the sink sees
+// matching onStop() and onStart() calls.
+TEST(WorkerLifecycle, ConcurrentLifecycleCallsOnOneWorker)
+{
+  expectFinishes([] {
+    for(int round = 0; round < 100; ++round)
+    {
+      ChannelsRegistry registry;
+      std::vector<CountingSink*> sinks;
+      for(int i = 0; i < 4; ++i)
+      {
+        auto owned = std::make_unique<CountingSink>();
+        sinks.push_back(owned.get());
+        registry.addDefaultSink(std::make_shared<SinkWorker>(std::move(owned)));
+      }
+      auto channel = registry.getChannel("stops");
+      double value = 1;
+      channel->registerValue("value", &value);
+      ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+      ASSERT_EQ(runTwiceAtOnce([&] { registry.stopAll(); }), 0);
+      for(auto* sink : sinks)
+      {
+        ASSERT_EQ(sink->stops, 1);
+      }
+    }
+    auto owned = std::make_unique<CountingSink>();
+    auto* sink = owned.get();
+    SinkWorker worker(std::move(owned));
+    for(int round = 0; round < 100; ++round)
+    {
+      const int stops = sink->stops;
+      ASSERT_EQ(runTwiceAtOnce([&] { worker.stop(); }), 0);
+      ASSERT_EQ(sink->stops, stops + 1);  // the second stop() found it stopped
+      std::atomic<bool> stopping{ false };
+      ASSERT_EQ(runTwiceAtOnce(
+                    [&] { stopping.exchange(true) ? worker.stop() : worker.start(); }),
+                0);
+      // Stopped, so the start() finishes first or the stop() does nothing.
+      ASSERT_GE(sink->stops - sink->starts, 0);
+      ASSERT_LE(sink->stops - sink->starts, 1);
+      worker.start();
+      ASSERT_EQ(sink->stops, sink->starts);
+    }
+  });
 }
