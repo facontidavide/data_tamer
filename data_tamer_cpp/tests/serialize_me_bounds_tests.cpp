@@ -156,3 +156,27 @@ TEST(SerializeMeBounds, ContainerWithTooManyElementsForTheCountIsRejected)
     EXPECT_EQ(out.size(), storage.size()) << "the truncated count 0 was written";
   }
 }
+
+// Strings, containers and ValuePtr write their count with SerializeCount(): 2^32 - 1 is
+// the largest count, and 2^32 is refused before anything is written.
+TEST(SerializeMeBounds, CountBeyondTheUint32RangeIsRejectedBeforeItIsWritten)
+{
+  if constexpr(sizeof(size_t) <= sizeof(uint32_t))
+  {
+    GTEST_SKIP() << "size_t has 32 bits";
+  }
+  else
+  {
+    std::vector<uint8_t> storage(4, 0);
+    SpanBytes out(storage);
+    EXPECT_THROW(SerializeCount(out, size_t{ 1 } << 32), std::runtime_error);
+    EXPECT_EQ(out.size(), storage.size());
+
+    SerializeCount(out, size_t{ 0xFFFFFFFF });
+    EXPECT_EQ(out.size(), 0u);
+    EXPECT_EQ(storage, (std::vector<uint8_t>{ 0xFF, 0xFF, 0xFF, 0xFF }));
+    SpanBytesConst in(storage);
+    EXPECT_EQ(DeserializeCount(in), 0xFFFFFFFFu);
+    EXPECT_EQ(in.size(), 0u);
+  }
+}

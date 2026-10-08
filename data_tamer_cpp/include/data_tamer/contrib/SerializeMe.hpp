@@ -565,12 +565,18 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest)
   }
 }
 
+/// Reads the uint32 count that SerializeCount() writes.
+inline uint32_t DeserializeCount(SpanBytesConst& buffer)
+{
+  uint32_t count = 0;
+  DeserializeFromBuffer(buffer, count);
+  return count;
+}
+
 template <>
 inline void DeserializeFromBuffer(SpanBytesConst& buffer, std::string& dest)
 {
-  StringSize size = 0;
-  DeserializeFromBuffer(buffer, size);
-
+  const uint32_t size = DeserializeCount(buffer);
   if(size > buffer.size())
   {
     throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
@@ -607,8 +613,7 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>& dest)
 {
-  uint32_t num_values = 0;
-  DeserializeFromBuffer(buffer, num_values);
+  const uint32_t num_values = DeserializeCount(buffer);
 
   // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
@@ -665,27 +670,31 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
   }
 }
 
+/// Writes the uint32 count that precedes the characters of a string and the elements of
+/// a vector (docs/wire_format.md). Throws std::runtime_error, writing nothing, if `count`
+/// does not fit in 32 bits.
+inline void SerializeCount(SpanBytes& buffer, size_t count)
+{
+  if constexpr(sizeof(size_t) > sizeof(uint32_t))
+  {
+    if(count > std::numeric_limits<uint32_t>::max())
+    {
+      throw std::runtime_error("SerializeIntoBuffer: count exceeds the uint32 range");
+    }
+  }
+  SerializeIntoBuffer(buffer, static_cast<uint32_t>(count));
+}
+
 template <>
 inline void SerializeIntoBuffer(SpanBytes& buffer, std::string const& str)
 {
-  if constexpr(sizeof(size_t) > sizeof(StringSize))
-  {
-    if(str.size() > std::numeric_limits<StringSize>::max())
-    {
-      throw std::runtime_error("SerializeIntoBuffer: string exceeds maximum size");
-    }
-  }
-
   if((str.size() + sizeof(StringSize)) > buffer.size())
   {
     throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
   }
-
-  const auto size = static_cast<StringSize>(str.size());
-  SerializeIntoBuffer(buffer, size);
-
-  std::memcpy(buffer.data(), str.data(), size);
-  buffer.trimFront(size);
+  SerializeCount(buffer, str.size());
+  std::memcpy(buffer.data(), str.data(), str.size());
+  buffer.trimFront(str.size());
 }
 
 template <typename T, size_t N,
@@ -718,20 +727,12 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline void SerializeIntoBuffer(SpanBytes& buffer, Container<T, TArgs...> const& vect)
 {
-  if constexpr(sizeof(size_t) > sizeof(uint32_t))
-  {
-    if(vect.size() > std::numeric_limits<uint32_t>::max())
-    {
-      throw std::runtime_error("SerializeIntoBuffer: container exceeds maximum size");
-    }
-  }
-  const auto num_values = static_cast<uint32_t>(vect.size());
-  SerializeIntoBuffer(buffer, num_values);
+  SerializeCount(buffer, vect.size());
 
   // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
-    const size_t size = num_values;
+    const size_t size = vect.size();
     if(size > buffer.size())
     {
       throw std::runtime_error("SerializeIntoBuffer: buffer overflow");

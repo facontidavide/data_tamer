@@ -172,7 +172,7 @@ private:
                                        SerializeMe::SpanBytes& dst)
   {
     const auto& vect = *static_cast<const C*>(v);
-    SerializeMe::SerializeIntoBuffer(dst, uint32_t(vect.size()));
+    SerializeMe::SerializeCount(dst, vect.size());
     for(const auto& value : vect)
     {
       s->serialize(&value, dst);

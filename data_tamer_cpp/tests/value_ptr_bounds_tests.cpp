@@ -3,9 +3,11 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using namespace DataTamer;
@@ -99,4 +101,55 @@ TEST(ValuePtrBounds, ACustomTypeWithoutASerializerIsRefused)
   const Opaque opaque;
 
   EXPECT_THROW(ValuePtr ptr(&opaque), std::invalid_argument);
+}
+
+namespace
+{
+struct Point
+{
+  int32_t x = 0;
+};
+
+class PointSerializer : public CustomSerializer
+{
+public:
+  const std::string& typeName() const override
+  {
+    static const std::string name = "Point";
+    return name;
+  }
+  size_t serializedSize(const void*) const override { return sizeof(int32_t); }
+  bool isFixedSize() const override { return true; }
+  void serialize(const void* instance, SerializeMe::SpanBytes& dest) const override
+  {
+    SerializeMe::SerializeIntoBuffer(dest, static_cast<const Point*>(instance)->x);
+  }
+};
+
+// A container that claims 2^32 elements without holding any.
+template <class T, class Unused = void>
+struct HugeContainer
+{
+  size_t size() const { return size_t{ 1 } << 32; }
+  bool empty() const { return false; }
+  const T& front() const { return element; }
+  const T* begin() const { return nullptr; }
+  const T* end() const { return nullptr; }
+  T element{};
+};
+}  // namespace
+
+// The count of a container of custom types is checked like SerializeIntoBuffer()'s:
+// it used to be written truncated to 32 bits.
+TEST(ValuePtrBounds, AContainerTooLargeForItsCountIsRefusedBeforeItIsWritten)
+{
+  if constexpr(sizeof(size_t) <= sizeof(uint32_t))
+  {
+    GTEST_SKIP() << "size_t has 32 bits";
+  }
+  else
+  {
+    const HugeContainer<Point> huge;
+    expectRefused(ValuePtr(&huge, std::make_shared<PointSerializer>()), 16);
+  }
 }
