@@ -165,8 +165,8 @@ public:
   bool trySetEnabled(const RegistrationID& id, bool enable) noexcept;
 
   /// True if the value is registered and enabled; false after unregister() and for a
-  /// stale or invalid id.
-  [[nodiscard]] bool isEnabled(const RegistrationID& id) const;
+  /// stale or invalid id. Lock-free.
+  [[nodiscard]] bool isEnabled(const RegistrationID& id) const noexcept;
 
   /// Stops recording the value; the pointer may be freed once this returns. The value
   /// stays in the schema (as disabled), and its name can be registered again with the
@@ -588,13 +588,13 @@ inline LoggedValue<T>::~LoggedValue()
 }
 
 template <typename T>
-inline void LoggedValue<T>::setEnabled(bool enabled)
+inline void LoggedValue<T>::setEnabled(bool enabled) noexcept
 {
   state_->setEnabled(id_.index_, enabled);  // own registration: never stale
 }
 
 template <typename T>
-inline bool LoggedValue<T>::isEnabled() const
+inline bool LoggedValue<T>::isEnabled() const noexcept
 {
   return state_->isEnabled(id_.index_);
 }

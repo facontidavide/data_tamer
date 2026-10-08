@@ -94,9 +94,9 @@ public:
 
   /// Includes or excludes the value from the snapshots. Lock-free; callable from any
   /// thread, even after the channel is destroyed.
-  void setEnabled(bool enabled);
+  void setEnabled(bool enabled) noexcept;
 
-  [[nodiscard]] bool isEnabled() const;
+  [[nodiscard]] bool isEnabled() const noexcept;
 
 private:
   std::shared_ptr<ChannelSharedState> state_;

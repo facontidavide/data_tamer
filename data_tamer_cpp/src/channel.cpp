@@ -366,7 +366,7 @@ bool LogChannel::trySetEnabled(const RegistrationID& id, bool enable) noexcept
   return _p->shared->setEnabled(id, enable);
 }
 
-bool LogChannel::isEnabled(const RegistrationID& id) const
+bool LogChannel::isEnabled(const RegistrationID& id) const noexcept
 {
   return _p->shared->isEnabled(id);
 }
