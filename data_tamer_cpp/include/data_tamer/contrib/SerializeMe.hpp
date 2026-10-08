@@ -673,9 +673,12 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
 template <>
 inline void SerializeIntoBuffer(SpanBytes& buffer, std::string const& str)
 {
-  if(str.size() > std::numeric_limits<StringSize>::max())
+  if constexpr(sizeof(size_t) > sizeof(StringSize))
   {
-    throw std::runtime_error("SerializeIntoBuffer: string exceeds maximum size");
+    if(str.size() > std::numeric_limits<StringSize>::max())
+    {
+      throw std::runtime_error("SerializeIntoBuffer: string exceeds maximum size");
+    }
   }
 
   if((str.size() + sizeof(StringSize)) > buffer.size())
