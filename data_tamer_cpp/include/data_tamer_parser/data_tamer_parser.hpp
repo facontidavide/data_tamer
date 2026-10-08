@@ -128,6 +128,12 @@ struct SnapshotView
 
 bool GetBit(BufferSpan mask, size_t index);
 
+/// Splits the body of an MCAP message (docs/wire_format.md, section 4.1) into the active
+/// mask and the payload of a SnapshotView, whose schema hash and timestamp stay 0 for
+/// the caller to fill in. Throws std::runtime_error if the body is shorter than the
+/// lengths it declares or holds bytes after the payload.
+SnapshotView SplitMcapMessage(BufferSpan body);
+
 constexpr auto NullCustomCallback = [](const std::string&, const BufferSpan,
                                        const std::string&) {};
 
@@ -216,6 +222,24 @@ inline T Deserialize(BufferSpan& buffer)
   buffer.data += N;
   buffer.size -= N;
   return var;
+}
+
+inline SnapshotView SplitMcapMessage(BufferSpan body)
+{
+  SnapshotView view{};
+  const uint32_t mask_size = Deserialize<uint32_t>(body);
+  view.active_mask.data = body.data;
+  body.trimFront(mask_size);
+  view.active_mask.size = mask_size;
+  const uint32_t payload_size = Deserialize<uint32_t>(body);
+  view.payload.data = body.data;
+  body.trimFront(payload_size);
+  view.payload.size = payload_size;
+  if(body.size != 0)
+  {
+    throw std::runtime_error("DataTamerParser: MCAP message body has trailing bytes");
+  }
+  return view;
 }
 
 inline VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer)

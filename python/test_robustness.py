@@ -191,5 +191,28 @@ class LegacyTypeNames(unittest.TestCase):
             ("float64", "BOOL"), ("uint32", "INT8"), ("Pose", "OTHER"), ("int8", "DOUBLE")])
 
 
+class McapMessageBody(unittest.TestCase):
+    """uint32 mask length, mask, uint32 payload length, payload (docs/wire_format.md 4.1)."""
+
+    def test_body_is_split_into_mask_and_payload(self):
+        body = bytes([2, 0, 0, 0, 0xAB, 0xCD, 3, 0, 0, 0, 1, 2, 3])
+        self.assertEqual(dt.split_mcap_message(body), (b"\xab\xcd", b"\x01\x02\x03"))
+        self.assertEqual(dt.split_mcap_message(bytes(8)), (b"", b""))
+
+    def test_malformed_body_is_a_value_error(self):
+        for name, body in (("empty", b""),
+                           ("mask length cut", bytes([1, 0, 0])),
+                           ("mask longer than the body", bytes([9, 0, 0, 0, 1, 2])),
+                           ("no payload length", bytes([2, 0, 0, 0, 1, 2])),
+                           ("payload length cut", bytes([1, 0, 0, 0, 7, 1, 0])),
+                           ("payload longer than the body",
+                            bytes([1, 0, 0, 0, 7, 100, 0, 0, 0, 1, 2, 3])),
+                           ("payload length 2^32-1",
+                            bytes([1, 0, 0, 0, 7, 255, 255, 255, 255, 1, 2, 3])),
+                           ("bytes after the payload", bytes([1, 0, 0, 0, 7, 1, 0, 0, 0, 9, 0xEE]))):
+            with self.subTest(name), self.assertRaises(ValueError):
+                dt.split_mcap_message(body)
+
+
 if __name__ == "__main__":
     unittest.main()

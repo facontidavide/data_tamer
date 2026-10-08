@@ -541,15 +541,23 @@ def parse_snapshot(schema: Schema, active_mask: bytes, payload: bytes) -> dict[s
 
 
 def split_mcap_message(data: bytes) -> tuple[bytes, bytes]:
-    """Split an MCAPSink message body into (active_mask, payload)."""
-    (mask_len,) = struct.unpack_from("<I", data, 0)
-    mask = data[4:4 + mask_len]
-    (payload_len,) = struct.unpack_from("<I", data, 4 + mask_len)
-    start = 8 + mask_len
-    payload = data[start:start + payload_len]
-    if start + payload_len != len(data):
+    """Split an MCAPSink message body into (active_mask, payload).
+
+    Raises ValueError if the body is shorter than the lengths it declares, or longer.
+    """
+    def length_at(pos: int) -> int:
+        if pos + 4 > len(data):
+            raise ValueError("MCAP message body truncated")
+        return struct.unpack_from("<I", data, pos)[0]
+
+    mask_end = 4 + length_at(0)
+    start = mask_end + 4
+    payload_end = start + length_at(mask_end)
+    if payload_end > len(data):
+        raise ValueError("MCAP message body truncated")
+    if payload_end < len(data):
         raise ValueError("MCAP message body has trailing bytes")
-    return mask, payload
+    return data[4:mask_end], data[start:payload_end]
 
 
 class SchemaRegistry:

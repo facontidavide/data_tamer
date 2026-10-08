@@ -1,10 +1,13 @@
 #include "data_tamer_parser/data_tamer_parser.hpp"
+#include "guarded_buffer.hpp"
 
 #include <gtest/gtest.h>
 
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -432,4 +435,74 @@ TEST(ParserRobustness, LongRunOfSpacesIsTrimmedInLinearTime)
   ASSERT_EQ(schema.fields.size(), 1u);
   EXPECT_EQ(schema.fields[0].field_name, "x");
   EXPECT_LT(seconds.count(), kInstant);
+}
+
+// The body of an MCAP message: uint32 mask length, mask, uint32 payload length, payload
+
+namespace
+{
+std::vector<uint8_t> goldenVector(const std::string& name)
+{
+  std::ifstream file(std::string(DATA_TAMER_WIRE_FORMAT_DIR) + "/vectors/" + name,
+                     std::ios::binary);
+  return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
+}
+
+std::vector<uint8_t> bytesOf(const BufferSpan& span)
+{
+  return { span.data, span.data + span.size };
+}
+}  // namespace
+
+TEST(ParserRobustness, McapMessageBodyIsSplitIntoMaskAndPayload)
+{
+  const std::vector<uint8_t> body = { 2, 0, 0, 0, 0xAB, 0xCD, 3, 0, 0, 0, 1, 2, 3 };
+  const auto view = SplitMcapMessage({ body.data(), body.size() });
+  EXPECT_EQ(bytesOf(view.active_mask), (std::vector<uint8_t>{ 0xAB, 0xCD }));
+  EXPECT_EQ(bytesOf(view.payload), (std::vector<uint8_t>{ 1, 2, 3 }));
+  EXPECT_EQ(view.schema_hash, 0u);
+  EXPECT_EQ(view.timestamp, 0u);
+}
+
+TEST(ParserRobustness, GoldenMcapMessagesSplitIntoTheirMaskAndPayload)
+{
+  for(const char* stem : { "snapshot_full", "snapshot_masked" })
+  {
+    const auto body = goldenVector(std::string(stem) + ".mcap_message");
+    ASSERT_FALSE(body.empty()) << stem;
+    const auto view = SplitMcapMessage({ body.data(), body.size() });
+    EXPECT_EQ(bytesOf(view.active_mask), goldenVector(std::string(stem) + ".mask"))
+        << stem;
+    EXPECT_EQ(bytesOf(view.payload), goldenVector(std::string(stem) + ".payload"))
+        << stem;
+  }
+}
+
+TEST(ParserRobustness, McapMessageBodyWithEmptyMaskAndPayloadIsValid)
+{
+  const std::vector<uint8_t> body = { 0, 0, 0, 0, 0, 0, 0, 0 };
+  const auto view = SplitMcapMessage({ body.data(), body.size() });
+  EXPECT_EQ(view.active_mask.size, 0u);
+  EXPECT_EQ(view.payload.size, 0u);
+}
+
+TEST(ParserRobustness, MalformedMcapMessageBodyIsRejected)
+{
+  const std::vector<std::pair<const char*, std::vector<uint8_t>>> cases = {
+    { "empty", {} },
+    { "mask length cut", { 1, 0, 0 } },
+    { "mask longer than the body", { 9, 0, 0, 0, 1, 2 } },
+    { "no payload length", { 2, 0, 0, 0, 1, 2 } },
+    { "payload length cut", { 1, 0, 0, 0, 7, 1, 0 } },
+    { "payload longer than the body", { 1, 0, 0, 0, 7, 100, 0, 0, 0, 1, 2, 3 } },
+    { "payload length 2^32-1", { 1, 0, 0, 0, 7, 255, 255, 255, 255, 1, 2, 3 } },
+    { "bytes after the payload", { 1, 0, 0, 0, 7, 1, 0, 0, 0, 9, 0xEE } },
+  };
+  for(const auto& [name, bytes] : cases)
+  {
+    // the body ends at an inaccessible page: reading past what it declares would fault
+    DataTamerTest::GuardedBuffer body(bytes);
+    EXPECT_THROW(SplitMcapMessage({ body.data(), body.size() }), std::runtime_error)
+        << name;
+  }
 }
