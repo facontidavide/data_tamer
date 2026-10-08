@@ -110,12 +110,11 @@ inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
   }
 }
 
-/// Publications `sink` refused on `channel`, from stats().dropped_by_sink (0 if the
-/// sink is not attached).
-inline uint64_t droppedBy(const DataTamer::LogChannel& channel,
+/// Publications `sink` refused, from stats.dropped_by_sink (0 if the sink is not in it).
+inline uint64_t droppedBy(const DataTamer::LogChannel::Stats& stats,
                           const std::shared_ptr<DataTamer::SinkWorker>& sink)
 {
-  for(const auto& entry : channel.stats().dropped_by_sink)
+  for(const auto& entry : stats.dropped_by_sink)
   {
     if(entry.sink == sink.get())
     {
@@ -123,6 +122,14 @@ inline uint64_t droppedBy(const DataTamer::LogChannel& channel,
     }
   }
   return 0;
+}
+
+/// Publications `sink` refused on `channel`, from stats().dropped_by_sink (0 if the
+/// sink is not attached).
+inline uint64_t droppedBy(const DataTamer::LogChannel& channel,
+                          const std::shared_ptr<DataTamer::SinkWorker>& sink)
+{
+  return droppedBy(channel.stats(), sink);
 }
 
 /// True while the calling thread (or any other) holds the channel's write mutex:

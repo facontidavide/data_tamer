@@ -18,6 +18,7 @@
 using namespace DataTamer;
 using DataTamerTest::attach;
 using DataTamerTest::Attached;
+using DataTamerTest::droppedBy;
 using DataTamerTest::manual;
 using Delivery = SinkWorker::Delivery;
 
@@ -39,17 +40,14 @@ public:
   int throw_every = 0;  // 0: never
 };
 
-uint64_t droppedFor(const LogChannel::Stats& stats, const Attached<CountingSink>& sink)
+// The deprecated per-sink getter, called without the deprecation warning.
+uint64_t deprecatedDroppedSnapshots(const LogChannel& channel,
+                                    const Attached<CountingSink>& sink)
 {
-  for(const auto& entry : stats.dropped_by_sink)
-  {
-    if(entry.sink == sink.worker.get())
-    {
-      return entry.dropped;
-    }
-  }
-  ADD_FAILURE() << "sink not in dropped_by_sink";
-  return 0;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  return channel.droppedSnapshots(sink);
+#pragma GCC diagnostic pop
 }
 }  // namespace
 
@@ -181,19 +179,16 @@ TEST(ChannelStats, DroppedIsCountedPerSink)
 
   auto stats = channel->stats();
   ASSERT_EQ(stats.dropped_by_sink.size(), 3u);
-  EXPECT_EQ(droppedFor(stats, a), 0u);
-  EXPECT_EQ(droppedFor(stats, b), 4u);
-  EXPECT_EQ(droppedFor(stats, c), 1u);
+  EXPECT_EQ(droppedBy(stats, a), 0u);
+  EXPECT_EQ(droppedBy(stats, b), 4u);
+  EXPECT_EQ(droppedBy(stats, c), 1u);
   EXPECT_EQ(stats.accepted, 4u);
   EXPECT_EQ(stats.attempts, 4u);
 
   // The deprecated per-sink getter agrees.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  EXPECT_EQ(channel->droppedSnapshots(a), 0u);
-  EXPECT_EQ(channel->droppedSnapshots(b), 4u);
-  EXPECT_EQ(channel->droppedSnapshots(c), 1u);
-#pragma GCC diagnostic pop
+  EXPECT_EQ(deprecatedDroppedSnapshots(*channel, a), 0u);
+  EXPECT_EQ(deprecatedDroppedSnapshots(*channel, b), 4u);
+  EXPECT_EQ(deprecatedDroppedSnapshots(*channel, c), 1u);
 
   // sinkDropped() is the building block: one call returns the whole table, and
   // the count of attached sinks even when the arrays are too small for it.
@@ -207,11 +202,8 @@ TEST(ChannelStats, DroppedIsCountedPerSink)
   channel->removeDataSink(b);
   stats = channel->stats();
   ASSERT_EQ(stats.dropped_by_sink.size(), 2u);
-  EXPECT_EQ(droppedFor(stats, c), 1u);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  EXPECT_EQ(channel->droppedSnapshots(b), 0u);
-#pragma GCC diagnostic pop
+  EXPECT_EQ(droppedBy(stats, c), 1u);
+  EXPECT_EQ(deprecatedDroppedSnapshots(*channel, b), 0u);
 }
 
 TEST(ChannelStats, ChannelWithoutSinksHasAnEmptyDroppedArray)
@@ -412,8 +404,9 @@ TEST(ChannelStats, RefusedLastPushWhileAnotherSinkAcceptsIsPartial)
     const auto stats = channel->stats();
     EXPECT_EQ(stats.attempts, round);
     EXPECT_EQ(stats.accepted, round);
-    EXPECT_EQ(droppedFor(stats, last), round);
-    EXPECT_EQ(droppedFor(stats, first), 0u);
+    ASSERT_EQ(stats.dropped_by_sink.size(), 2u);
+    EXPECT_EQ(droppedBy(stats, last), round);
+    EXPECT_EQ(droppedBy(stats, first), 0u);
     EXPECT_EQ(stats.pool_exhausted, 0u);
   }
   EXPECT_EQ(first.worker->stats().delivered, 3u);
