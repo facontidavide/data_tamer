@@ -121,8 +121,8 @@ private:
 
 // Name of a custom type as written in the schema: TypeDefinitionTrait<T>::name() if
 // provided, else the value returned by the definition of T. A std::string_view or
-// const char* must outlive the program (a string literal); an owning string is
-// evaluated once and cached.
+// const char* must outlive the program (a string literal). An owning string is cached
+// here, but serialization calls the definition again and builds it every time.
 template <typename T, typename = void>
 struct CustomTypeName
 {

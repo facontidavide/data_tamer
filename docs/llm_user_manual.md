@@ -403,14 +403,18 @@ Rules:
 
 - The type must be default constructible: the channel builds a dummy instance to
   discover the fields.
-- `define()` or `TypeDefinition()` returns the type name. A `std::string_view` or
-  `const char*` must point to storage that outlives the program (a string literal). A
-  returned `std::string` is evaluated once and cached.
+- `define()` or `TypeDefinition()` returns the type name as a string literal: a
+  `std::string_view` or `const char*` to storage that outlives the program. Only these
+  cost nothing at snapshot time. The function runs again in every snapshot, once per
+  instance and container element, `tryTakeSnapshot()` included, so a returned
+  `std::string` is built each time and allocates once the name outgrows the
+  small-string buffer (15 characters in libstdc++).
 - The type name and the field names follow the [name rules](#names): non-empty, no
   whitespace or control character. Otherwise `registerValue()` throws
   `std::runtime_error`.
-- For class templates, the trait can add `static std::string name()` (e.g.
-  `"Vector" + std::to_string(N)`). `define()` may then return `void`.
+- A name built at runtime goes in the trait's `static std::string name()` (e.g.
+  `"Vector" + std::to_string(N)` for a class template), which runs once. `define()`
+  then returns `void`.
 - Partial specializations use the second, defaulted template parameter
   (`std::enable_if_t<...>` or `std::void_t<...>`).
 - If both a trait and a `TypeDefinition()` exist, the trait is used. A trait whose

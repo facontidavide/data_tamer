@@ -111,10 +111,11 @@ namespace DataTamer
  *     }
  *   };
  *
- * - The name is a view of static storage (a string literal) or an owning std::string,
- *   which is evaluated once per type and cached.
- * - An optional `static std::string name()` builds the name at runtime (class
- *   templates); define()'s return value is then ignored and may be void.
+ * - The name is a view of static storage (a string literal). define() also runs in
+ *   every snapshot, once per instance, where a returned std::string would be built
+ *   each time, and allocate if the name is long.
+ * - A name built at runtime (class templates) goes in an optional
+ *   `static std::string name()`, which runs once; define() then returns void.
  * - The second template parameter allows partial specializations (std::enable_if).
  * - The trait wins over an ADL TypeDefinition(). A define() that cannot be called as
  *   define(T&, AddField&) is a compile error.
