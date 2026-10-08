@@ -122,8 +122,7 @@ on a real-time thread.
   `scopedWrite()` and sink callbacks.
 
 The library is built as C++20; its public headers need only C++17 from consumers.
-Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst); measurements in
-[docs/benchmarks](docs/benchmarks/2026-09-12-main-vs-lockfree-frontend.md).
+Details in [CHANGELOG.rst](data_tamer_cpp/CHANGELOG.rst).
 
 # Documentation
 
