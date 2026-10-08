@@ -35,6 +35,7 @@ set(DATATAMER_TEST_SOURCES
     mcap_encoding_tests.cpp
     mcap_ring_sink_tests.cpp
     mcap_sink_reopen_tests.cpp
+    mcap_sink_rollover_failure_tests.cpp
     wire_format_tests.cpp
     name_tests.cpp
     registry_limit_tests.cpp
