@@ -571,16 +571,21 @@ TEST(ParserRobustness, DefaultConstructedViewsAndFieldsAreEmpty)
   field->~TypeField();
 }
 
-TEST(ParserRobustness, ActiveFieldOfAnOpaqueTypeSaysItCannotBeDecoded)
+namespace
+{
+// A schema with a field `f` and a vector `fs` of the type `Foreign`, which
+// `type_section` leaves undescribed or opaque. With neither field active the snapshot
+// decodes. With either one active (the vector holding an element) ParseSnapshot()
+// throws, and the message contains `message`.
+void expectCannotDecodeForeign(const std::string& type_section,
+                               const std::string& message)
 {
   const auto schema =
-      BuildSchemaFromText(kHeader + "Foreign f\nForeign[] fs\n" + kSeparator +
-                          "\nMSG: Foreign\nENCODING: proto\nmessage Foreign {}\n");
+      BuildSchemaFromText(kHeader + "Foreign f\nForeign[] fs\n" + type_section);
   const std::vector<uint8_t> no_field = { 0 };
   EXPECT_TRUE(ParseSnapshot(schema, viewOf(no_field, {}),
                             [](const std::string&, const VarNumber&) {}));
 
-  // the field, and a non-empty vector of the type: neither can be decoded
   const std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> cases = {
     { { 1 }, std::vector<uint8_t>(8) },
     { { 2 }, { 1, 0, 0, 0, 0, 0, 0, 0 } },
@@ -591,12 +596,24 @@ TEST(ParserRobustness, ActiveFieldOfAnOpaqueTypeSaysItCannotBeDecoded)
     {
       (void)ParseSnapshot(schema, viewOf(mask, payload),
                           [](const std::string&, const VarNumber&) {});
-      ADD_FAILURE() << "decoded a field of an opaque type";
+      ADD_FAILURE() << "decoded a field of the type Foreign";
     }
     catch(const std::runtime_error& e)
     {
-      EXPECT_NE(std::string(e.what()).find("opaque encoding"), std::string::npos)
-          << e.what();
+      EXPECT_NE(std::string(e.what()).find(message), std::string::npos) << e.what();
     }
   }
+}
+}  // namespace
+
+TEST(ParserRobustness, ActiveFieldOfAnOpaqueTypeSaysItCannotBeDecoded)
+{
+  expectCannotDecodeForeign(kSeparator + "\nMSG: Foreign\nENCODING: proto\nmessage "
+                                         "Foreign {}\n",
+                            "type Foreign has an opaque encoding");
+}
+
+TEST(ParserRobustness, ActiveFieldOfAnUndefinedTypeSaysItIsUnknown)
+{
+  expectCannotDecodeForeign("", "unknown type Foreign");
 }
