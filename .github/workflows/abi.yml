@@ -4,13 +4,13 @@ name: abi
 # before 2.0.0 is tagged, against the merge base) with libabigail. See "Versioning and
 # ABI policy" in CLAUDE.md. A break announced by a SONAME change passes. Before the
 # first 2.0.0 tag, the label `abi-break` accepts a layout change owned by the pull
-# request (never the frozen DataSink and CustomSerializer vtables). A push to V2
+# request (never the frozen DataSink and CustomSerializer vtables). A push to main
 # compares with the previous commit, which catches two pull requests that only break
 # together.
 
 on:
   push:
-    branches: [V2]
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
 
     - name: Compare the ABI
       env:
-        ABI_BASE_BRANCH: origin/${{ github.base_ref || 'V2' }}
+        ABI_BASE_BRANCH: origin/${{ github.base_ref || 'main' }}
         ABI_ALLOW_BREAK: ${{ contains(github.event.pull_request.labels.*.name, 'abi-break') && '1' || '0' }}
         BASELINE_REF: ${{ github.event.inputs.baseline_ref }}
       run: |

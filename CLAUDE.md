@@ -221,7 +221,7 @@ or mark classes `final` outside the planned visibility change.
 
 ### Checking the ABI locally
 
-CI (`.github/workflows/abi.yml`, pull requests and pushes to `V2`) builds the library
+CI (`.github/workflows/abi.yml`, pull requests and pushes to `main`) builds the library
 from the baseline and from the checkout and compares them with libabigail's `abidiff`,
 restricted to the installed headers (`--drop-private-types`; the Pimpl structs are
 private). A second comparison covers what consumers compile into their own binaries:
@@ -232,7 +232,7 @@ debug info (keep it to the stable API). The check fails when an exported functio
 variable is removed or changed (a vtable, a by-value struct that grew) unless the SONAME
 differs; added ones pass. The baseline is the highest release tag of the same major
 version, or, while there is none (before 2.0.0), the merge base with the base branch
-(the previous commit on a push to `V2`). Locally:
+(the previous commit on a push to `main`). Locally:
 
 ```bash
 sudo apt install abigail-tools libzstd-dev liblz4-dev     # abidiff
@@ -250,7 +250,7 @@ sink is not covered: its ABI also follows the rclcpp release, and its pins are i
 `abi_tests.cpp`. Before 2.0.0, a layout change that the PR owns is accepted with
 `--allow-break` locally and the `abi-break` label on the pull request (never for the
 frozen vtables); once a 2.x tag exists the label no longer works and only a major
-version bump passes. The check also runs on pushes to `V2`, against the previous
+version bump passes. The check also runs on pushes to `main`, against the previous
 commit.
 
 ## Conventions

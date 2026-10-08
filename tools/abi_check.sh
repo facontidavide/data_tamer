@@ -10,7 +10,7 @@
 # Baseline when none is given: the highest release tag with the same major version
 # as this checkout (project VERSION in data_tamer_cpp/CMakeLists.txt); if no such
 # tag exists (2.0.0 is not tagged yet), the merge base of HEAD with the base
-# branch ($ABI_BASE_BRANCH, default origin/V2). See "ABI policy" in CLAUDE.md.
+# branch ($ABI_BASE_BRANCH, default origin/main). See "ABI policy" in CLAUDE.md.
 #
 # A second comparison covers the consumer side: tools/abi_probe.cpp (derived
 # interfaces, instantiated templates) is compiled against the baseline headers and
@@ -85,7 +85,7 @@ if [[ -z "$baseline_dir" ]]; then
     if [[ -n "$baseline_ref" ]]; then
       echo "baseline: release tag $baseline_ref (same major version as $current_version)"
     else
-      base_branch="${ABI_BASE_BRANCH:-origin/V2}"
+      base_branch="${ABI_BASE_BRANCH:-origin/main}"
       baseline_ref="$(git -C "$repo" merge-base HEAD "$base_branch")" || {
         echo "no release tag with major $current_major and no merge base with" \
              "$base_branch: pass --baseline-ref or --baseline-dir" >&2
