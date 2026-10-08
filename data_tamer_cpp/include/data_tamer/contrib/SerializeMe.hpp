@@ -647,17 +647,14 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
   if constexpr(is_number<T>())
   {
     const size_t S = sizeof(T);
-    if(S > buffer.size())
-    {
-      throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
-    }
+    uint8_t* out = buffer.data();
+    buffer.trimFront(S);  // the one bounds check: throws before anything is written
 #if SERIALIZE_LITTLEENDIAN == 0
     T swapped = EndianSwap<T>(value);
-    std::memcpy(buffer.data(), &swapped, S);
+    std::memcpy(out, &swapped, S);
 #else
-    std::memcpy(buffer.data(), &value, S);
+    std::memcpy(out, &value, S);
 #endif
-    buffer.trimFront(S);  // NOLINT
   }
   else
   {
