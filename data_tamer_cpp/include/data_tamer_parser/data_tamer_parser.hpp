@@ -50,6 +50,15 @@ enum class BasicType : uint8_t
 
 constexpr size_t TypesCount = 13;
 
+namespace detail
+{
+/// A custom type section of the line format starts with a line of '=' (section 2 of
+/// docs/wire_format.md): the writer emits kSeparatorWidth of them, the reader accepts
+/// kMinSeparatorWidth or more.
+constexpr size_t kSeparatorWidth = 59;
+constexpr size_t kMinSeparatorWidth = 30;
+}  // namespace detail
+
 using VarNumber = std::variant<bool, char, int8_t, uint8_t, int16_t, uint16_t, int32_t,
                                uint32_t, int64_t, uint64_t, float, double>;
 
@@ -370,7 +379,7 @@ inline bool TypeField::operator!=(const TypeField& other) const
     }
     return line + " " + field.field_name + "\n";
   };
-  const std::string separator(59, '=');
+  const std::string separator(detail::kSeparatorWidth, '=');
   std::string out = "### version: " + std::to_string(SCHEMA_VERSION) +
                     "\n### hash: " + std::to_string(schema.hash) +
                     "\n### channel_name: " + schema.channel_name + "\n\n";
@@ -1031,7 +1040,8 @@ inline TypeField ParseFieldLine(const std::string& line, bool legacy)
   {
     any_line = true;
     const bool opens_section = std::exchange(section_starts, false);
-    if(line.size() >= 30 && line.find_first_not_of('=') == std::string::npos)
+    if(line.size() >= detail::kMinSeparatorWidth &&
+       line.find_first_not_of('=') == std::string::npos)
     {
       // a separator: the next line that is not blank is "MSG: <type name>"
       if(!detail::ReadNonBlankLine(txt, offset, line) || line.rfind("MSG: ", 0) != 0)

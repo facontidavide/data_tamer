@@ -36,7 +36,10 @@ from dataclasses import dataclass, field
 SCHEMA_VERSION = 5
 SCHEMA_YAML_VERSION = 6  # the YAML rendering of the same schema (spec section 2.1)
 _READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
-_MIN_SEPARATOR = 30  # a type section starts with a line of at least this many "="
+# A type section starts with a line of "=": the writer emits _SEPARATOR_WIDTH of them and
+# the reader accepts _MIN_SEPARATOR_WIDTH or more.
+_SEPARATOR_WIDTH = 59
+_MIN_SEPARATOR_WIDTH = 30
 
 # Basic type name -> little-endian struct; the order is the BasicType id order.
 _STRUCT = {
@@ -171,7 +174,7 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
         opens_section = previous == "MSG"
         previous = ""
-        if len(line) >= _MIN_SEPARATOR and not line.strip("="):
+        if len(line) >= _MIN_SEPARATOR_WIDTH and not line.strip("="):
             previous = "separator"
             continue
         key, colon, value = line.partition(":")  # a header is "### key: value"
@@ -224,7 +227,7 @@ def _field_line(f: Field) -> str:
 def to_text(schema: Schema) -> str:
     """Render a schema in the version 5 line format, byte for byte as the C++
     writer does; schema_hash() of the result is the schema hash (section 5)."""
-    sep = "=" * 59 + "\n"
+    sep = "=" * _SEPARATOR_WIDTH + "\n"
     out = [f"### version: {SCHEMA_VERSION}\n### hash: {schema.hash}\n"
            f"### channel_name: {schema.channel_name}\n\n"]
     out += [_field_line(f) + "\n" for f in schema.fields]
