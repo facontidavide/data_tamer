@@ -38,6 +38,7 @@ set(DATATAMER_TEST_SOURCES
     mcap_sink_rollover_failure_tests.cpp
     mcap_ring_sink_time_jump_tests.cpp
     mcap_ring_sink_callback_tests.cpp
+    mcap_ring_sink_api_tests.cpp
     dummy_sink_tests.cpp
     mcap_negative_timestamp_tests.cpp
     wire_format_tests.cpp
@@ -229,6 +230,9 @@ foreach(case VALUE VECTOR MEMBER LOGGED)
     data_tamer_compile_fail_test(long_double_${case_name}_is_rejected
         long_double_registration.cpp DT_LONG_DOUBLE_${case} "has no wire type")
 endforeach()
+
+data_tamer_compile_fail_test(request_dump_result_is_nodiscard
+    request_dump_nodiscard.cpp DT_IGNORE_REQUEST_DUMP)
 
 # Compile-fail tests: a probe that ignores a [[nodiscard]] result or calls a deprecated
 # function, built with that diagnostic as an error. ctest builds the probe target and

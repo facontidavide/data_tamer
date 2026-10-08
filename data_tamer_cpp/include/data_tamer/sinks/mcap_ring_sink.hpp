@@ -89,7 +89,7 @@ struct MCAPRingStats
  *   channel->addDataSink(worker);
  *   auto& recorder = worker->as<MCAPRingSink>();
  *   ...
- *   recorder.requestDump(std::chrono::seconds(2));  // from any thread, RT-safe
+ *   (void)recorder.requestDump(std::chrono::seconds(2));  // any thread, RT-safe
  *
  * Content. The trigger is the first snapshot delivered after the request, and all times
  * are snapshot timestamps, so a dump behaves the same in simulation, replay and on
@@ -133,10 +133,11 @@ public:
    * dump is handed to the writer thread). Requests are not merged, and a file being
    * written does not block new ones.
    */
-  bool requestDump(std::chrono::nanoseconds post_trigger = std::chrono::nanoseconds(0));
+  [[nodiscard]] bool requestDump(
+      std::chrono::nanoseconds post_trigger = std::chrono::nanoseconds(0)) noexcept;
 
   /// True from an accepted requestDump() until its dump is handed to the writer.
-  [[nodiscard]] bool dumpRequested() const;
+  [[nodiscard]] bool dumpRequested() const noexcept;
 
   /**
    * @brief Write the active request now, with what the ring holds, and wait until it is

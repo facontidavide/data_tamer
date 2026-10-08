@@ -505,7 +505,7 @@ MCAPRingSink::~MCAPRingSink()
   }
 }
 
-bool MCAPRingSink::requestDump(std::chrono::nanoseconds post_trigger)
+bool MCAPRingSink::requestDump(std::chrono::nanoseconds post_trigger) noexcept
 {
   const auto delay =
       static_cast<uint64_t>(std::max<nanoseconds::rep>(post_trigger.count(), 0));
@@ -515,7 +515,7 @@ bool MCAPRingSink::requestDump(std::chrono::nanoseconds post_trigger)
       std::memory_order_relaxed);
 }
 
-bool MCAPRingSink::dumpRequested() const
+bool MCAPRingSink::dumpRequested() const noexcept
 {
   return _p->request.load(std::memory_order_acquire) != 0;
 }

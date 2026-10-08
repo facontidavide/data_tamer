@@ -42,8 +42,9 @@ int main()
     (void)channel->tryTakeSnapshot();
     if(i == 2000)
     {
-      // Real-time safe: one atomic compare-exchange, no allocation.
-      recorder.requestDump(500ms);
+      // Real-time safe: one atomic compare-exchange, no allocation. The result is false
+      // when an earlier request is still active, which cannot happen here.
+      (void)recorder.requestDump(500ms);
     }
     std::this_thread::sleep_for(1ms);
   }
