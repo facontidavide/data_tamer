@@ -58,6 +58,10 @@ Unreleased
 * **Fixed**: ``MCAPRingSink::flushPendingDump()`` and ``stop()`` on an untriggered request
   use the newest timestamp of the current run, so a simulation reset no longer dumps the
   previous run. ``dumps_written`` and ``dumps_failed`` count a dump before its callback.
+* **Fixed**: ``MCAPRingSink`` starts a new run only when a channel's clock steps back by
+  more than ``window``. Snapshots of one channel taken by several threads can arrive
+  slightly out of order, and each step back started a run, so a flush right after
+  ended its dump before the newest snapshot.
 * **Behaviour change**: MCAP sinks reject a negative snapshot timestamp (counted in
   ``errors()``, not written), and ``mcap_encoding::WriteMessage()`` throws for one.
 * **Parser and Python decoder**: the work of a decode is bounded by the payload (a

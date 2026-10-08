@@ -141,9 +141,11 @@ public:
   /**
    * @brief Write the active request now, with what the ring holds, and wait until it is
    * on disk. A request no snapshot has triggered yet takes the newest timestamp of the
-   * current run as its trigger (a new run starts when the snapshot clock of a channel
-   * steps back, as in a simulation reset), and a dump still collecting its post-trigger
-   * interval is cut at the newest timestamp seen.
+   * current run as its trigger, and a dump still collecting its post-trigger interval
+   * is cut at the newest timestamp seen. A new run starts when the snapshot clock of a
+   * channel steps back by more than `window`, as in a simulation reset. A smaller step
+   * back stays in the run, such as snapshots of one channel taken by several threads
+   * and delivered slightly out of order.
    * Queued snapshots that are not delivered yet are not in the ring (SinkWorker::drain()
    * delivers them).
    *

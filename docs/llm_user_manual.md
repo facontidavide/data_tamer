@@ -694,10 +694,12 @@ ring->stop();
   `flushPendingDump()` throw `std::logic_error` there. `stats()` called from the callback
   already counts the dump being reported.
 - `flushPendingDump()` writes the active request now and waits for the file: a request
-  no snapshot has triggered yet uses the newest timestamp of the current run as trigger
-  (a new run starts when the snapshot clock of a channel steps back, as in a simulation
-  reset), a dump still collecting its post-trigger interval is cut at the newest
-  timestamp seen. It is safe while the worker is
+  no snapshot has triggered yet uses the newest timestamp of the current run as trigger,
+  a dump still collecting its post-trigger interval is cut at the newest timestamp seen.
+  A new run starts when the snapshot clock of a channel steps back by more than
+  `window`, as in a simulation reset. A smaller step back stays in the run, such as
+  snapshots of one channel taken by several threads and delivered slightly out of
+  order. It is safe while the worker is
   running, so there is no need to stop and restart the worker around it; snapshots still
   queued are not in the ring yet. It returns true if a request was active.
 - `SinkWorker::stop()` calls `flushPendingDump()` after the last delivery, so a request

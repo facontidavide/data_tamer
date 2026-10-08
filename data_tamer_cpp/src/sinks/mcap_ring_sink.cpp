@@ -179,8 +179,10 @@ struct MCAPRingSink::Pimpl
   bool has_snapshot = false;
   nanoseconds max_timestamp = kMinTime;  // newest timestamp seen
   // Timestamp of the last snapshot of each channel, added by onSchema() so that
-  // onSnapshot() does not allocate. When one channel's clock steps back (a simulation
-  // reset) a new run starts, and run_max restarts from that snapshot.
+  // onSnapshot() does not allocate. When one channel's clock steps back by more than
+  // the window (a simulation reset) a new run starts, and run_max restarts from that
+  // snapshot. A smaller step back stays in the run: snapshots of one channel taken by
+  // several threads can arrive slightly out of order.
   struct ChannelClock
   {
     uint64_t schema_hash;
@@ -286,7 +288,9 @@ void MCAPRingSink::Pimpl::trackClock(const Snapshot& snapshot)
   });
   if(clock != clocks.end())
   {
-    if(snapshot.timestamp < clock->last)
+    // Older than the window before the channel's last snapshot: age eviction treats
+    // such a snapshot as gone, so it belongs to a new run.
+    if(snapshot.timestamp < saturatingSub(clock->last, options.window))
     {
       run_max = kMinTime;
     }

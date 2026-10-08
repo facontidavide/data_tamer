@@ -1,4 +1,6 @@
-// MCAPRingSink after the snapshot clock jumped back, as in a simulation reset.
+// MCAPRingSink after the snapshot clock jumped back, as in a simulation reset, or
+// stepped back a little, as with snapshots of several threads.
+#include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "mcap_test_utils.hpp"
@@ -6,7 +8,10 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
 
 using namespace DataTamer;
@@ -15,11 +20,13 @@ using DataTamerTest::manual;
 using DataTamerTest::ringOptions;
 using DataTamerTest::ScratchDir;
 using DataTamerTest::Source;
+using std::chrono::milliseconds;
 using std::chrono::seconds;
 
 // A request that no snapshot has triggered yet is flushed around the newest timestamp of
-// the current run. When the clock of a channel steps back a new run starts: the maximum
-// timestamp ever seen belongs to the old run, and the dump would hold only its snapshots.
+// the current run. When the clock of a channel steps back by more than the window a new
+// run starts: the maximum timestamp ever seen belongs to the old run, and the dump would
+// hold only its snapshots.
 TEST(MCAPRingSinkTimeJump, FlushOfAnUntriggeredRequestStaysOnTheNewRun)
 {
   for(const bool by_stop : { false, true })
@@ -99,4 +106,72 @@ TEST(MCAPRingSinkTimeJump, FlushOfACollectingDumpKeepsTheRunOfItsTrigger)
   // [991 s, 1001 s]: what the dump had when the clock stepped back
   EXPECT_EQ(logTimes(details::NumberedPath(options.filepath, 1)),
             (std::vector<uint64_t>{ 1'000'000'000'000, 1'001'000'000'000 }));
+}
+
+// Several threads can take snapshots of one channel, and a default timestamp is taken
+// before the snapshot waits for the write mutex, so one channel can deliver its
+// timestamps slightly out of order. That is no new run: a flush right after keeps the
+// newest snapshot and makes it the trigger.
+TEST(MCAPRingSinkTimeJump, FlushAfterSnapshotsSlightlyOutOfOrderKeepsTheNewest)
+{
+  ScratchDir dir("ring_out_of_order");
+  const auto options = ringOptions(dir.file("order.mcap"), seconds(10));
+  auto sink = manual<MCAPRingSink>(options);
+  MCAPRingDump info;
+  sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
+  int64_t value = 0;
+  auto channel = channelWith(sink, &value);
+  for(const auto at :
+      { milliseconds(10'000), milliseconds(10'002), milliseconds(10'001) })
+  {
+    ASSERT_EQ(channel->takeSnapshot(at), SnapshotResult::ok);
+  }
+  sink.drain();
+
+  ASSERT_TRUE(sink->requestDump());
+  ASSERT_TRUE(sink->flushPendingDump());
+
+  EXPECT_EQ(info.trigger_time, milliseconds(10'002));
+  EXPECT_EQ(logTimes(details::NumberedPath(options.filepath, 1)),
+            (std::vector<uint64_t>{ 10'000'000'000, 10'002'000'000, 10'001'000'000 }));
+}
+
+// A run ends only when a channel's clock steps back by more than the window, beyond
+// which age eviction treats a snapshot as gone. Here the window is 4 s.
+TEST(MCAPRingSinkTimeJump, OnlyAStepBackLongerThanTheWindowStartsANewRun)
+{
+  struct Case
+  {
+    std::vector<milliseconds> taken;
+    std::vector<uint64_t> dumped;
+  };
+  const std::vector<Case> cases = {
+    // 3 s back: one run, flushed around its newest timestamp, 100 s
+    { { milliseconds(100'000), milliseconds(97'000) },
+      { 100'000'000'000, 97'000'000'000 } },
+    // exactly the window back: still one run
+    { { milliseconds(100'000), milliseconds(96'000) },
+      { 100'000'000'000, 96'000'000'000 } },
+    // 4.001 s back: a new run, flushed around 95.999 s
+    { { milliseconds(100'000), milliseconds(95'999) }, { 95'999'000'000 } },
+  };
+  for(const auto& c : cases)
+  {
+    SCOPED_TRACE("step back to " + std::to_string(c.taken.back().count()) + " ms");
+    ScratchDir dir("ring_step_back");
+    const auto options = ringOptions(dir.file("step.mcap"), seconds(4));
+    auto sink = manual<MCAPRingSink>(options);
+    int64_t value = 0;
+    auto channel = channelWith(sink, &value);
+    for(const auto at : c.taken)
+    {
+      ASSERT_EQ(channel->takeSnapshot(at), SnapshotResult::ok);
+    }
+    sink.drain();
+
+    ASSERT_TRUE(sink->requestDump());
+    ASSERT_TRUE(sink->flushPendingDump());
+
+    EXPECT_EQ(logTimes(details::NumberedPath(options.filepath, 1)), c.dumped);
+  }
 }
