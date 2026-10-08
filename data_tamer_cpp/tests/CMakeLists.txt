@@ -166,6 +166,8 @@ data_tamer_compile_fail_test(atomic_word_table_const_is_read_only
     atomic_word_table_const.cpp DT_WRITE_THROUGH_CONST)
 data_tamer_compile_fail_test(fixed_size_of_an_undescribed_type_is_rejected
     get_fixed_size.cpp DT_UNDESCRIBED_TYPE)
+data_tamer_compile_fail_test(serializer_is_not_built_from_a_name_implicitly
+    custom_serializer_constructor.cpp DT_IMPLICIT_NAME)
 
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)

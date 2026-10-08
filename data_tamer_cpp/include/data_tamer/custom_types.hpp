@@ -49,7 +49,7 @@ template <typename T>
 class CustomSerializerT : public CustomSerializer
 {
 public:
-  CustomSerializerT(std::string type_name);
+  explicit CustomSerializerT(std::string type_name);
 
   const std::string& typeName() const override;
 
