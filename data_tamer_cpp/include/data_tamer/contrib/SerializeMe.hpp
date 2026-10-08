@@ -25,6 +25,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -32,6 +33,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace SerializeMe
@@ -395,6 +397,9 @@ inline T EndianSwap(T t)
     return u.t;
   }
 }
+#undef DESERIALIZE_ME_BYTESWAP16
+#undef DESERIALIZE_ME_BYTESWAP32
+#undef DESERIALIZE_ME_BYTESWAP64
 
 template <typename _Tp, bool _is_container, int _size>
 struct container_info_
@@ -588,7 +593,7 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, std::array<T, N>& dest
 
   if constexpr(sizeof(T) == 1 && !std::is_same_v<T, bool>)
   {
-    memcpy(dest.data(), buffer.data(), N);
+    std::memcpy(dest.data(), buffer.data(), N);
     buffer.trimFront(N);
   }
   else
@@ -616,19 +621,8 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
       throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
     }
 
-    if constexpr(container_info<Container<T, TArgs...>>::size == 0)
-    {
-      dest.resize(num_values);
-    }
-    else if constexpr(std::is_array_v<Container<T, TArgs...>>)
-    {
-      if(std::size(dest) != num_values)
-      {
-        throw std::runtime_error("DeserializeFromBuffer: wrong size in static container");
-      }
-    }
-
-    memcpy(dest.data(), buffer.data(), size);
+    dest.resize(num_values);
+    std::memcpy(dest.data(), buffer.data(), size);
     buffer.trimFront(size);
   }
   else
@@ -638,7 +632,7 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
     {
       T temp;
       DeserializeFromBuffer(buffer, temp);
-      std::back_inserter(dest) = std::move(temp);
+      dest.push_back(std::move(temp));
     }
   }
 }
@@ -692,7 +686,7 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, std::string const& str)
   const auto size = static_cast<StringSize>(str.size());
   SerializeIntoBuffer(buffer, size);
 
-  memcpy(buffer.data(), str.data(), size);
+  std::memcpy(buffer.data(), str.data(), size);
   buffer.trimFront(size);
 }
 
@@ -700,11 +694,6 @@ template <typename T, size_t N,
           std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline void SerializeIntoBuffer(SpanBytes& buffer, std::array<T, N> const& vect)
 {
-  if(N > std::numeric_limits<uint32_t>::max())
-  {
-    throw std::runtime_error("SerializeIntoBuffer: array exceeds maximum size");
-  }
-
   if constexpr(is_number<T>() || sizeof(T) == 1)
   {
     if(N * sizeof(T) > buffer.size())
@@ -749,7 +738,7 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, Container<T, TArgs...> const&
     {
       throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
     }
-    memcpy(buffer.data(), vect.data(), size);
+    std::memcpy(buffer.data(), vect.data(), size);
     buffer.trimFront(size);
   }
   else
