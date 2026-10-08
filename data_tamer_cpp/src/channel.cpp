@@ -4,6 +4,7 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/details/shared_state.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
+#include "waiter_count.hpp"
 
 #include <algorithm>
 #include <array>
@@ -254,7 +255,7 @@ struct LogChannel::Pimpl
   std::vector<const SinkWorker*> announcing;
   std::condition_variable announced;
   std::atomic<uint64_t> epoch{ 0 };
-  std::atomic<uint32_t> quiescence_waiters{ 0 };  // controllers in waitQuiescent()
+  details::WaiterCount quiescence_waiters;  // controllers in waitQuiescent()
 
   // Caller holds control_mutex (or owns the channel exclusively).
   template <typename Function>
@@ -304,24 +305,17 @@ struct LogChannel::Pimpl
   // its entry precedes its old-pointer load/dirty exchange, which precedes
   // removal's SC publication and this load. Wait only for that reader; later
   // readers see the new publication. Exit is release, observation is acquire.
-  // The controller registers in quiescence_waiters before it reads the epoch, and a
-  // reader reads quiescence_waiters after it leaves (all SC): either the reader
-  // notifies, or the controller sees it gone.
   void waitQuiescent()
   {
-    quiescence_waiters.fetch_add(1, std::memory_order_seq_cst);
+    details::WaiterCount::Scope waiting(quiescence_waiters);  // before the epoch read
     const auto observed = epoch.load(std::memory_order_seq_cst);
     if(observed & 1)
     {
       epoch.wait(observed, std::memory_order_seq_cst);  // returns once the value changed
     }
-    quiescence_waiters.fetch_sub(1, std::memory_order_seq_cst);
   }
 
-  // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress. It
-  // notifies only a registered controller: a notify reaches libstdc++'s shared
-  // waiter table, which makes a futex call whenever any thread of the process waits
-  // on an atomic.
+  // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress.
   struct EpochGuard
   {
     explicit EpochGuard(Pimpl& p) : epoch(p.epoch), waiters(p.quiescence_waiters)
@@ -331,13 +325,10 @@ struct LogChannel::Pimpl
     ~EpochGuard()
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
-      if(waiters.load(std::memory_order_seq_cst) != 0)
-      {
-        epoch.notify_all();
-      }
+      waiters.notifyIfWaiting(epoch);  // no futex call unless a controller waits
     }
     std::atomic<uint64_t>& epoch;
-    std::atomic<uint32_t>& waiters;
+    details::WaiterCount& waiters;
   };
 };
 
