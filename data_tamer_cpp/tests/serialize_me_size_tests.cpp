@@ -52,6 +52,20 @@ std::string_view TypeDefinition(Point2& p, AddField& add)
   return "Point2";
 }
 
+// 5 bytes on the wire, 8 in memory: trivially copyable, with padding
+struct Padded
+{
+  uint8_t a = 1;
+  uint32_t b = 2;
+};
+template <typename AddField>
+std::string_view TypeDefinition(Padded& p, AddField& add)
+{
+  add("a", &p.a);
+  add("b", &p.b);
+  return "Padded";
+}
+
 Pair makePair()
 {
   Pair pair;
@@ -103,4 +117,22 @@ TEST(SerializeMeSize, RealTimeSnapshotOfAnArrayOfVariableSizeElementsDoesNotThro
   DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
   EXPECT_NO_THROW(result = channel->tryTakeSnapshot());
   EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
+}
+
+TEST(SerializeMeSize, VectorOfPaddedStructsIsSizedByWhatIsWritten)
+{
+  const std::vector<Padded> values(3);
+  std::vector<uint8_t> storage(64);
+  SerializeMe::SpanBytes out(storage);
+  SerializeMe::SerializeIntoBuffer(out, values);
+  const size_t written = storage.size() - out.size();
+
+  EXPECT_EQ(written, size_t{ 4 + 3 * 5 });
+  EXPECT_EQ(SerializeMe::BufferSize(values), size_t{ 4 + 3 * 5 });
+}
+
+TEST(SerializeMeSize, VectorOfNumbersKeepsItsSize)
+{
+  EXPECT_EQ(SerializeMe::BufferSize(std::vector<int16_t>{ 1, 2, 3 }), size_t{ 4 + 6 });
+  EXPECT_EQ(SerializeMe::BufferSize(std::vector<double>{}), size_t{ 4 });
 }

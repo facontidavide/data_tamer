@@ -500,7 +500,7 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline size_t BufferSize(const Container<T, TArgs...>& vect)
 {
-  if constexpr(std::is_trivially_copyable_v<T> && is_vector<Container<T, TArgs...>>())
+  if constexpr(is_number<T>() && is_vector<Container<T, TArgs...>>())
   {
     return sizeof(uint32_t) + vect.size() * sizeof(T);
   }

@@ -77,9 +77,8 @@ static_assert(has_TypeDefinition<TemplateCustomType<int>>::value, "TemplateCusto
 // check that BufferSize works on the types
 TEST(CustomTypeTrait, BufferSize)
 {
-  // container of custom type works because it uses the container overload even though the contained type has no TypeDefinition
-  std::vector<CustomNoTypeDef> c{ { 1 }, { 2 }, { 3 } };
-  EXPECT_NO_THROW(BufferSize(c));
+  // a container of a type without TypeDefinition does not compile either: it cannot
+  // be serialized, so it has no size
 
   // std containers of std types
   std::vector<int> v{ 1, 2, 3 };
