@@ -161,31 +161,32 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     target = schema.fields
     last_type = ""
     seen_line = False
-    after_separator = False
-    section_starts = False  # the line being read follows a "MSG:" line
+    previous = ""  # the last non-blank line: "separator", "MSG" or "" for any other
     for index, raw in enumerate(lines):
         line = raw.strip()
         if not line:
             continue
         seen_line = True
-        opens_section, section_starts = section_starts, False
-        if after_separator and not line.startswith("MSG: "):
+        if previous == "separator" and not line.startswith("MSG: "):
             raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
-        after_separator = False
+        opens_section = previous == "MSG"
+        previous = ""
         if len(line) >= _MIN_SEPARATOR and not line.strip("="):
-            after_separator = True
+            previous = "separator"
             continue
-        if line.startswith("### version:"):
-            if _parse_uint(line.split(":", 1)[1].strip(), "version") not in _READABLE_VERSIONS:
+        key, colon, value = line.partition(":")  # a header is "### key: value"
+        value = value.strip()
+        if colon and key == "### version":
+            if _parse_uint(value, "version") not in _READABLE_VERSIONS:
                 raise ValueError(f"unsupported schema version in {line!r}")
-        elif line.startswith("### hash:"):
-            schema.hash = _parse_uint(line.split(":", 1)[1].strip(), "hash")
-        elif line.startswith("### channel_name:"):
-            schema.channel_name = line.split(":", 1)[1].strip()
+        elif colon and key == "### hash":
+            schema.hash = _parse_uint(value, "hash")
+        elif colon and key == "### channel_name":
+            schema.channel_name = value
         elif line.startswith("MSG: "):
             last_type = line[5:].strip()
             target = schema.custom_types.setdefault(last_type, [])
-            section_starts = True
+            previous = "MSG"
         elif line.startswith("ENCODING: "):
             # Opaque sections come last and own the rest of the text (spec section 2), one
             # final newline (which the writer adds) apart.
@@ -199,7 +200,7 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             target.append(_parse_field_line(line))
     if not seen_line:
         raise ValueError("empty schema text")
-    if after_separator:
+    if previous == "separator":
         raise ValueError('expected "MSG: <type name>" after the last separator')
     if verify_hash and schema.hash != schema_hash(text):
         raise ValueError("schema hash does not match its text")
