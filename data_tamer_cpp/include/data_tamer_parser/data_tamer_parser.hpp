@@ -12,6 +12,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -755,6 +756,173 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
   }
   return nullptr;
 }
+
+/// Type names of schema texts from before version 4: upper case, indexed by BasicType.
+inline const std::array<std::string, TypesCount>& LegacyTypeNames()
+{
+  static const std::array<std::string, TypesCount> kNames = {
+    "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
+    "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
+  };
+  return kNames;
+}
+
+/// Removes the spaces and carriage returns at both ends of `str`.
+inline void Trim(std::string& str)
+{
+  const auto last = str.find_last_not_of(" \r");
+  if(last == std::string::npos)
+  {
+    str.clear();
+    return;
+  }
+  str.erase(last + 1);
+  str.erase(0, str.find_first_not_of(" \r"));
+}
+
+/// Reads the line of `txt` that starts at `offset` into `line`, without its '\n', and
+/// moves `offset` to the start of the next one. Returns false at the end of the text.
+inline bool ReadLine(const std::string& txt, size_t& offset, std::string& line)
+{
+  if(offset >= txt.size())
+  {
+    return false;
+  }
+  const size_t end = std::min(txt.find('\n', offset), txt.size());
+  line.assign(txt, offset, end - offset);
+  offset = std::min(end + 1, txt.size());
+  return true;
+}
+
+/// Reads the next line of `txt` that is not blank, trimmed. Returns false, with `line`
+/// empty, if there is none.
+inline bool ReadNonBlankLine(const std::string& txt, size_t& offset, std::string& line)
+{
+  while(ReadLine(txt, offset, line))
+  {
+    Trim(line);
+    if(!line.empty())
+    {
+      return true;
+    }
+  }
+  line.clear();
+  return false;
+}
+
+/// True for the YAML rendering (version 6): its first line that is not a comment starts
+/// with "version:", where the line format starts with a "###" header.
+inline bool IsYamlSchema(const std::string& txt)
+{
+  size_t offset = 0;
+  std::string line;
+  while(ReadNonBlankLine(txt, offset, line))
+  {
+    if(line.front() != '#' || line.rfind("###", 0) == 0)
+    {
+      return line.rfind("version:", 0) == 0;
+    }
+  }
+  return false;
+}
+
+/// If `line` starts with `prefix` (such as "### hash:"), puts the rest of it, trimmed, in
+/// `value`.
+inline bool ReadHeaderValue(const std::string& line, const char* prefix,
+                            std::string& value)
+{
+  const size_t size = std::strlen(prefix);
+  if(line.compare(0, size, prefix) != 0)
+  {
+    return false;
+  }
+  value.assign(line, size, std::string::npos);
+  Trim(value);
+  return true;
+}
+
+/// The array size of the type spec `spec`, whose '[' is at `open`: 0 for "[]" (a dynamic
+/// vector), N for "[N]". `line` is the field line, for the error messages.
+inline uint32_t ParseArraySize(const std::string& spec, size_t open,
+                               const std::string& line)
+{
+  const auto close = spec.find(']', open);
+  if(close == std::string::npos)
+  {
+    throw std::runtime_error("Unterminated array size in: " + line);
+  }
+  if(close == open + 1)
+  {
+    return 0;
+  }
+  const std::string digits = spec.substr(open + 1, close - open - 1);
+  if(digits.find_first_not_of("0123456789") != std::string::npos)
+  {
+    throw std::runtime_error("Invalid array size in: " + line);
+  }
+  const auto extent = ParseArrayExtent(digits);
+  if(!extent)
+  {
+    throw std::runtime_error("Array size out of range (1..65535) in: " + line);
+  }
+  return *extent;
+}
+
+/// Parses a field line, "<type> <name>", the type being "T", "T[]" or "T[N]". A text
+/// without a version line comes from before version 4 (`legacy`): its type names are
+/// upper case and the type follows the name.
+inline TypeField ParseFieldLine(const std::string& line, bool legacy)
+{
+  // Split at the first space.
+  const auto space_pos = line.find(' ');
+  if(space_pos == std::string::npos)
+  {
+    throw std::runtime_error("Unexpected line: " + line);
+  }
+  std::string left = line.substr(0, space_pos);
+  std::string right = line.substr(space_pos + 1);
+  Trim(left);
+  Trim(right);
+
+  // A type name is the whole token before any "[...]": "float64Pose" is a custom type.
+  auto typeToken = [](const std::string& spec) {
+    return std::string_view(spec).substr(0, spec.find('['));
+  };
+  const std::string_view left_token = typeToken(left);
+  const std::string_view right_token = legacy ? typeToken(right) : std::string_view();
+
+  std::string* type_spec = &left;
+  std::string* name = &right;
+  const auto& names = BasicTypeNames();
+  const auto& legacy_names = LegacyTypeNames();
+  TypeField field;
+  for(size_t i = 0; i < TypesCount; i++)
+  {
+    if(left_token == names[i])
+    {
+      field.type = static_cast<BasicType>(i);
+      break;
+    }
+    if(legacy && right_token == legacy_names[i])
+    {
+      field.type = static_cast<BasicType>(i);
+      std::swap(type_spec, name);
+      break;
+    }
+  }
+
+  const auto open = type_spec->find_first_of(" [");
+  field.type_name = field.type != BasicType::OTHER ?
+                        names[static_cast<size_t>(field.type)] :
+                        type_spec->substr(0, open);
+  if(open != std::string::npos && (*type_spec)[open] == '[')
+  {
+    field.is_vector = true;
+    field.array_size = ParseArraySize(*type_spec, open, line);
+  }
+  field.field_name = std::move(*name);
+  return field;
+}
 }  // namespace detail
 
 /// Parses a YAML schema (version 6, docs/wire_format.md section 2.1).
@@ -842,91 +1010,37 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
 [[nodiscard]] inline Schema BuildSchemaFromText(const std::string& txt,
                                                 bool check_hash = false)
 {
-  auto trimString = [](std::string& str) {
-    const auto last = str.find_last_not_of(" \r");
-    if(last == std::string::npos)
-    {
-      str.clear();
-      return;
-    }
-    str.erase(last + 1);
-    str.erase(0, str.find_first_not_of(" \r"));
-  };
-
+  if(detail::IsYamlSchema(txt))
   {
-    // The YAML rendering (version 6) starts with "version:"; the line format with "###".
-    std::istringstream probe(txt);
-    std::string first;
-    while(std::getline(probe, first))
-    {
-      trimString(first);
-      if(!first.empty() && first.front() != '#')
-      {
-        break;
-      }
-      if(first.rfind("###", 0) == 0)
-      {
-        break;
-      }
-    }
-    if(first.rfind("version:", 0) == 0)
-    {
-      return BuildSchemaFromYaml(txt, check_hash);
-    }
+    return BuildSchemaFromYaml(txt, check_hash);
   }
 
-  std::istringstream ss(txt);
-  std::string line;
   Schema schema;
   uint64_t declared_schema = 0;
-  int version = SCHEMA_VERSION;
+  int version = 0;           // 0 until a version line: a text from before version 4
   uint64_t legacy_hash = 0;  // version 4 recomputation, field by field
 
   std::vector<TypeField>* field_vector = &schema.fields;
   bool any_line = false;
-  bool has_version_line = false;
   std::string section_name;     // the type of the last "MSG:" line
   bool section_starts = false;  // the line being read follows that "MSG:" line
 
-  size_t consumed = 0;  // bytes of txt read so far
-  auto readLine = [&](std::string& out) {
-    if(!std::getline(ss, out))
-    {
-      return false;
-    }
-    consumed = std::min(txt.size(), consumed + out.size() + 1);
-    return true;
-  };
-
-  while(readLine(line))
+  size_t offset = 0;  // where the next line of txt starts
+  std::string line;
+  while(detail::ReadNonBlankLine(txt, offset, line))
   {
-    trimString(line);
-    if(line.empty())
-    {
-      continue;
-    }
     any_line = true;
     const bool opens_section = std::exchange(section_starts, false);
     if(line.size() >= 30 && line.find_first_not_of('=') == std::string::npos)
     {
       // a separator: the next line that is not blank is "MSG: <type name>"
-      std::string msg_line;
-      while(readLine(msg_line))
+      if(!detail::ReadNonBlankLine(txt, offset, line) || line.rfind("MSG: ", 0) != 0)
       {
-        trimString(msg_line);
-        if(!msg_line.empty())
-        {
-          break;
-        }
+        throw std::runtime_error("Expecting \"MSG: \" at the beginning of line: " + line);
       }
-      if(msg_line.rfind("MSG: ", 0) != 0)
-      {
-        throw std::runtime_error("Expecting \"MSG: \" at the beginning of line: " +
-                                 msg_line);
-      }
-      msg_line.erase(0, 5);
-      trimString(msg_line);
-      section_name = msg_line;
+      line.erase(0, 5);
+      detail::Trim(line);
+      section_name = line;
       section_starts = true;
       field_vector = &schema.custom_types[section_name];
       continue;
@@ -941,8 +1055,8 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
         throw std::runtime_error("ENCODING: outside the start of a section, in: " + line);
       }
       std::string encoding = line.substr(10);
-      trimString(encoding);
-      std::string foreign = txt.substr(consumed);
+      detail::Trim(encoding);
+      std::string foreign = txt.substr(offset);
       if(!foreign.empty() && foreign.back() == '\n')
       {
         foreign.pop_back();
@@ -954,142 +1068,48 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
 
     // Headers: "### key: value", the value being what follows the colon. Only a line
     // that starts with "### " can be one, which spares the other lines the key tests.
-    const bool is_header_line = line.compare(0, 4, "### ") == 0;
-    std::string header_value;
-    auto isHeader = [&](const char* key) {
-      if(!is_header_line)
-      {
-        return false;
-      }
-      const size_t key_end = 4 + std::strlen(key);
-      if(line.compare(4, key_end - 4, key) != 0 || line.compare(key_end, 1, ":") != 0)
-      {
-        return false;
-      }
-      header_value = line.substr(key_end + 1);
-      trimString(header_value);
-      return true;
-    };
-    if(isHeader("version"))
+    if(line.rfind("### ", 0) == 0)
     {
-      const auto number = detail::ParseUnsigned(header_value);
-      if(!number)
+      std::string value;
+      if(detail::ReadHeaderValue(line, "### version:", value))
       {
-        throw std::runtime_error("DataTamerParser: invalid version in: " + line);
-      }
-      // Version 4 differs only in how the hash was computed.
-      if(*number != uint64_t(SCHEMA_VERSION) && *number != 4)
-      {
-        throw std::runtime_error("Wrong SCHEMA_VERSION");
-      }
-      version = int(*number);
-      has_version_line = true;
-      continue;
-    }
-    if(isHeader("hash"))
-    {
-      const auto number = detail::ParseUnsigned(header_value);
-      if(!number)
-      {
-        throw std::runtime_error("DataTamerParser: invalid hash in: " + line);
-      }
-      declared_schema = *number;
-      continue;
-    }
-    if(isHeader("channel_name"))
-    {
-      schema.channel_name = header_value;
-      legacy_hash = std::hash<std::string>()(schema.channel_name);
-      continue;
-    }
-
-    // Split at the first space: "<type> <name>".
-    const auto space_pos = line.find(' ');
-    if(space_pos == std::string::npos)
-    {
-      throw std::runtime_error("Unexpected line: " + line);
-    }
-
-    std::string str_left = line.substr(0, space_pos);
-    std::string str_right = line.substr(space_pos + 1);
-    trimString(str_left);
-    trimString(str_right);
-
-    const std::string* str_type = &str_left;
-    const std::string* str_name = &str_right;
-
-    TypeField field;
-
-    const auto& kNamesNew = detail::BasicTypeNames();
-    // Files from before version 4 have no version line, upper-case type names and the
-    // type after the field name.
-    static const std::array<std::string, TypesCount> kNamesOld = {
-      "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
-      "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
-    };
-
-    // Compare the whole type token (before any "[...]"): "float64Pose" is a custom type.
-    auto typeToken = [](const std::string& spec) {
-      return spec.substr(0, spec.find('['));
-    };
-    for(size_t i = 0; i < TypesCount; i++)
-    {
-      if(typeToken(str_left) == kNamesNew[i])
-      {
-        field.type = static_cast<BasicType>(i);
-        break;
-      }
-      if(!has_version_line && typeToken(str_right) == kNamesOld[i])
-      {
-        field.type = static_cast<BasicType>(i);
-        std::swap(str_type, str_name);
-        break;
-      }
-    }
-
-    auto offset = str_type->find_first_of(" [");
-    if(field.type != BasicType::OTHER)
-    {
-      field.type_name = kNamesNew[static_cast<size_t>(field.type)];
-    }
-    else
-    {
-      field.type_name = str_type->substr(0, offset);
-    }
-
-    if(offset != std::string::npos && str_type->at(offset) == '[')
-    {
-      field.is_vector = true;
-      auto pos = str_type->find(']', offset);
-      if(pos == std::string::npos)
-      {
-        throw std::runtime_error("Unterminated array size in: " + line);
-      }
-      if(pos != offset + 1)
-      {
-        const std::string number_string = str_type->substr(offset + 1, pos - offset - 1);
-        if(number_string.empty() ||
-           number_string.find_first_not_of("0123456789") != std::string::npos)
+        const auto number = detail::ParseUnsigned(value);
+        if(!number)
         {
-          throw std::runtime_error("Invalid array size in: " + line);
+          throw std::runtime_error("DataTamerParser: invalid version in: " + line);
         }
-        const auto extent = detail::ParseArrayExtent(number_string);
-        if(!extent)
+        // Version 4 differs only in how the hash was computed.
+        if(*number != uint64_t(SCHEMA_VERSION) && *number != 4)
         {
-          throw std::runtime_error("Array size out of range (1..65535) in: " + line);
+          throw std::runtime_error("Wrong SCHEMA_VERSION");
         }
-        field.array_size = *extent;
+        version = int(*number);
+        continue;
+      }
+      if(detail::ReadHeaderValue(line, "### hash:", value))
+      {
+        const auto number = detail::ParseUnsigned(value);
+        if(!number)
+        {
+          throw std::runtime_error("DataTamerParser: invalid hash in: " + line);
+        }
+        declared_schema = *number;
+        continue;
+      }
+      if(detail::ReadHeaderValue(line, "### channel_name:", value))
+      {
+        schema.channel_name = value;
+        legacy_hash = std::hash<std::string>()(schema.channel_name);
+        continue;
       }
     }
 
-    field.field_name = *str_name;
-    trimString(field.field_name);
-
+    TypeField field = detail::ParseFieldLine(line, version == 0);
     if(version == 4 && field_vector == &schema.fields)
     {
       legacy_hash = AddFieldToHash(field, legacy_hash);
     }
-    field_vector->push_back(field);
+    field_vector->push_back(std::move(field));
   }
   if(!any_line)
   {
