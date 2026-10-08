@@ -80,5 +80,22 @@ class WorkBound(unittest.TestCase):
         self.assertEqual(values, {})
 
 
+class SchemaHeaders(unittest.TestCase):
+    def test_empty_text_is_rejected(self):
+        for text in ("", "\n", "  \n\r\n   \n"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                dt.parse_schema(text)
+
+    def test_text_with_headers_only_is_a_schema_without_fields(self):
+        schema = dt.parse_schema("### version: 5\n### hash: 9\n### channel_name: c\n")
+        self.assertEqual((schema.hash, schema.channel_name, schema.fields), (9, "c", []))
+
+    def test_header_value_may_follow_the_colon_directly(self):
+        schema = dt.parse_schema(
+            "### version:5\n### hash:7\n### channel_name:my chan\nfloat64 x\n")
+        self.assertEqual((schema.hash, schema.channel_name), (7, "my chan"))
+        self.assertEqual(schema.fields, [dt.Field("x", "float64")])
+
+
 if __name__ == "__main__":
     unittest.main()

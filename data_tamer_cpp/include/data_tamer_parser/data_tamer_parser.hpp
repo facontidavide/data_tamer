@@ -854,6 +854,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
   uint64_t legacy_hash = 0;  // version 4 recomputation, field by field
 
   std::vector<TypeField>* field_vector = &schema.fields;
+  bool any_line = false;
 
   while(std::getline(ss, line))
   {
@@ -862,6 +863,7 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     {
       continue;
     }
+    any_line = true;
     if(line.find("==============================") != std::string::npos)
     {
       std::getline(ss, line);
@@ -876,47 +878,54 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       continue;
     }
 
-    // Split at the first space: "<type> <name>", or "### key: value" after the key.
-    auto space_pos = line.find(' ');
-    if(space_pos == std::string::npos)
-    {
-      throw std::runtime_error("Unexpected line: " + line);
-    }
-    if(line.find("### ") == 0)
-    {
-      space_pos = line.find(' ', 5);
-    }
-
-    std::string str_left = line.substr(0, space_pos);
-    std::string str_right = line.substr(space_pos + 1, line.size() - (space_pos + 1));
-    trimString(str_left);
-    trimString(str_right);
-
-    const std::string* str_type = &str_left;
-    const std::string* str_name = &str_right;
-
-    if(str_left == "### version:")
+    // Headers: "### key: value", the value being what follows the colon.
+    std::string header_value;
+    auto isHeader = [&](const std::string& key) {
+      const std::string prefix = "### " + key + ":";
+      if(line.compare(0, prefix.size(), prefix) != 0)
+      {
+        return false;
+      }
+      header_value = line.substr(prefix.size());
+      trimString(header_value);
+      return true;
+    };
+    if(isHeader("version"))
     {
       // Version 4 differs only in how the hash was computed.
-      version = std::stoi(str_right);
+      version = std::stoi(header_value);
       if(version != SCHEMA_VERSION && version != 4)
       {
         throw std::runtime_error("Wrong SCHEMA_VERSION");
       }
       continue;
     }
-    if(str_left == "### hash:")
+    if(isHeader("hash"))
     {
-      declared_schema = std::stoull(str_right);
+      declared_schema = std::stoull(header_value);
       continue;
     }
-
-    if(str_left == "### channel_name:")
+    if(isHeader("channel_name"))
     {
-      schema.channel_name = str_right;
+      schema.channel_name = header_value;
       legacy_hash = std::hash<std::string>()(schema.channel_name);
       continue;
     }
+
+    // Split at the first space: "<type> <name>".
+    const auto space_pos = line.find(' ');
+    if(space_pos == std::string::npos)
+    {
+      throw std::runtime_error("Unexpected line: " + line);
+    }
+
+    std::string str_left = line.substr(0, space_pos);
+    std::string str_right = line.substr(space_pos + 1);
+    trimString(str_left);
+    trimString(str_right);
+
+    const std::string* str_type = &str_left;
+    const std::string* str_name = &str_right;
 
     TypeField field;
 
@@ -989,6 +998,10 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
       legacy_hash = AddFieldToHash(field, legacy_hash);
     }
     field_vector->push_back(field);
+  }
+  if(!any_line)
+  {
+    throw std::runtime_error("DataTamerParser: empty schema text");
   }
   // The declared hash is the one snapshots carry. check_hash recomputes it with the
   // recipe of the text's version.

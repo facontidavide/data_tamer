@@ -195,3 +195,41 @@ TEST(ParserRobustness, MinimumSizeOfNestedArraysSaturatesInsteadOfWrapping)
   EXPECT_EQ(detail::MinFieldSize(schema.fields.at(0), schema.custom_types, cache, 0),
             detail::kHugeSize);
 }
+
+// Schema text: headers and empty input
+
+TEST(ParserRobustness, EmptyTextIsRejected)
+{
+  for(const char* text : { "", "\n", "  \n\r\n   \n" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << "[" << text << "]";
+  }
+}
+
+TEST(ParserRobustness, TextWithHeadersOnlyIsASchemaWithoutFields)
+{
+  const auto schema = BuildSchemaFromText("### version: 5\n### hash: 9\n### "
+                                          "channel_name: c\n");
+  EXPECT_EQ(schema.hash, 9u);
+  EXPECT_EQ(schema.channel_name, "c");
+  EXPECT_TRUE(schema.fields.empty());
+}
+
+TEST(ParserRobustness, HeaderValueMayFollowTheColonDirectly)
+{
+  const auto schema = BuildSchemaFromText("### version:5\n### hash:7\n### "
+                                          "channel_name:my chan\nfloat64 x\n");
+  EXPECT_EQ(schema.hash, 7u);
+  EXPECT_EQ(schema.channel_name, "my chan");
+  ASSERT_EQ(schema.fields.size(), 1u);
+  EXPECT_EQ(schema.fields[0].field_name, "x");
+  EXPECT_EQ(schema.fields[0].type, BasicType::FLOAT64);
+}
+
+TEST(ParserRobustness, LegacyTextWithoutAnyHeaderIsStillRead)
+{
+  const auto schema = BuildSchemaFromText("float64 x\nint8[3] y\n");
+  ASSERT_EQ(schema.fields.size(), 2u);
+  EXPECT_EQ(schema.fields[1].field_name, "y");
+  EXPECT_EQ(schema.fields[1].array_size, 3u);
+}

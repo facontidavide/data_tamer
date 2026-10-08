@@ -155,9 +155,13 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     lines = iter(text.splitlines())
     target = schema.fields
     last_type = ""
+    seen_line = False
     for raw in lines:
         line = raw.strip()
-        if not line or line.startswith("====="):
+        if not line:
+            continue
+        seen_line = True
+        if line.startswith("====="):
             continue
         if line.startswith("### version:"):
             if int(line.split(":", 1)[1]) not in _READABLE_VERSIONS:
@@ -176,6 +180,8 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             break
         else:
             target.append(_parse_field_line(line))
+    if not seen_line:
+        raise ValueError("empty schema text")
     if verify_hash and schema.hash != schema_hash(text):
         raise ValueError("schema hash does not match its text")
     return schema
