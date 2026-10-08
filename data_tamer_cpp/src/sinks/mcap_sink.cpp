@@ -155,9 +155,13 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
 
   // If reset_time is exceeded, continue in a new numbered file (the default), or
   // truncate the current one if create_file_on_reset was disabled (that discards
-  // the data, but bounds the disk usage).
+  // the data, but bounds the disk usage). A reset_time of 0 disables resets.
+  if(_p->reset_time == std::chrono::seconds(0))
+  {
+    return;
+  }
   const auto now = std::chrono::system_clock::now();
-  if(_p->reset_time != std::chrono::seconds(0) && now - _p->start_time > _p->reset_time)
+  if(now - _p->start_time > _p->reset_time)
   {
     _p->start_time = now;  // a failed rollover is tried again after another reset_time
     if(_p->create_file_on_reset)
