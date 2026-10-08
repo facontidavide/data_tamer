@@ -97,6 +97,16 @@ class SchemaHeaders(unittest.TestCase):
         self.assertEqual(schema.fields, [dt.Field("x", "float64")])
 
 
+    def test_line_that_only_looks_like_a_header_is_a_field_line(self):
+        # the key must match exactly and the colon must follow it directly
+        for near_miss in ("### hash 7", "### hashes: 7", "###hash: 7", "### Hash: 7",
+                          "### hash : 7", "### channel_name", "### version"):
+            with self.subTest(near_miss=near_miss):
+                schema = dt.parse_schema(HEADER + near_miss + "\n")
+                self.assertEqual((schema.hash, schema.channel_name, len(schema.fields)),
+                                 (0, "c", 1))
+
+
 class SchemaNumbers(unittest.TestCase):
     TAIL = "### channel_name: c\n\nfloat64 x\n"
 

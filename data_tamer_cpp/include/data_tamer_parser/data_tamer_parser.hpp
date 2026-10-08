@@ -952,15 +952,21 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
       break;
     }
 
-    // Headers: "### key: value", the value being what follows the colon.
+    // Headers: "### key: value", the value being what follows the colon. Only a line
+    // that starts with "### " can be one, which spares the other lines the key tests.
+    const bool is_header_line = line.compare(0, 4, "### ") == 0;
     std::string header_value;
-    auto isHeader = [&](const std::string& key) {
-      const std::string prefix = "### " + key + ":";
-      if(line.compare(0, prefix.size(), prefix) != 0)
+    auto isHeader = [&](const char* key) {
+      if(!is_header_line)
       {
         return false;
       }
-      header_value = line.substr(prefix.size());
+      const size_t key_end = 4 + std::strlen(key);
+      if(line.compare(4, key_end - 4, key) != 0 || line.compare(key_end, 1, ":") != 0)
+      {
+        return false;
+      }
+      header_value = line.substr(key_end + 1);
       trimString(header_value);
       return true;
     };

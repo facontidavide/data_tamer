@@ -232,6 +232,20 @@ TEST(ParserRobustness, HeaderValueMayFollowTheColonDirectly)
   EXPECT_EQ(schema.fields[0].type, BasicType::FLOAT64);
 }
 
+TEST(ParserRobustness, LineThatOnlyLooksLikeAHeaderIsAFieldLine)
+{
+  // the key must match exactly and the colon must follow it directly
+  for(const char* near_miss :
+      { "### hash 7", "### hashes: 7", "###hash: 7", "### Hash: 7", "### hash : 7",
+        "### channel_name", "### version" })
+  {
+    const auto schema = BuildSchemaFromText(kHeader + near_miss + "\n");
+    EXPECT_EQ(schema.hash, 1u) << near_miss;
+    EXPECT_EQ(schema.channel_name, "c") << near_miss;
+    EXPECT_EQ(schema.fields.size(), 1u) << near_miss;
+  }
+}
+
 TEST(ParserRobustness, LegacyTextWithoutAnyHeaderIsStillRead)
 {
   const auto schema = BuildSchemaFromText("float64 x\nint8[3] y\n");
