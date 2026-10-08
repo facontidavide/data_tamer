@@ -60,6 +60,10 @@ mask, payload = dt.split_mcap_message(mcap_message_body)
 values = dt.parse_snapshot(schema, mask, payload)
 ```
 
+Malformed input raises `ValueError`: a schema text, a message body that does not match
+its two lengths, a mask shorter than the schema, a truncated payload or one with bytes
+left over.
+
 ROS 2 messages of `ROS2PublisherSink` (`data_tamer_msgs` `Schemas`, `Snapshot`,
 `SnapshotBatch`) are decoded with `SchemaRegistry`, `parse_snapshot_msg()` and
 `iter_snapshot_batch()`; they only read message attributes and need no ROS import.
