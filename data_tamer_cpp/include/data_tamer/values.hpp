@@ -1,7 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <cstring>
+#include <stdexcept>
 #include <typeindex>
 
 #include "data_tamer/custom_types.hpp"
@@ -131,8 +131,7 @@ private:
   static void serializeNumeric(const void* v, const CustomSerializer*,
                                SerializeMe::SpanBytes& dst)
   {
-    std::memcpy(dst.data(), v, sizeof(T));
-    dst.trimFront(sizeof(T));
+    SerializeMe::SerializeIntoBuffer(dst, *static_cast<const T*>(v));
   }
   template <typename T>
   static size_t sizeNumeric(const void*, const CustomSerializer*)
@@ -144,9 +143,9 @@ private:
   static void serializeAtomic(const void* v, const CustomSerializer*,
                               SerializeMe::SpanBytes& dst)
   {
-    const T tmp = static_cast<const std::atomic<T>*>(v)->load(std::memory_order_relaxed);
-    std::memcpy(dst.data(), &tmp, sizeof(T));
-    dst.trimFront(sizeof(T));
+    const T value =
+        static_cast<const std::atomic<T>*>(v)->load(std::memory_order_relaxed);
+    SerializeMe::SerializeIntoBuffer(dst, value);
   }
 
   static void serializeCustom(const void* v, const CustomSerializer* s,
@@ -245,10 +244,14 @@ inline ValuePtr::ValuePtr(const T* pointer, CustomSerializer::Ptr type_info)
     serialize_fn_ = &ValuePtr::serializeCustom;
     size_fn_ = &ValuePtr::sizeCustom;
   }
-  else
+  else if constexpr(IsNumericType<T>())
   {
     serialize_fn_ = &ValuePtr::serializeNumeric<T>;
     size_fn_ = &ValuePtr::sizeNumeric<T>;
+  }
+  else
+  {
+    throw std::invalid_argument("ValuePtr: a custom type needs a serializer");
   }
 }
 

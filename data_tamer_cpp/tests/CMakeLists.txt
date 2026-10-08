@@ -17,6 +17,7 @@ set(DATATAMER_TEST_SOURCES
     sink_lifecycle_tests.cpp
     channel_stats_tests.cpp
     value_ptr_tests.cpp
+    value_ptr_bounds_tests.cpp
     basic_type_tests.cpp
     logged_value_tests.cpp
     shared_state_tests.cpp
