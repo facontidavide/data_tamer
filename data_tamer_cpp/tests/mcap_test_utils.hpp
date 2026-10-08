@@ -73,6 +73,17 @@ inline size_t countMessages(const std::string& path, bool finalized = false)
   return count;
 }
 
+/// Messages counted by the summary at the end of a finalized MCAP file.
+inline uint64_t summaryMessageCount(const std::string& path)
+{
+  mcap::McapReader reader;
+  EXPECT_TRUE(reader.open(path).ok()) << path;
+  EXPECT_TRUE(reader.readSummary(mcap::ReadSummaryMethod::NoFallbackScan).ok()) << path;
+  const uint64_t count = reader.statistics() ? reader.statistics()->messageCount : 0;
+  reader.close();
+  return count;
+}
+
 /// The log time of each message of an MCAP file, in file order.
 inline std::vector<uint64_t> logTimes(const std::string& path)
 {

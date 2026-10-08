@@ -39,6 +39,7 @@ set(DATATAMER_TEST_SOURCES
     mcap_ring_sink_time_jump_tests.cpp
     mcap_ring_sink_callback_tests.cpp
     dummy_sink_tests.cpp
+    mcap_negative_timestamp_tests.cpp
     wire_format_tests.cpp
     name_tests.cpp
     registry_limit_tests.cpp

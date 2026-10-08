@@ -96,7 +96,8 @@ struct MCAPRingStats
  * hardware. With trigger time T, the dump holds the stored snapshots of every channel
  * stamped in [T - window, T + post_trigger]. It is complete at the first delivered
  * snapshot stamped after T + post_trigger: a snapshot of another channel delivered
- * later is not included, even if stamped earlier.
+ * later is not included, even if stamped earlier. A snapshot with a negative timestamp
+ * is not stored and is counted in SinkWorker::errors().
  *
  * Threads. onSnapshot() copies each snapshot into the ring, releases its pool slot at
  * once and allocates nothing. A finished dump is copied (a memcpy of up to capacity_bytes

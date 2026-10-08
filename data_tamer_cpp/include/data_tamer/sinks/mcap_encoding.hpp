@@ -115,13 +115,18 @@ inline void EncodeMessageBody(ByteSpan mask, ByteSpan payload, std::vector<uint8
 
 /// Write one message: `timestamp` (nanoseconds since the epoch) becomes logTime and
 /// publishTime. `scratch` receives the encoded body: reuse it across calls to avoid
-/// allocations, and do not pass it as `mask` or `payload`. Returns the writer's status,
-/// and throws like EncodeMessageBody().
+/// allocations, and do not pass it as `mask` or `payload`. Returns the writer's status.
+/// Throws std::invalid_argument if `timestamp` is negative (MCAP times are unsigned),
+/// and like EncodeMessageBody().
 inline mcap::Status WriteMessage(mcap::McapWriter& writer, mcap::ChannelId channel_id,
                                  uint32_t sequence, std::chrono::nanoseconds timestamp,
                                  ByteSpan mask, ByteSpan payload,
                                  std::vector<uint8_t>& scratch)
 {
+  if(timestamp.count() < 0)
+  {
+    throw std::invalid_argument("data_tamer MCAP message: negative timestamp");
+  }
   EncodeMessageBody(mask, payload, scratch);
   mcap::Message msg;
   msg.channelId = channel_id;

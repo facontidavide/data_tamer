@@ -30,7 +30,8 @@ std::string NumberedPath(const std::string& path, size_t number);
  * SinkWorker::stop() (and the worker's destructor) delivers what is queued and closes
  * the file. A SinkWorker::start() after a stop() records into the next numbered file,
  * even with setCreateNewFileOnReset(false), unless restartRecording() opened one
- * meanwhile.
+ * meanwhile. A snapshot with a negative timestamp (MCAP times are unsigned) is not
+ * written and is counted in SinkWorker::errors().
  */
 class MCAPSink : public DataSink
 {
