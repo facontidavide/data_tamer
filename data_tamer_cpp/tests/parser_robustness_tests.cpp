@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -506,4 +507,29 @@ TEST(ParserRobustness, MalformedMcapMessageBodyIsRejected)
     EXPECT_THROW((void)SplitMcapMessage({ body.data(), body.size() }), std::runtime_error)
         << name;
   }
+}
+
+// Default construction
+
+TEST(ParserRobustness, DefaultConstructedViewsAndFieldsAreEmpty)
+{
+  // default-initialization (not value-initialization) of an object whose storage held
+  // something else leaves a member without a default member initializer as it was
+  alignas(SnapshotView) unsigned char storage[sizeof(SnapshotView)];
+  std::memset(storage, 0xAB, sizeof(storage));
+  const auto* view = new(storage) SnapshotView;
+  EXPECT_EQ(view->schema_hash, 0u);
+  EXPECT_EQ(view->timestamp, 0u);
+  EXPECT_EQ(view->active_mask.size, 0u);
+  EXPECT_EQ(view->active_mask.data, nullptr);
+  EXPECT_EQ(view->payload.size, 0u);
+  EXPECT_EQ(view->payload.data, nullptr);
+
+  alignas(TypeField) unsigned char field_storage[sizeof(TypeField)];
+  std::memset(field_storage, 0xAB, sizeof(field_storage));
+  const auto* field = new(field_storage) TypeField;
+  EXPECT_FALSE(field->is_vector);
+  EXPECT_EQ(field->array_size, 0u);
+  EXPECT_EQ(field->type, BasicType::OTHER);
+  field->~TypeField();
 }

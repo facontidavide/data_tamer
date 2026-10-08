@@ -79,7 +79,7 @@ struct TypeField
   std::string field_name;
   BasicType type = BasicType::OTHER;
   std::string type_name;
-  bool is_vector = 0;
+  bool is_vector = false;
   uint32_t array_size = 0;
 
   bool operator==(const TypeField& other) const;
@@ -113,10 +113,10 @@ struct Schema
 struct SnapshotView
 {
   /// Hash of the schema that decodes this snapshot.
-  uint64_t schema_hash;
+  uint64_t schema_hash = 0;
 
   /// Timestamp in nanoseconds, unused by the parser.
-  uint64_t timestamp;
+  uint64_t timestamp = 0;
 
   /// One bit per top-level field, least significant bit first (docs/wire_format.md,
   /// section 3.1).
