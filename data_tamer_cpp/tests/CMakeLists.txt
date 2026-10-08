@@ -168,6 +168,11 @@ data_tamer_compile_fail_test(fixed_size_of_an_undescribed_type_is_rejected
     get_fixed_size.cpp DT_UNDESCRIBED_TYPE)
 data_tamer_compile_fail_test(serializer_is_not_built_from_a_name_implicitly
     custom_serializer_constructor.cpp DT_IMPLICIT_NAME)
+foreach(function TO_STR TO_YAML RENDER_SCHEMA)
+    string(TOLOWER ${function} function_name)
+    data_tamer_compile_fail_test(${function_name}_result_is_nodiscard
+        schema_nodiscard.cpp DT_IGNORE_${function})
+endforeach()
 
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)

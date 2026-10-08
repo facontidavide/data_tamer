@@ -205,14 +205,14 @@ struct Schema
   friend std::ostream& operator<<(std::ostream& os, const Schema& schema);
 };
 
-std::string ToStr(const Schema& schema);
+[[nodiscard]] std::string ToStr(const Schema& schema);
 
 /**
  * @brief The schema as YAML, schema version 6 (docs/wire_format.md, section 2.1):
  * shorter when field names are "/"-separated paths. Schema::hash is the same as for
  * ToStr(), because it is always computed over that text.
  */
-std::string ToYaml(const Schema& schema);
+[[nodiscard]] std::string ToYaml(const Schema& schema);
 
 /// Rendering of a schema text. Both carry the same Schema::hash; parsers detect which.
 enum class SchemaFormat
@@ -224,7 +224,7 @@ enum class SchemaFormat
 };
 
 /// ToStr(schema) or ToYaml(schema), depending on `format`.
-std::string RenderSchema(const Schema& schema, SchemaFormat format);
+[[nodiscard]] std::string RenderSchema(const Schema& schema, SchemaFormat format);
 
 /**
  * @brief FNV-1a 64 over a schema text without its "### hash:" line (docs/wire_format.md,
