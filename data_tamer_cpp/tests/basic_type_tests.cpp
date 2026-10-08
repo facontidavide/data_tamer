@@ -1,5 +1,4 @@
 #include "data_tamer/channel.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include "test_sinks.hpp"
 
@@ -13,6 +12,7 @@
 #include <vector>
 
 using namespace DataTamer;
+using DataTamerTest::Recording;
 
 namespace
 {
@@ -41,26 +41,6 @@ std::string_view TypeDefinition(Counters& counters, AddField& add)
   return "Counters";
 }
 
-// A channel with a DummySink: what one registered value records.
-struct Recording
-{
-  DataTamerTest::Attached<DummySink> sink;
-  std::shared_ptr<LogChannel> channel = LogChannel::create("chan");
-
-  Recording() { channel->addDataSink(sink); }
-
-  TypeField field(size_t index = 0) const
-  {
-    return channel->getSchema().fields.at(index);
-  }
-
-  Bytes payload()
-  {
-    EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-    sink.drain();
-    return sink->latestSnapshot().payload;
-  }
-};
 }  // namespace
 
 // The mapping that existed before must not move.

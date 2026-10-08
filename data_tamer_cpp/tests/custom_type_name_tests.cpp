@@ -1,5 +1,4 @@
 #include "data_tamer/channel.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include "test_sinks.hpp"
 
@@ -64,25 +63,12 @@ std::string_view TypeDefinition(HoldsSecond& holder, AddField& add)
   return "HoldsSecond";
 }
 
-// A channel whose first value is a first::Pt.
-struct ChannelWithFirst
+// A recording whose first value is a first::Pt.
+struct ChannelWithFirst : DataTamerTest::Recording
 {
-  DataTamerTest::Attached<DummySink> sink;
-  std::shared_ptr<LogChannel> channel = LogChannel::create("chan");
   first::Pt first_value;
 
-  ChannelWithFirst()
-  {
-    channel->addDataSink(sink);
-    channel->registerValue("first", &first_value);
-  }
-
-  size_t recordedPayloadSize()
-  {
-    EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-    sink.drain();
-    return sink->latestPayloadSize();
-  }
+  ChannelWithFirst() { channel->registerValue("first", &first_value); }
 };
 }  // namespace
 
@@ -106,7 +92,7 @@ TEST(CustomTypeNames, ASecondCppTypeWithTheSameNameIsRejected)
   EXPECT_NE(error.find("'Pt'"), std::string::npos) << "message: " << error;
   // The rejected value was not registered: only the first Pt is recorded.
   EXPECT_EQ(fixture.channel->getSchema().fields.size(), 1u);
-  EXPECT_EQ(fixture.recordedPayloadSize(), 2 * sizeof(double));
+  EXPECT_EQ(fixture.payloadSize(), 2 * sizeof(double));
 }
 
 TEST(CustomTypeNames, AMemberWithTheSameNameIsRejected)
@@ -140,7 +126,7 @@ TEST(CustomTypeNames, TheSameCppTypeMayBeRegisteredAgain)
   EXPECT_NO_THROW(fixture.channel->registerValue("many", &many));
   EXPECT_NO_THROW(fixture.channel->registerValue("two", &two));
   // 16 (first) + 16 (again) + 4 + 2 * 16 (many) + 2 * 16 (two)
-  EXPECT_EQ(fixture.recordedPayloadSize(), 100u);
+  EXPECT_EQ(fixture.payloadSize(), 100u);
 }
 
 // Each channel has its own type names.

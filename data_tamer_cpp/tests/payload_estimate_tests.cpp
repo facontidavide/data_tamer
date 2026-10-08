@@ -1,5 +1,4 @@
 #include "data_tamer/channel.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include "test_sinks.hpp"
 
@@ -33,9 +32,8 @@ std::string_view TypeDefinition(Padded& item, AddField& add)
 // vector of structs counts the bytes written, not the bytes in memory.
 TEST(PayloadEstimate, VectorOfPaddedStructsFitsASlotOfExactlyItsSize)
 {
-  auto channel = LogChannel::create("estimate");
-  DataTamerTest::Attached<DummySink> sink = DataTamerTest::manual<DummySink>();
-  channel->addDataSink(sink);
+  DataTamerTest::Recording recording;
+  const auto& channel = recording.channel;
   std::vector<Padded> items(2);
   channel->registerValue("items", &items);
 
@@ -45,22 +43,17 @@ TEST(PayloadEstimate, VectorOfPaddedStructsFitsASlotOfExactlyItsSize)
   items.resize(100);
 
   EXPECT_EQ(channel->tryTakeSnapshot(), SnapshotResult::ok);
-  sink.drain();
-  EXPECT_EQ(sink->latestPayloadSize(), payload);
+  recording.sink.drain();
+  EXPECT_EQ(recording.sink->latestPayloadSize(), payload);
   EXPECT_EQ(channel->stats().dropped_oversize, 0u);
 }
 
 // The bytes are the format's: the length, then each item with no padding.
 TEST(PayloadEstimate, VectorOfStructsIsWrittenWithoutPadding)
 {
-  auto channel = LogChannel::create("estimate");
-  DataTamerTest::Attached<DummySink> sink = DataTamerTest::manual<DummySink>();
-  channel->addDataSink(sink);
+  DataTamerTest::Recording recording;
   std::vector<Padded> items = { Padded{ 'x', 1.5 }, Padded{ 'y', -2.0 } };
-  channel->registerValue("items", &items);
-
-  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-  sink.drain();
+  recording.channel->registerValue("items", &items);
 
   // The count (little endian), then 'x' and 1.5, then 'y' and -2.0.
   const double first = 1.5;
@@ -71,6 +64,5 @@ TEST(PayloadEstimate, VectorOfStructsIsWrittenWithoutPadding)
   std::memcpy(&expected[5], &first, sizeof(first));
   expected[13] = 'y';
   std::memcpy(&expected[14], &second, sizeof(second));
-  const auto& payload = sink->latestSnapshot().payload;
-  EXPECT_EQ(std::vector<uint8_t>(expected.begin(), expected.end()), payload);
+  EXPECT_EQ(std::vector<uint8_t>(expected.begin(), expected.end()), recording.payload());
 }

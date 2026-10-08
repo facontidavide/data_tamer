@@ -2,6 +2,7 @@
 
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
+#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include <gtest/gtest.h>
 
@@ -64,6 +65,33 @@ channelWith(const std::shared_ptr<DataTamer::SinkWorker>& sink, T* value,
   channel->addDataSink(sink);
   return channel;
 }
+
+/// A channel named "chan" with a DummySink attached, for the tests of what registered
+/// values record. The delivery is manual: snapshot() delivers what it takes.
+struct Recording
+{
+  Attached<DataTamer::DummySink> sink = manual<DataTamer::DummySink>();
+  std::shared_ptr<DataTamer::LogChannel> channel = DataTamer::LogChannel::create("chan");
+
+  Recording() { channel->addDataSink(sink); }
+
+  /// A field of the schema, counted in the order of registration.
+  DataTamer::TypeField field(size_t index = 0) const
+  {
+    return channel->getSchema().fields.at(index);
+  }
+
+  /// Takes a snapshot, delivers it and returns it as the sink received it.
+  DataTamer::Snapshot snapshot()
+  {
+    EXPECT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
+    sink.drain();
+    return sink->latestSnapshot();
+  }
+
+  DataTamer::PayloadVector payload() { return snapshot().payload; }
+  size_t payloadSize() { return snapshot().payload.size(); }
+};
 
 /// Snapshots a started channel accepts until its pool is exhausted. With
 /// nothing delivered meanwhile, that is the pool capacity.

@@ -1,7 +1,6 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
 #include "data_tamer/custom_types.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 #include "decode_utils.hpp"
 #include "guarded_buffer.hpp"
 #include "test_sinks.hpp"
@@ -34,72 +33,59 @@ std::string_view TypeDefinition(Named& p, AddField& add)
 
 TEST(StringEncoding, StringMemberIsSerializedAsACharVector)
 {
-  auto channel = DataTamer::LogChannel::create("strings");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   Named named;
   named.name = "abc";
-  channel->registerValue("n", &named);
-  channel->addDataSink(sink);
-  ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
-  sink.drain();
+  recording.channel->registerValue("n", &named);
 
-  const auto snapshot = sink->latestSnapshot();
+  const auto snapshot = recording.snapshot();
   EXPECT_EQ(snapshot.payload, (std::vector<uint8_t>{ 1, 3, 0, 0, 0, 'a', 'b', 'c' }));
-  EXPECT_NE(DataTamer::ToStr(channel->getSchema()).find("char[] name\n"),
+  EXPECT_NE(DataTamer::ToStr(recording.channel->getSchema()).find("char[] name\n"),
             std::string::npos);
   const std::map<std::string, double> expected = {
     { "n/tag", 1 }, { "n/name[0]", 'a' }, { "n/name[1]", 'b' }, { "n/name[2]", 'c' }
   };
-  EXPECT_EQ(DataTamerTest::decode(*channel, snapshot), expected);
+  EXPECT_EQ(DataTamerTest::decode(*recording.channel, snapshot), expected);
 }
 
 TEST(StringEncoding, RegisteredStringIsSerializedAsACharVector)
 {
-  auto channel = DataTamer::LogChannel::create("strings");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   std::string text = "abc";
-  channel->registerValue("s", &text);
-  channel->addDataSink(sink);
-  ASSERT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
-  sink.drain();
+  recording.channel->registerValue("s", &text);
 
-  EXPECT_EQ(sink->latestSnapshot().payload,
-            (std::vector<uint8_t>{ 3, 0, 0, 0, 'a', 'b', 'c' }));
+  EXPECT_EQ(recording.payload(), (std::vector<uint8_t>{ 3, 0, 0, 0, 'a', 'b', 'c' }));
 }
 
 TEST(StringEncoding, StringLongerThan64KiBIsSerialized)
 {
-  auto channel = DataTamer::LogChannel::create("strings");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   Named named;
   named.name = std::string(70 * 1024, 'x');
-  channel->registerValue("n", &named);
-  channel->addDataSink(sink);
-  channel->startLogging();
+  recording.channel->registerValue("n", &named);
+  recording.channel->startLogging();
 
   DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
-  EXPECT_NO_THROW(result = channel->tryTakeSnapshot());
+  EXPECT_NO_THROW(result = recording.channel->tryTakeSnapshot());
   EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
-  sink.drain();
-  EXPECT_EQ(sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
+  recording.sink.drain();
+  EXPECT_EQ(recording.sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
 }
 
 TEST(StringEncoding, StringThatGrowsPast64KiBIsSerialized)
 {
-  auto channel = DataTamer::LogChannel::create("strings");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   Named named;
   named.name = "abc";
-  channel->registerValue("n", &named);
-  channel->addDataSink(sink);
-  channel->startLogging();
+  recording.channel->registerValue("n", &named);
+  recording.channel->startLogging();
 
   named.name = std::string(70 * 1024, 'x');
   DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
-  EXPECT_NO_THROW(result = channel->takeSnapshot());
+  EXPECT_NO_THROW(result = recording.channel->takeSnapshot());
   EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
-  sink.drain();
-  EXPECT_EQ(sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
+  recording.sink.drain();
+  EXPECT_EQ(recording.sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
 }
 
 TEST(StringEncoding, SerializeMeSizesAndRoundTripsAString)

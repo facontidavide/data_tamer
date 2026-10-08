@@ -1,7 +1,6 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
 #include "data_tamer/custom_types.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
@@ -93,29 +92,23 @@ TEST(SerializeMeSize, ArrayOfFixedSizeElementsKeepsItsSize)
 
 TEST(SerializeMeSize, SnapshotOfAnArrayOfVariableSizeElementsFitsItsSlot)
 {
-  auto channel = DataTamer::LogChannel::create("sizes");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   auto pair = makePair();
-  channel->registerValue("pair", &pair);
-  channel->addDataSink(sink);
-  channel->startLogging();
+  recording.channel->registerValue("pair", &pair);
+  recording.channel->startLogging();
 
-  EXPECT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
-  sink.drain();
-  EXPECT_EQ(sink->latestPayloadSize(), kPairBytes);
+  EXPECT_EQ(recording.payloadSize(), kPairBytes);
 }
 
 TEST(SerializeMeSize, RealTimeSnapshotOfAnArrayOfVariableSizeElementsDoesNotThrow)
 {
-  auto channel = DataTamer::LogChannel::create("sizes");
-  DataTamerTest::Attached<DataTamer::DummySink> sink;
+  DataTamerTest::Recording recording;
   auto pair = makePair();
-  channel->registerValue("pair", &pair);
-  channel->addDataSink(sink);
-  channel->startLogging();
+  recording.channel->registerValue("pair", &pair);
+  recording.channel->startLogging();
 
   DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
-  EXPECT_NO_THROW(result = channel->tryTakeSnapshot());
+  EXPECT_NO_THROW(result = recording.channel->tryTakeSnapshot());
   EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
 }
 

@@ -1,5 +1,4 @@
 #include "data_tamer/channel.hpp"
-#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include "test_sinks.hpp"
 
@@ -11,6 +10,7 @@
 #include <vector>
 
 using namespace DataTamer;
+using DataTamerTest::Recording;
 
 // Class templates with two type parameters have the shape of a container, but these
 // ones describe their fields: they are custom types.
@@ -64,25 +64,6 @@ struct DataTamer::TypeDefinitionTrait<Pair<A, B>>
     return "Pair";
   }
 };
-
-namespace
-{
-// A channel with a DummySink.
-struct Recording
-{
-  DataTamerTest::Attached<DummySink> sink;
-  std::shared_ptr<LogChannel> channel = LogChannel::create("chan");
-
-  Recording() { channel->addDataSink(sink); }
-
-  Bytes payload()
-  {
-    EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-    sink.drain();
-    return sink->latestSnapshot().payload;
-  }
-};
-}  // namespace
 
 // The member is a `Pair`, not a vector of its first parameter ("float64[]").
 TEST(TemplateTypes, AMemberIsDescribedByItsFields)
