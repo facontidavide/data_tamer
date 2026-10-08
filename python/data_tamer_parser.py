@@ -400,15 +400,44 @@ class _Reader:
         return value.decode("latin-1") if type_name == "char" else value
 
 
+def _min_element_size(f: Field, schema: Schema, memo: dict, depth: int) -> int:
+    """Fewest payload bytes one element of `f` takes: the size of a basic type, or the
+    sum of the fewest bytes of each field of the custom type (memo: by type name)."""
+    if f.is_basic:
+        return _STRUCT[f.type_name].size
+    if f.type_name not in schema.custom_types:
+        raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
+    if f.type_name not in memo:
+        if depth > MAX_SCHEMA_DEPTH:
+            raise ValueError("custom types nested too deeply (cyclic schema?)")
+        memo[f.type_name] = sum(_min_field_size(sub, schema, memo, depth + 1)
+                                for sub in schema.custom_types[f.type_name])
+    return memo[f.type_name]
+
+
+def _min_field_size(f: Field, schema: Schema, memo: dict, depth: int) -> int:
+    """Fewest payload bytes `f` takes: its elements at their fewest bytes, or only the
+    4 byte count for a dynamic vector."""
+    if f.is_vector and not f.array_size:
+        return 4
+    return _min_element_size(f, schema, memo, depth) * (f.array_size if f.is_vector else 1)
+
+
 def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
-                 depth: int = 0) -> None:
+                 memo: dict, depth: int = 0) -> None:
     if depth > MAX_SCHEMA_DEPTH:
         raise ValueError("custom types nested too deeply (cyclic schema?)")
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
     if f.is_vector:
         count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
-        if f.is_basic and count * _STRUCT[f.type_name].size > reader.remaining():
-            raise ValueError("payload truncated")
+        if count:
+            # An element takes at least `least` bytes: a count the payload cannot hold is
+            # rejected. Elements of no byte hold no value, however many there are.
+            least = _min_element_size(f, schema, memo, depth)
+            if least == 0:
+                return
+            if count * least > reader.remaining():
+                raise ValueError("payload truncated")
         names = (f"{name}[{i}]" for i in range(count))  # lazy: the count is untrusted
     else:
         names = (name,)
@@ -419,7 +448,7 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
         subs = schema.custom_types[f.type_name]
         for n in names:
             for sub in subs:
-                _parse_field(sub, schema, reader, n, out, depth + 1)
+                _parse_field(sub, schema, reader, n, out, memo, depth + 1)
     else:
         raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
 
@@ -481,9 +510,10 @@ def parse_snapshot(schema: Schema, active_mask: bytes, payload: bytes) -> dict[s
     """Decode one snapshot into {"field/path[i]": value}. Disabled fields are absent."""
     out: dict[str, object] = {}
     reader = _Reader(payload)
+    memo: dict[str, int] = {}
     for index, f in enumerate(schema.fields):
         if get_bit(active_mask, index):
-            _parse_field(f, schema, reader, "", out)
+            _parse_field(f, schema, reader, "", out, memo)
     if reader.pos != len(payload):
         raise ValueError(f"{len(payload) - reader.pos} trailing bytes in payload")
     return out
