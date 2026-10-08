@@ -89,9 +89,6 @@ using StringSize = uint32_t;
 const auto EmptyFuncion = [](const char*, void*) {};
 using EmptyFunc = decltype(EmptyFuncion);
 
-template <typename T1, typename T2>
-using enable_if_same_t = std::enable_if_t<std::is_same_v<T1, T2>>;
-
 }  // namespace SerializeMe
 
 namespace DataTamer
