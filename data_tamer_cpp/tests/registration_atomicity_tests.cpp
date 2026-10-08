@@ -1,50 +1,17 @@
 #include "data_tamer/channel.hpp"
+#include "nested_types.hpp"
 
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 using namespace DataTamer;
+using DataTamerTest::Outer;
+using DataTamerTest::Reading;
 
 namespace
 {
-struct Reading
-{
-  double value = 0;
-};
-template <typename AddField>
-std::string_view TypeDefinition(Reading& reading, AddField& add)
-{
-  add("value", &reading.value);
-  return "Reading";
-}
-
-struct Inner
-{
-  double a = 0;
-};
-template <typename AddField>
-std::string_view TypeDefinition(Inner& inner, AddField& add)
-{
-  add("a", &inner.a);
-  return "Inner";
-}
-
-struct Outer
-{
-  Inner first;
-  std::vector<Inner> rest;
-};
-template <typename AddField>
-std::string_view TypeDefinition(Outer& outer, AddField& add)
-{
-  add("first", &outer.first);
-  add("rest", &outer.rest);
-  return "Outer";
-}
-
 // Everything a registration can change in the schema.
 void ExpectSameSchema(const Schema& after, const Schema& before)
 {

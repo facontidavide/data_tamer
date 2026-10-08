@@ -1,4 +1,5 @@
 #include "data_tamer/channel.hpp"
+#include "nested_types.hpp"
 
 #include <gtest/gtest.h>
 
@@ -12,21 +13,10 @@
 
 using namespace DataTamer;
 using namespace std::chrono_literals;
+using DataTamerTest::Inner;
 
 namespace
 {
-struct Inner
-{
-  double x = 0;
-};
-
-template <typename AddField>
-std::string_view TypeDefinition(Inner& inner, AddField& add)
-{
-  add("x", &inner.x);
-  return "Inner";
-}
-
 struct Middle
 {
   Inner inner;
