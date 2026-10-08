@@ -544,10 +544,7 @@ void MCAPRingSink::onSchema(const Schema& schema)
 void MCAPRingSink::onSnapshot(const SnapshotRef& ref)
 {
   const Snapshot& snapshot = *ref;
-  if(snapshot.timestamp.count() < 0)
-  {
-    throw std::invalid_argument("MCAPRingSink: negative snapshot timestamp");
-  }
+  mcap_encoding::CheckTimestamp(snapshot.timestamp);  // refused before it is stored
   auto& p = *_p;
   std::scoped_lock lock(p.ring_mutex);
   p.has_snapshot = true;
