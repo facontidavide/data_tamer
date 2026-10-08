@@ -2,6 +2,7 @@
 #include "data_tamer/details/snapshot_pool.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "alloc_counter.hpp"
+#include "hang_watchdog.hpp"
 #include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
 
@@ -1098,4 +1099,47 @@ TEST(SinkQueue, EverySnapshotWakesAnIdleWorker)
         << "round " << n;
   }
   sink.worker->stop();
+}
+
+// A snapshot wakes a sleeping worker after it released the write mutex and left its
+// epoch, so another thread can remove and destroy the worker before the wake: the
+// worker's stop() then waits for it. Workers come and go while a channel logs from its
+// own thread, with pauses that let each worker fall asleep between snapshots. A lost
+// wake hangs (the watchdog fails the test), and a wake into a freed worker shows
+// under AddressSanitizer or ThreadSanitizer.
+TEST(SinkQueue, WorkerRemovedAndDestroyedBeforeItsWake)
+{
+  DataTamerTest::expectFinishes(
+      [] {
+        uint64_t value = 0;
+        auto channel = LogChannel::create("owed_wake");
+        channel->registerValue("value", &value);
+        channel->startLogging();
+        const auto pause = [](std::chrono::microseconds length) {
+          const auto until = std::chrono::steady_clock::now() + length;
+          while(std::chrono::steady_clock::now() < until)
+          {
+          }
+        };
+        std::atomic<bool> done{ false };
+        std::atomic<uint64_t> accepted{ 0 };
+        std::thread producer([&] {
+          for(int n = 0; !done; ++n)
+          {
+            pause(std::chrono::microseconds(n % 40));
+            accepted += channel->tryTakeSnapshot() == SnapshotResult::ok ? 1 : 0;
+          }
+        });
+        for(int round = 0; round < 2000; ++round)
+        {
+          auto worker = attach<QueueSink>(Delivery::Threaded);
+          channel->addDataSink(worker);
+          pause(std::chrono::microseconds(round % 100));
+          channel->removeDataSink(worker);
+        }  // the last reference to each worker is dropped here
+        done = true;
+        producer.join();
+        EXPECT_GT(accepted.load(), 0u);
+      },
+      std::chrono::seconds(60));
 }

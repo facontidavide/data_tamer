@@ -120,8 +120,10 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   (`tests/alloc_counter.hpp`): add one when you touch these paths. `takeSnapshot()` may
   block and grow a slot; keep the two variants distinct. The real-time path makes no
   futex call unless a control operation or a `stop()` registered as waiting
-  (`details::WaiterCount` in `src/waiter_count.hpp`, `tests/rt_syscall_tests.cpp`).
-  `WriteMutex::try_lock()`, `unlock()` and `tryLockWithSpin()` are `noexcept`.
+  (`details::WaiterCount` in `src/waiter_count.hpp`, `tests/rt_syscall_tests.cpp`),
+  or a sink's worker sleeps: that wake comes after the write mutex is released
+  (`SinkWorker::Push::wake_owed`). `WriteMutex::try_lock()`, `unlock()` and
+  `tryLockWithSpin()` are `noexcept`.
 - `onSchema()`/`onSnapshot()`/`onStop()`/`onStart()` are serialized by the SinkWorker,
   and control operations (registration, sinks, `startLogging()`) wait for them. Never call a
   control operation from a sink callback or a serializer; inside `scopedWrite()` they are

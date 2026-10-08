@@ -229,8 +229,20 @@ private:
   Attachment* attach(size_t capacity);
   /// No push may follow. Queued snapshots are still delivered, then the queue is freed.
   void detach(Attachment* attachment) noexcept;
-  /// Real-time path: no allocation, no lock. False when the worker is stopped.
-  bool tryPush(Attachment& attachment, SnapshotRef&& snapshot);
+  /// What tryPush() did with a snapshot.
+  enum class Push : uint8_t
+  {
+    refused,   ///< the worker is stopped: the snapshot is left to the caller
+    queued,    ///< the worker runs or polls, and finds the snapshot
+    wake_owed  ///< queued, and the worker sleeps: the caller must call wake() once
+  };
+  /// Real-time path: no allocation, no lock, no system call. The futex call that wakes
+  /// a sleeping worker is left to wake(), so that the caller makes it after releasing
+  /// its own locks.
+  Push tryPush(Attachment& attachment, SnapshotRef&& snapshot);
+  /// Wakes the worker after a push that returned Push::wake_owed: one futex call. Until
+  /// then the worker sleeps, and its stop() and destructor wait.
+  void wake() noexcept;
   /// Serialized with onSnapshot(); exceptions from onSchema() propagate.
   void addSchema(const Schema& schema);
 

@@ -25,8 +25,8 @@ constexpr uint64_t kClosed = uint64_t{ 1 } << 63;
 constexpr size_t kRoundsPerPass = 64;
 
 // How long an idle worker keeps polling for a push before it marks itself
-// asleep. While it polls, post() on the snapshot thread is an increment and a
-// load; once it sleeps, the next post() releases the semaphore, a futex wake on
+// asleep. While it polls, a push costs the snapshot thread an increment and a
+// load; once it sleeps, the next push also releases the semaphore, a futex wake on
 // the snapshot thread. 20 us covers the snapshots one control tick takes of
 // several channels (each a few microseconds of serialization apart), so such a
 // burst costs at most one wake. The price is up to 20 us of one core per idle
@@ -50,23 +50,36 @@ class WorkerWake
 public:
   void post()
   {
-    // seq_cst on both sides: either sleep() sees this increment, or this load
-    // sees `sleeping` set and the release below wakes it.
-    sequence_.fetch_add(1, std::memory_order_seq_cst);
-    if(sleeping_.load(std::memory_order_seq_cst) &&
-       sleeping_.exchange(false, std::memory_order_seq_cst))
+    if(signal())
     {
-      semaphore_.release();
+      release();
     }
   }
+
+  // post() up to the system call: true if it found the worker asleep and took its
+  // sleep, whose release() the caller then owes. The worker stays in acquire() until
+  // that release(), so its thread cannot be joined before it.
+  [[nodiscard]] bool signal()
+  {
+    // seq_cst on both sides: either sleep() sees this increment, or this load
+    // sees `sleeping` set and the release wakes it.
+    sequence_.fetch_add(1, std::memory_order_seq_cst);
+    return sleeping_.load(std::memory_order_seq_cst) &&
+           sleeping_.exchange(false, std::memory_order_seq_cst);
+  }
+
+  // Wakes the worker whose sleep signal() took: one futex wake. Once its counter
+  // increment lets the worker go, libstdc++'s release() touches the semaphore only by
+  // address (the futex call), so a stop() that joins the worker can free it meanwhile.
+  void release() { semaphore_.release(); }
 
   [[nodiscard]] uint32_t observe() const
   {
     return sequence_.load(std::memory_order_seq_cst);
   }
 
-  // Worker only: polls for kSpinBeforeSleep. True if post() was called after
-  // observe() returned `observed`.
+  // Worker only: polls for kSpinBeforeSleep. True if signal() (or post()) ran
+  // after observe() returned `observed`.
   [[nodiscard]] bool spin(uint32_t observed) const
   {
     const auto deadline = std::chrono::steady_clock::now() + kSpinBeforeSleep;
@@ -85,17 +98,18 @@ public:
     }
   }
 
-  // Blocks unless post() was called after observe() returned `observed`.
+  // Blocks unless signal() (or post()) ran after observe() returned `observed`.
   void sleep(uint32_t observed)
   {
     sleeping_.store(true, std::memory_order_seq_cst);
     if(sequence_.load(std::memory_order_seq_cst) != observed &&
        sleeping_.exchange(false, std::memory_order_seq_cst))
     {
-      return;  // withdrawn before any post() saw it
+      return;  // withdrawn before any signal() saw it
     }
-    // Either nothing was posted since `observed`, or a post() took `sleeping`
-    // and releases (or released) the semaphore: one release per sleep.
+    // Either nothing was signalled since `observed`, or a signal() took
+    // `sleeping`, and its caller releases (or released) the semaphore: one release
+    // per sleep.
     semaphore_.acquire();
   }
 
@@ -393,7 +407,7 @@ struct SinkWorker::Pimpl
     }
     // Round robin, one entry per queue and round, until a round finds every
     // queue empty. Each round reads the wake sequence first. A push stores its
-    // tail (release) before its post() increments the sequence (seq_cst), so
+    // tail (release) before its signal() increments the sequence (seq_cst), so
     // a round whose read saw that increment also sees the entry: a push that
     // the last, empty round missed posted after `observed`, and spin() or
     // sleep() return at once instead of a second pass checking for it.
@@ -517,7 +531,7 @@ struct SinkWorker::Pimpl
   std::jthread thread;         // its stop token replaces a run flag
   Delivery delivery = Delivery::Threaded;
   // Written by every push, each on a line of its own (the alignment pads the
-  // struct to whole lines). Posted after every push, and by detach() and stop().
+  // struct to whole lines). Signalled by every push, posted by detach() and stop().
   alignas(64) WorkerWake wake;
   alignas(64) std::atomic<uint64_t> admission{ 0 };
   details::WaiterCount stoppers;  // stop() calls waiting for admitted pushes
@@ -589,7 +603,7 @@ void SinkWorker::detach(Attachment* attachment) noexcept
   _p->wake.post();  // the worker delivers what is left and frees the queue
 }
 
-bool SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
+SinkWorker::Push SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
 {
   // Announce first, check second: a transient increment on a closed sink is
   // withdrawn at once, and stop() waits for it like any other.
@@ -611,15 +625,19 @@ bool SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
   } guard{ _p->admission, _p->stoppers };
   if(_p->admission.fetch_add(1, std::memory_order_acq_rel) & kClosed)
   {
-    return false;
+    return Push::refused;
   }
   // A failed push leaves snapshot intact; its owner releases it once.
   if(!attachment.push(std::move(snapshot)))
   {
-    return false;
+    return Push::refused;
   }
-  _p->wake.post();
-  return true;
+  return _p->wake.signal() ? Push::wake_owed : Push::queued;
+}
+
+void SinkWorker::wake() noexcept
+{
+  _p->wake.release();
 }
 
 void SinkWorker::addSchema(const Schema& schema)

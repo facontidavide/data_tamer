@@ -315,6 +315,28 @@ struct LogChannel::Pimpl
     }
   }
 
+  // The workers whose sleep a snapshot's pushes took (SinkWorker::Push::wake_owed).
+  // Declared before the snapshot's write lock and epoch guard, so destroyed after
+  // them: the futex calls are made with the write mutex released, and writers do not
+  // wait for them. Without the epoch a worker can be removed meanwhile, but it sleeps
+  // until its wake and its stop() and destructor join it, so it is not freed before
+  // wake() has let it go (see WorkerWake::release()).
+  struct OwedWakes
+  {
+    OwedWakes() = default;
+    OwedWakes(const OwedWakes&) = delete;
+    OwedWakes& operator=(const OwedWakes&) = delete;
+    ~OwedWakes()
+    {
+      for(size_t i = 0; i < count; ++i)
+      {
+        workers[i]->wake();
+      }
+    }
+    std::array<SinkWorker*, kMaxSinks> workers;
+    size_t count = 0;
+  };
+
   // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress.
   struct EpochGuard
   {
@@ -973,6 +995,7 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     return SnapshotResult::no_sinks;
   }
 
+  Pimpl::OwedWakes wakes;  // destroyed after write_lock and guard below
   // The write mutex before the epoch: a control operation waiting for the epoch
   // (it may run inside a transaction) never waits for a snapshot that waits for it.
   auto& write_mutex = _p->shared->write_mutex;
@@ -1082,15 +1105,17 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
       continue;
     }
     ++attached;
-    const bool pushed = i == last ? link->sink->tryPush(*link->queue, std::move(parent)) :
-                                    link->sink->tryPush(*link->queue, parent.clone());
-    if(pushed)
-    {
-      ++accepted;
-    }
-    else
+    const auto push = i == last ? link->sink->tryPush(*link->queue, std::move(parent)) :
+                                  link->sink->tryPush(*link->queue, parent.clone());
+    if(push == SinkWorker::Push::refused)
     {
       link->dropped.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    ++accepted;
+    if(push == SinkWorker::Push::wake_owed)
+    {
+      wakes.workers[wakes.count++] = link->sink.get();
     }
   }
   if(accepted == 0)
