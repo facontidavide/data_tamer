@@ -26,6 +26,7 @@ set(DATATAMER_TEST_SOURCES
     channel_control_tests.cpp
     registration_atomicity_tests.cpp
     channel_capacity_tests.cpp
+    payload_estimate_tests.cpp
     transaction_tests.cpp
     abi_tests.cpp
     locked_reference_tests.cpp

@@ -568,7 +568,7 @@ inline RegistrationID LogChannel::registerValue(const std::string& prefix,
     PendingTypes types;
     discoverTypes<T>(types);
     auto def = typeRegistry().getSerializer<T>();
-    return registerValueWithTypes(prefix, ValuePtr(vect), def, std::move(types));
+    return registerValueWithTypes(prefix, ValuePtr(vect, def), def, std::move(types));
   }
 }
 
