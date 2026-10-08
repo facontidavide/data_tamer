@@ -310,7 +310,8 @@ public:
 
   /// Deprecated: read Stats::dropped_by_sink. Publications this sink refused; zero if
   /// it is not attached.
-  [[nodiscard]] uint64_t droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const;
+  [[deprecated("read stats().dropped_by_sink")]] [[nodiscard]] uint64_t
+  droppedSnapshots(const std::shared_ptr<SinkWorker>& sink) const;
 
   /// Publications one attached sink refused. See sinkDropped().
   struct SinkDrops

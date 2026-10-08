@@ -26,6 +26,7 @@ using namespace DataTamer;
 using DataTamerTest::attach;
 using DataTamerTest::Attached;
 using DataTamerTest::channelWith;
+using DataTamerTest::droppedBy;
 using DataTamerTest::manual;
 using Delivery = SinkWorker::Delivery;
 
@@ -99,8 +100,8 @@ TEST(SinkQueue, RefusedFanoutReleasesItsReferenceWithoutExhaustingPool)
     running.drain();
   }
   EXPECT_EQ(received, 224);
-  EXPECT_EQ(channel->droppedSnapshots(stopped), 192u);
-  EXPECT_EQ(channel->droppedSnapshots(running), 0u);
+  EXPECT_EQ(droppedBy(*channel, stopped), 192u);
+  EXPECT_EQ(droppedBy(*channel, running), 0u);
   EXPECT_EQ(channel->poolExhausted(), 0u);
   stopped.worker->start();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
@@ -124,7 +125,7 @@ TEST(SinkQueue, PoolExhaustionIsSeparateAndRetainedSlotsAreReusable)
   EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->poolExhausted(), 1u);
   EXPECT_EQ(channel->stats().pool_exhausted, 1u);
-  EXPECT_EQ(channel->droppedSnapshots(sink), 0u);
+  EXPECT_EQ(droppedBy(*channel, sink), 0u);
   retained.clear();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   channel->removeDataSink(sink);
@@ -280,8 +281,8 @@ TEST(SinkQueue, RejectedWhenEverySinkRefusesPartialWhenSomeDo)
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::partial);
   second.worker->stop();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::rejected);
-  EXPECT_EQ(channel->droppedSnapshots(first), 2u);
-  EXPECT_EQ(channel->droppedSnapshots(second), 1u);
+  EXPECT_EQ(droppedBy(*channel, first), 2u);
+  EXPECT_EQ(droppedBy(*channel, second), 1u);
   first.worker->start();
   second.worker->start();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
@@ -640,8 +641,8 @@ TEST(SinkQueue, FastConsumerCannotReleaseParentBeforeSecondFanout)
   first.worker->stop();
   second.worker->stop();
   EXPECT_GT(accepted, 0u);
-  EXPECT_EQ(channel->droppedSnapshots(first), 0u);
-  EXPECT_EQ(channel->droppedSnapshots(second), 0u);
+  EXPECT_EQ(droppedBy(*channel, first), 0u);
+  EXPECT_EQ(droppedBy(*channel, second), 0u);
   EXPECT_EQ(received[0].size(), accepted);
   EXPECT_EQ(received[0], received[1]);
 }
@@ -848,7 +849,7 @@ TEST(SinkQueue, PoolIsTheOnlyBoundAcrossChannelsRoundsAndReattachment)
   counting.verify(whole_pools);
   for(size_t i = 0; i < kChannels; ++i)
   {
-    EXPECT_EQ(counting.channels[i]->droppedSnapshots(sink), 0u);
+    EXPECT_EQ(droppedBy(*counting.channels[i], sink), 0u);
   }
 }
 

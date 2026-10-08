@@ -188,9 +188,12 @@ TEST(ChannelStats, DroppedIsCountedPerSink)
   EXPECT_EQ(stats.attempts, 4u);
 
   // The deprecated per-sink getter agrees.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   EXPECT_EQ(channel->droppedSnapshots(a), 0u);
   EXPECT_EQ(channel->droppedSnapshots(b), 4u);
   EXPECT_EQ(channel->droppedSnapshots(c), 1u);
+#pragma GCC diagnostic pop
 
   // sinkDropped() is the building block: one call returns the whole table, and
   // the count of attached sinks even when the arrays are too small for it.
@@ -205,7 +208,10 @@ TEST(ChannelStats, DroppedIsCountedPerSink)
   stats = channel->stats();
   ASSERT_EQ(stats.dropped_by_sink.size(), 2u);
   EXPECT_EQ(droppedFor(stats, c), 1u);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
   EXPECT_EQ(channel->droppedSnapshots(b), 0u);
+#pragma GCC diagnostic pop
 }
 
 TEST(ChannelStats, ChannelWithoutSinksHasAnEmptyDroppedArray)

@@ -208,6 +208,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Werror=unused-result nodiscard PROBE_CREATE)
     data_tamer_add_compile_fail_test(nodiscard_number_of_sinks ${ignored_result_source}
         -Werror=unused-result nodiscard PROBE_NUMBER_OF_SINKS)
+    data_tamer_add_compile_fail_test(deprecated_dropped_snapshots
+        ${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/deprecated_call.cpp
+        -Werror=deprecated-declarations deprecated)
 endif()
 
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:

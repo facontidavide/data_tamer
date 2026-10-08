@@ -82,6 +82,21 @@ inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
   }
 }
 
+/// Publications `sink` refused on `channel`, from stats().dropped_by_sink (0 if the
+/// sink is not attached).
+inline uint64_t droppedBy(const DataTamer::LogChannel& channel,
+                          const std::shared_ptr<DataTamer::SinkWorker>& sink)
+{
+  for(const auto& entry : channel.stats().dropped_by_sink)
+  {
+    if(entry.sink == sink.get())
+    {
+      return entry.dropped;
+    }
+  }
+  return 0;
+}
+
 /// True while the calling thread (or any other) holds the channel's write mutex:
 /// a probe thread's tryTakeSnapshot() reports `blocked`. The channel must be
 /// started with a sink attached (the probe takes a snapshot when not blocked).
