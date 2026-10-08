@@ -3,7 +3,9 @@
 data_tamer logs numeric variables of a C++ program as periodic snapshots and hands them
 to sinks (MCAP files, a RAM flight recorder, ROS 2 topics). This file is for work on the
 library itself. To use the library from another code base, read
-[docs/llm_user_manual.md](docs/llm_user_manual.md). The byte format is specified in
+[docs/llm_user_manual.md](docs/llm_user_manual.md). People read
+[docs/USER_MANUAL.md](docs/USER_MANUAL.md), which has the same rules in less detail plus
+troubleshooting and a FAQ. The byte format is specified in
 [docs/wire_format.md](docs/wire_format.md).
 
 ## Documentation
@@ -12,6 +14,7 @@ Keep the documentation current in every PR, without being asked. A PR that chang
 behaviour, API, defaults, options, build steps or the wire format updates, in the same PR:
 
 - README.md;
+- docs/USER_MANUAL.md;
 - docs/llm_user_manual.md;
 - docs/wire_format.md, together with the golden vectors and both decoders;
 - code comments and doc comments in the public headers;
@@ -39,8 +42,8 @@ under "Unreleased" in `data_tamer_cpp/CHANGELOG.rst`.
 - `data_tamer_msgs/`: ROS 2 messages `Schema`, `Schemas`, `Snapshot`, `SnapshotBatch`.
 - `python/`: `data_tamer_parser.py`, the reference decoder (standard library only),
   packaged as `data-tamer-parser`; its tests; `ros2_subscriber.py`.
-- `docs/`: `wire_format.md` and its golden vectors in `wire_format/vectors/`;
-  `benchmarks/` and `reviews/` are dated records.
+- `docs/`: `USER_MANUAL.md` (for people), `llm_user_manual.md` (for coding agents),
+  `wire_format.md` and its golden vectors in `wire_format/vectors/`.
 - `tools/`: `check_versions.py` (every version number agrees), `abi_check.sh` (the
   libabigail comparison) and `abi_probe.cpp` (the consumer side of that comparison).
 - `.github/workflows/`: plain CMake through conan, one ROS 2 job per distribution
