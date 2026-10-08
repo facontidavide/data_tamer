@@ -479,17 +479,15 @@ inline void LogChannel::discoverTypes(PendingTypes& types)
     static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
 
     const std::string type_name(CustomTypeName<T>::get());
-    if(schemaFrozen())
+    if(schemaFrozen() && !hasCustomType(type_name))
     {
-      if(!hasCustomType(type_name))
-      {
-        throw std::runtime_error("channel '" + channelName() +
-                                 "': can't add custom type '" + type_name +
-                                 "' after recording started");
-      }
-      return;
+      throw std::runtime_error("channel '" + channelName() +
+                               "': can't add custom type '" + type_name +
+                               "' after recording started");
     }
-    if(hasCustomType(type_name))
+    // Throws if another C++ type uses this name.
+    (void)typeRegistry().getSerializer<T>();
+    if(schemaFrozen() || hasCustomType(type_name))
     {
       return;
     }
