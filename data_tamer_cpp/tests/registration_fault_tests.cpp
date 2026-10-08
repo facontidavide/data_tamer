@@ -156,10 +156,22 @@ struct Field
   double value;
 };
 
+// What a registration returns, kept outside the code that fails allocations.
+struct Target
+{
+  std::optional<RegistrationID> id;
+  std::shared_ptr<LoggedValue<double>> logged;
+
+  bool isEnabled(const LogChannel& channel) const
+  {
+    return logged ? logged->isEnabled() : id && channel.isEnabled(*id);
+  }
+};
+
 struct Scenario
 {
   std::string label;
-  std::function<RegistrationID(LogChannel&)> register_target;
+  std::function<void(LogChannel&, Target&)> register_target;
   size_t target_bytes;         // what the target adds to the payload
   std::vector<Field> decoded;  // what a decoder reads back (empty: not decodable)
 };
@@ -168,34 +180,40 @@ std::vector<Scenario> scenarios()
 {
   return {
     { "scalar",
-      [](LogChannel& c) { return c.registerValue("target", &g_scalar); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_scalar); },
       8,
       { { "target", 42.0 } } },
     { "atomic",
-      [](LogChannel& c) { return c.registerValue("target", &g_atomic); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_atomic); },
       4,
       { { "target", 7.0 } } },
     { "vector",
-      [](LogChannel& c) { return c.registerValue("target", &g_vector); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_vector); },
       4 + 16,
       { { "target[0]", 1.5 }, { "target[1]", 2.5 } } },
     { "array",
-      [](LogChannel& c) { return c.registerValue("target", &g_array); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_array); },
       8,
       { { "target[0]", 3.5 }, { "target[1]", 4.5 } } },
     { "custom type",
-      [](LogChannel& c) { return c.registerValue("target", &g_reading); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_reading); },
       8,
       { { "target/value", 9.0 } } },
     { "nested custom types",
-      [](LogChannel& c) { return c.registerValue("target", &g_outer); },
+      [](LogChannel& c, Target& t) { t.id = c.registerValue("target", &g_outer); },
       8 + 4 + 16,
       { { "target/first/a", 1.0 },
         { "target/rest[0]/a", 2.0 },
         { "target/rest[1]/a", 3.0 } } },
+    { "logged value",
+      [](LogChannel& c, Target& t) {
+        t.logged = c.createLoggedValue<double>("target", 42.0);
+      },
+      8,
+      { { "target", 42.0 } } },
     { "custom serializer with a schema",
-      [](LogChannel& c) {
-        return c.registerCustomValue("target", &g_blob, g_blob_serializer);
+      [](LogChannel& c, Target& t) {
+        t.id = c.registerCustomValue("target", &g_blob, g_blob_serializer);
       },
       4,
       {} },
@@ -207,9 +225,9 @@ constexpr long kMaxAllocations = 1000;
 // The channel registered the target and still works: the id is live, the schema is
 // consistent, and a snapshot holds the existing values and the target.
 void ExpectChannelWorks(LogChannel& channel, const Scenario& scenario,
-                        size_t existing_count, const RegistrationID& id)
+                        size_t existing_count, const Target& target)
 {
-  EXPECT_TRUE(channel.isEnabled(id));
+  EXPECT_TRUE(target.isEnabled(channel));
   const auto schema = channel.getSchema();
   EXPECT_EQ(schema.hash, ComputeSchemaHash(schema));
   EXPECT_EQ(schema.fields.size(), existing_count + 1);
@@ -273,12 +291,12 @@ void FailEveryAllocation(const Scenario& scenario, size_t existing_count)
     bool threw = false;
     bool fired = false;
     std::string other_error;
-    std::optional<RegistrationID> id;
+    Target target;
     {
       AllocationFault fault(nth);
       try
       {
-        id = scenario.register_target(*channel);
+        scenario.register_target(*channel, target);
       }
       catch(const std::bad_alloc&)
       {
@@ -294,8 +312,7 @@ void FailEveryAllocation(const Scenario& scenario, size_t existing_count)
     ASSERT_EQ(other_error, "") << "only bad_alloc is injected";
     if(!threw)
     {
-      ASSERT_TRUE(id.has_value());
-      ExpectChannelWorks(*channel, scenario, existing_count, *id);
+      ExpectChannelWorks(*channel, scenario, existing_count, target);
       if(!fired)
       {
         return;  // the registration made fewer than nth allocations: all were failed
@@ -307,9 +324,9 @@ void FailEveryAllocation(const Scenario& scenario, size_t existing_count)
     EXPECT_EQ(ToStr(channel->getSchema()), text_before);
     EXPECT_EQ(channel->getSchema().hash, hash_before);
     // ... and registering again works, with the injection off.
-    std::optional<RegistrationID> again;
-    ASSERT_NO_THROW(again = scenario.register_target(*channel));
-    ExpectChannelWorks(*channel, scenario, existing_count, *again);
+    Target again;
+    ASSERT_NO_THROW(scenario.register_target(*channel, again));
+    ExpectChannelWorks(*channel, scenario, existing_count, again);
     if(::testing::Test::HasFailure())
     {
       return;  // the first broken allocation is the one to look at

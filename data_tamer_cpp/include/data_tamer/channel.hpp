@@ -151,8 +151,8 @@ public:
 
   /**
    * @brief Creates a variable that registers `name` now and unregisters it when the
-   * returned LoggedValue is destroyed. Name rules and exceptions as registerValue();
-   * see LoggedValue for the threading rules.
+   * returned LoggedValue is destroyed. Name rules, exceptions and the guarantee of a
+   * throwing call as registerValue(); see LoggedValue for the threading rules.
    */
   template <typename T = double>
   [[nodiscard]] std::shared_ptr<LoggedValue<T>> createLoggedValue(std::string const& name,
@@ -600,25 +600,29 @@ template <typename T>
 inline std::shared_ptr<LoggedValue<T>>
 LogChannel::createLoggedValue(std::string const& name, T initial_value)
 {
-  auto val = new LoggedValue<T>(shared_from_this(), name, initial_value);
-  return std::shared_ptr<LoggedValue<T>>(val);
+  std::shared_ptr<LoggedValue<T>> logged(
+      new LoggedValue<T>(shared_from_this(), initial_value));
+  // Registered once the shared_ptr exists: if either step throws, the channel is
+  // unchanged, and a value that was never registered has nothing to unregister.
+  logged->id_ = registerValue(name, &logged->value_);
+  return logged;
 }
 
 template <typename T>
 inline LoggedValue<T>::LoggedValue(const std::shared_ptr<LogChannel>& channel,
-                                   const std::string& name, T initial_value)
-  : state_(channel->sharedState())
-  , channel_(channel)
-  , value_(initial_value)
-  , id_(channel->registerValue(name, &value_))
+                                   T initial_value)
+  : state_(channel->sharedState()), channel_(channel), value_(initial_value)
 {}
 
 template <typename T>
 inline LoggedValue<T>::~LoggedValue()
 {
-  if(auto channel = channel_.lock())
+  if(id_ != RegistrationID{})
   {
-    channel->unregister(id_);
+    if(auto channel = channel_.lock())
+    {
+      channel->unregister(id_);
+    }
   }
 }
 

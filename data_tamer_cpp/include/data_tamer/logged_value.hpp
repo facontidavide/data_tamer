@@ -7,7 +7,6 @@
 
 #include <atomic>
 #include <memory>
-#include <string>
 #include <type_traits>
 
 namespace DataTamer
@@ -55,8 +54,7 @@ template <typename T>
 class LoggedValue
 {
 protected:
-  LoggedValue(const std::shared_ptr<LogChannel>& channel, const std::string& name,
-              T initial_value);
+  LoggedValue(const std::shared_ptr<LogChannel>& channel, T initial_value);
 
   friend LogChannel;
 
