@@ -74,7 +74,7 @@ protected:
   {
     std::scoped_lock lk(mutex_);
     schemas_[schema.hash] = schema;
-    snapshots_count_[schema.hash] = 0;
+    snapshots_count_.try_emplace(schema.hash, 0);
   }
 
   void onSnapshot(const SnapshotRef& snapshot) override
