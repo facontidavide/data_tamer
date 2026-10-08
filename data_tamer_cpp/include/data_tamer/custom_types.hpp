@@ -2,6 +2,8 @@
 
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <typeinfo>
 
 #include "data_tamer/types.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
@@ -76,12 +78,14 @@ public:
   TypesRegistry& operator=(TypesRegistry&&) = delete;
 
   /// Stores a serializer of T under `type_name`, replacing any previous one. With
-  /// skip_if_present an existing entry is kept and nullptr is returned.
+  /// skip_if_present an existing entry is kept and nullptr is returned; throws
+  /// std::runtime_error if that entry belongs to another C++ type.
   template <typename T>
   CustomSerializer::Ptr addType(const std::string& type_name,
                                 bool skip_if_present = false);
 
-  /// The serializer stored under T's type name, created on first use.
+  /// The serializer stored under T's type name, created on first use. Throws
+  /// std::runtime_error if the name belongs to another C++ type.
   template <typename T>
   [[nodiscard]] CustomSerializer::Ptr getSerializer();
 
@@ -90,6 +94,10 @@ private:
 
   template <typename T>
   static CustomSerializer::Ptr makeSerializer(const std::string& type_name);
+
+  template <typename T>
+  static void checkSameType(const CustomSerializer::Ptr& stored,
+                            const std::string& type_name);
 
   // Both lock the registry and call make while holding the lock.
   CustomSerializer::Ptr findOrCreate(const std::string& type_name, MakeSerializer make);
@@ -261,13 +269,26 @@ inline CustomSerializer::Ptr TypesRegistry::makeSerializer(const std::string& ty
 }
 
 template <typename T>
+inline void TypesRegistry::checkSameType(const CustomSerializer::Ptr& stored,
+                                         const std::string& type_name)
+{
+  if(typeid(*stored) != typeid(CustomSerializerT<T>))
+  {
+    throw std::runtime_error("custom type name '" + type_name +
+                             "' is used by two C++ types: give each its own name");
+  }
+}
+
+template <typename T>
 inline CustomSerializer::Ptr TypesRegistry::getSerializer()
 {
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
   const std::string type_name(CustomTypeName<T>::get());
-  return findOrCreate(type_name, &makeSerializer<T>);
+  auto serializer = findOrCreate(type_name, &makeSerializer<T>);
+  checkSameType<T>(serializer, type_name);
+  return serializer;
 }
 
 template <typename T>
@@ -277,7 +298,13 @@ inline CustomSerializer::Ptr TypesRegistry::addType(const std::string& type_name
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
-  return replace(type_name, &makeSerializer<T>, skip_if_present);
+  auto serializer = replace(type_name, &makeSerializer<T>, skip_if_present);
+  if(!serializer)
+  {
+    // Skipped: the entry that holds the name must be this type's.
+    checkSameType<T>(findOrCreate(type_name, &makeSerializer<T>), type_name);
+  }
+  return serializer;
 }
 
 }  // namespace DataTamer
