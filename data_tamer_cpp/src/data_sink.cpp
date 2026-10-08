@@ -464,12 +464,15 @@ struct SinkWorker::Pimpl
   {
     admission.fetch_or(kClosed, std::memory_order_acq_rel);
     // Wait until every admitted push has finished: block on the counter instead
-    // of spinning; a release made after the close notifies.
-    for(auto state = admission.load(std::memory_order_acquire); (state & ~kClosed) != 0;
-        state = admission.load(std::memory_order_acquire))
+    // of spinning. Registered in `stoppers` before the first read (all SC): a push
+    // that ends after that read notifies.
+    stoppers.fetch_add(1, std::memory_order_seq_cst);
+    for(auto state = admission.load(std::memory_order_seq_cst); (state & ~kClosed) != 0;
+        state = admission.load(std::memory_order_seq_cst))
     {
-      admission.wait(state, std::memory_order_acquire);
+      admission.wait(state, std::memory_order_seq_cst);
     }
+    stoppers.fetch_sub(1, std::memory_order_seq_cst);
     joinThread();
     drainQueues();
     finishSink();
@@ -515,6 +518,7 @@ struct SinkWorker::Pimpl
   // struct to whole lines). Posted after every push, and by detach() and stop().
   alignas(64) WorkerWake wake;
   alignas(64) std::atomic<uint64_t> admission{ 0 };
+  std::atomic<uint32_t> stoppers{ 0 };  // stop() calls waiting for admitted pushes
 };
 
 SinkWorker::SinkWorker(std::unique_ptr<DataSink> sink, Delivery delivery)
@@ -590,18 +594,22 @@ bool SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
   struct AdmissionGuard
   {
     std::atomic<uint64_t>& admission;
+    std::atomic<uint32_t>& stoppers;
     ~AdmissionGuard()
     {
       // stop() waits only after its fetch_or(kClosed). A decrement that reads
       // kClosed clear precedes that fetch_or in the counter's modification
       // order, so the loads stop() makes afterwards see it already: only a
-      // decrement that reads kClosed set can have a waiter to wake.
-      if(admission.fetch_sub(1, std::memory_order_release) & kClosed)
+      // decrement that reads kClosed set can have a waiter to wake, and only
+      // while a stop() is registered. A notify reaches libstdc++'s shared waiter
+      // table, a futex call whenever any thread of the process waits on an atomic.
+      if((admission.fetch_sub(1, std::memory_order_seq_cst) & kClosed) &&
+         stoppers.load(std::memory_order_seq_cst) != 0)
       {
         admission.notify_all();
       }
     }
-  } guard{ _p->admission };
+  } guard{ _p->admission, _p->stoppers };
   if(_p->admission.fetch_add(1, std::memory_order_acq_rel) & kClosed)
   {
     return false;

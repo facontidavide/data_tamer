@@ -210,6 +210,7 @@ struct LogChannel::Pimpl
   std::vector<const SinkWorker*> announcing;
   std::condition_variable announced;
   std::atomic<uint64_t> epoch{ 0 };
+  std::atomic<uint32_t> quiescence_waiters{ 0 };  // controllers in waitQuiescent()
 
   // Caller holds control_mutex (or owns the channel exclusively).
   template <typename Function>
@@ -259,28 +260,40 @@ struct LogChannel::Pimpl
   // its entry precedes its old-pointer load/dirty exchange, which precedes
   // removal's SC publication and this load. Wait only for that reader; later
   // readers see the new publication. Exit is release, observation is acquire.
+  // The controller registers in quiescence_waiters before it reads the epoch, and a
+  // reader reads quiescence_waiters after it leaves (all SC): either the reader
+  // notifies, or the controller sees it gone.
   void waitQuiescent()
   {
+    quiescence_waiters.fetch_add(1, std::memory_order_seq_cst);
     const auto observed = epoch.load(std::memory_order_seq_cst);
     if(observed & 1)
     {
       epoch.wait(observed, std::memory_order_seq_cst);  // returns once the value changed
     }
+    quiescence_waiters.fetch_sub(1, std::memory_order_seq_cst);
   }
 
-  // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress.
+  // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress. It
+  // notifies only a registered controller: a notify reaches libstdc++'s shared
+  // waiter table, which makes a futex call whenever any thread of the process waits
+  // on an atomic.
   struct EpochGuard
   {
-    std::atomic<uint64_t>& epoch;
-    explicit EpochGuard(std::atomic<uint64_t>& value) : epoch(value)
+    explicit EpochGuard(Pimpl& p) : epoch(p.epoch), waiters(p.quiescence_waiters)
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
     }
     ~EpochGuard()
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
-      epoch.notify_all();  // a plain load when no controller is waiting
+      if(waiters.load(std::memory_order_seq_cst) != 0)
+      {
+        epoch.notify_all();
+      }
     }
+    std::atomic<uint64_t>& epoch;
+    std::atomic<uint32_t>& waiters;
   };
 };
 
@@ -969,7 +982,7 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     {
     }
   }
-  Pimpl::EpochGuard guard(_p->epoch);
+  Pimpl::EpochGuard guard(*_p);
 
   std::array<Pimpl::SinkLink*, Pimpl::kMaxSinks> links{};
   size_t last = links.size();  // slot of the last published link
