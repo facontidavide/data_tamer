@@ -679,7 +679,7 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, std::array<T, N> const& vect)
     throw std::runtime_error("SerializeIntoBuffer: array exceeds maximum size");
   }
 
-  if constexpr(std::is_arithmetic_v<T> || std::is_same_v<T, std::byte>)
+  if constexpr(is_number<T>() || sizeof(T) == 1)
   {
     if(N * sizeof(T) > buffer.size())
     {

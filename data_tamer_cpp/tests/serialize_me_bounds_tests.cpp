@@ -41,3 +41,51 @@ TEST(SerializeMeBounds, ByteVectorReadsExactlyTheBytesThatFollow)
   EXPECT_EQ(out, (std::vector<uint8_t>{ 1, 2, 3 }));
   EXPECT_EQ(in.size(), 0u);
 }
+
+namespace
+{
+enum class Flag8 : uint8_t
+{
+  A = 1
+};
+
+struct OneByte
+{
+  uint8_t v = 7;
+};
+template <typename AddField>
+std::string_view TypeDefinition(OneByte& p, AddField& add)
+{
+  add("v", &p.v);
+  return "OneByte";
+}
+}  // namespace
+
+TEST(SerializeMeBounds, ByteEnumArrayDoesNotWritePastTheBuffer)
+{
+  std::array<Flag8, 16> values;
+  values.fill(Flag8::A);
+  GuardedBuffer buffer(8);
+  SpanBytes out(buffer.data(), buffer.size());
+  EXPECT_THROW(SerializeIntoBuffer(out, values), std::runtime_error);
+}
+
+TEST(SerializeMeBounds, OneByteStructArrayDoesNotWritePastTheBuffer)
+{
+  std::array<OneByte, 16> values;
+  GuardedBuffer buffer(8);
+  SpanBytes out(buffer.data(), buffer.size());
+  EXPECT_THROW(SerializeIntoBuffer(out, values), std::runtime_error);
+}
+
+TEST(SerializeMeBounds, ByteEnumArrayFillsAnExactlySizedBuffer)
+{
+  std::array<Flag8, 8> values;
+  values.fill(Flag8::A);
+  GuardedBuffer buffer(8);
+  SpanBytes out(buffer.data(), buffer.size());
+  SerializeIntoBuffer(out, values);
+  EXPECT_EQ(out.size(), 0u);
+  EXPECT_EQ(std::vector<uint8_t>(buffer.data(), buffer.data() + 8),
+            std::vector<uint8_t>(8, 1));
+}
