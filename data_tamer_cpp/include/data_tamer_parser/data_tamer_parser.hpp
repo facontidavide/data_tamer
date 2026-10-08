@@ -1037,11 +1037,74 @@ inline size_t SizeOf(BasicType type)
 /// Nested custom types deeper than this are treated as a malformed (cyclic) schema.
 constexpr int kMaxSchemaDepth = 64;
 
+namespace detail
+{
+/// Fewest payload bytes one value of a custom type takes, by type name.
+using MinSizes = std::map<std::string, size_t>;
+
+/// Larger sizes saturate here, so that products of array extents cannot overflow.
+constexpr size_t kHugeSize = std::numeric_limits<size_t>::max() / 2;
+
+inline size_t MinFieldSize(const TypeField& field,
+                           const std::map<std::string, FieldsVector>& types_list,
+                           MinSizes& min_sizes, int depth);
+
+/// Fewest payload bytes one element of `field` takes: a basic type's size, or the sum
+/// of the fewest bytes of each field of the custom type.
+inline size_t MinElementSize(const TypeField& field,
+                             const std::map<std::string, FieldsVector>& types_list,
+                             MinSizes& min_sizes, int depth)
+{
+  if(field.type != BasicType::OTHER)
+  {
+    return SizeOf(field.type);
+  }
+  const auto known = min_sizes.find(field.type_name);
+  if(known != min_sizes.end())
+  {
+    return known->second;
+  }
+  if(depth > kMaxSchemaDepth)
+  {
+    throw std::runtime_error("DataTamerParser: custom types nested too deeply (cycle?)");
+  }
+  const auto type_it = types_list.find(field.type_name);
+  if(type_it == types_list.end())
+  {
+    throw std::runtime_error("DataTamerParser: unknown type " + field.type_name);
+  }
+  size_t total = 0;
+  for(const auto& sub_field : type_it->second)
+  {
+    const size_t size = MinFieldSize(sub_field, types_list, min_sizes, depth + 1);
+    total = size > kHugeSize - total ? kHugeSize : total + size;
+  }
+  min_sizes.emplace(field.type_name, total);
+  return total;
+}
+
+/// Fewest payload bytes `field` takes: its elements at their fewest bytes, or only the
+/// 4 byte count for a dynamic vector.
+inline size_t MinFieldSize(const TypeField& field,
+                           const std::map<std::string, FieldsVector>& types_list,
+                           MinSizes& min_sizes, int depth)
+{
+  if(field.is_vector && field.array_size == 0)
+  {
+    return sizeof(uint32_t);
+  }
+  const size_t element = MinElementSize(field, types_list, min_sizes, depth);
+  const size_t count = field.is_vector ? field.array_size : 1;
+  return (element != 0 && count > kHugeSize / element) ? kHugeSize : element * count;
+}
+}  // namespace detail
+
 template <typename NumberCallback>
 bool ParseSnapshotRecursive(const TypeField& field,
                             const std::map<std::string, FieldsVector>& types_list,
                             BufferSpan& buffer, const NumberCallback& callback_number,
-                            const std::string& prefix, int depth = 0)
+                            const std::string& prefix, detail::MinSizes& min_sizes,
+                            int depth = 0)
 {
   if(depth > kMaxSchemaDepth)
   {
@@ -1050,10 +1113,18 @@ bool ParseSnapshotRecursive(const TypeField& field,
   uint32_t vect_size = field.array_size;
   if(field.is_vector && field.array_size == 0)
   {
-    // dynamic vector of a basic type: reject a count the payload cannot hold
     vect_size = Deserialize<uint32_t>(buffer);
-    if(field.type != BasicType::OTHER &&
-       size_t(vect_size) * SizeOf(field.type) > buffer.size)
+  }
+  if(field.is_vector && vect_size > 0)
+  {
+    // An element takes at least min_size bytes: a count the payload cannot hold is
+    // rejected. Elements of no byte hold no value, however many there are.
+    const size_t min_size = detail::MinElementSize(field, types_list, min_sizes, depth);
+    if(min_size == 0)
+    {
+      return true;
+    }
+    if(vect_size > buffer.size / min_size)
     {
       throw std::runtime_error("DataTamerParser: payload truncated");
     }
@@ -1078,7 +1149,7 @@ bool ParseSnapshotRecursive(const TypeField& field,
       for(const auto& sub_field : type_it->second)
       {
         ParseSnapshotRecursive(sub_field, types_list, buffer, callback_number, var_name,
-                               depth + 1);
+                               min_sizes, depth + 1);
       }
     }
   };
@@ -1108,6 +1179,7 @@ inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
     return false;
   }
   BufferSpan buffer = snapshot.payload;
+  detail::MinSizes min_sizes;
   if(snapshot.active_mask.size * 8 < schema.fields.size())
   {
     throw std::runtime_error("DataTamerParser: active mask shorter than the schema");
@@ -1118,7 +1190,8 @@ inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
     const auto& field = schema.fields[i];
     if(GetBit(snapshot.active_mask, i))
     {
-      ParseSnapshotRecursive(field, schema.custom_types, buffer, callback_number, "");
+      ParseSnapshotRecursive(field, schema.custom_types, buffer, callback_number, "",
+                             min_sizes);
     }
   }
   // leftover bytes: the schema and the payload do not belong together
