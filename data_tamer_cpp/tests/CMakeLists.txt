@@ -149,6 +149,13 @@ data_tamer_compile_fail(endian_swap_size compile_fail_endian_swap.cpp
     OPTIONS -DSERIALIZE_LITTLEENDIAN=0)
 data_tamer_compile_fail(parse_snapshot_result compile_fail_parse_snapshot_result.cpp
     OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>)
+foreach(function BUILD_SCHEMA_FROM_TEXT BUILD_SCHEMA_FROM_YAML TO_TEXT GET_BIT
+                 SPLIT_MCAP_MESSAGE)
+    string(TOLOWER ${function} name)
+    data_tamer_compile_fail(${name}_result compile_fail_nodiscard.cpp
+        OPTIONS $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>
+        FAIL_OPTIONS -DIGNORE_${function})
+endforeach()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     data_tamer_compile_fail(parser_byte_order compile_fail_byte_order.cpp
         FAIL_OPTIONS -U__BYTE_ORDER__ -D__BYTE_ORDER__=__ORDER_BIG_ENDIAN__)

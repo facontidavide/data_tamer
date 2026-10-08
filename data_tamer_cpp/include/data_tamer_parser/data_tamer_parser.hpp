@@ -126,13 +126,13 @@ struct SnapshotView
   BufferSpan payload;
 };
 
-bool GetBit(BufferSpan mask, size_t index);
+[[nodiscard]] bool GetBit(BufferSpan mask, size_t index);
 
 /// Splits the body of an MCAP message (docs/wire_format.md, section 4.1) into the active
 /// mask and the payload of a SnapshotView, whose schema hash and timestamp stay 0 for
 /// the caller to fill in. Throws std::runtime_error if the body is shorter than the
 /// lengths it declares or holds bytes after the payload.
-SnapshotView SplitMcapMessage(BufferSpan body);
+[[nodiscard]] SnapshotView SplitMcapMessage(BufferSpan body);
 
 /// Decodes `snapshot` with `schema`, calling
 ///   callback_number(const std::string& name, const VarNumber& value)
@@ -224,7 +224,7 @@ inline T Deserialize(BufferSpan& buffer)
   return var;
 }
 
-inline SnapshotView SplitMcapMessage(BufferSpan body)
+[[nodiscard]] inline SnapshotView SplitMcapMessage(BufferSpan body)
 {
   SnapshotView view{};
   const uint32_t mask_size = Deserialize<uint32_t>(body);
@@ -282,7 +282,7 @@ inline VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer)
   return {};
 }
 
-inline bool GetBit(BufferSpan mask, size_t index)
+[[nodiscard]] inline bool GetBit(BufferSpan mask, size_t index)
 {
   if((index >> 3) >= mask.size)
   {
@@ -358,7 +358,7 @@ inline bool TypeField::operator!=(const TypeField& other) const
 
 /// Renders a schema in the version 5 line format, byte for byte as the
 /// DataTamer writer does: SchemaTextHash() of the result is the schema hash.
-inline std::string ToText(const Schema& schema)
+[[nodiscard]] inline std::string ToText(const Schema& schema)
 {
   auto fieldLine = [](const TypeField& field) {
     std::string line = field.type_name;
@@ -758,7 +758,8 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
 
 /// Parses a YAML schema (version 6, docs/wire_format.md section 2.1).
 /// BuildSchemaFromText() calls it when the text starts with "version:".
-inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = false)
+[[nodiscard]] inline Schema BuildSchemaFromYaml(const std::string& txt,
+                                                bool check_hash = false)
 {
   using detail::FindYamlKey;
   const auto root = detail::ParseYamlTree(txt);
@@ -837,7 +838,8 @@ inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = fals
 /// Parses a schema text in the line format (versions 4 and 5) or YAML (version 6), see
 /// docs/wire_format.md section 2. Throws std::runtime_error on a malformed text or
 /// another version; `check_hash` also throws if the declared hash is wrong.
-inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = false)
+[[nodiscard]] inline Schema BuildSchemaFromText(const std::string& txt,
+                                                bool check_hash = false)
 {
   auto trimString = [](std::string& str) {
     const auto last = str.find_last_not_of(" \r");

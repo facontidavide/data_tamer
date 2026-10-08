@@ -503,7 +503,7 @@ TEST(ParserRobustness, MalformedMcapMessageBodyIsRejected)
   {
     // the body ends at an inaccessible page: reading past what it declares would fault
     DataTamerTest::GuardedBuffer body(bytes);
-    EXPECT_THROW(SplitMcapMessage({ body.data(), body.size() }), std::runtime_error)
+    EXPECT_THROW((void)SplitMcapMessage({ body.data(), body.size() }), std::runtime_error)
         << name;
   }
 }
