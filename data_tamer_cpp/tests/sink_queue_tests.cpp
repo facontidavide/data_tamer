@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -716,18 +717,23 @@ struct CountingChannels
     ADD_FAILURE() << "snapshot of an unknown channel";
   }
 
-  /// One producer thread per channel takes `snapshots` snapshots; returns how
-  /// many each channel had accepted, and counts the refused ones (rejected or
-  /// partial) in `refused`.
+  /// One producer thread per channel takes `snapshots` snapshots, then goes on until
+  /// one is accepted (10 s at most: under load, a whole run can fall between a
+  /// removeDataSink() and the next addDataSink()); returns how many each channel had
+  /// accepted, and counts the refused ones (rejected or partial) in `refused`.
   std::vector<uint64_t> runProducers(uint64_t snapshots, std::vector<uint64_t>& refused)
   {
     std::vector<uint64_t> accepted(channels.size(), 0);
     refused.assign(channels.size(), 0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     std::vector<std::thread> producers;
     for(size_t i = 0; i < channels.size(); ++i)
     {
       producers.emplace_back([&, i] {
-        for(uint64_t n = 0; n < snapshots; ++n)
+        for(uint64_t n = 0;
+            n < snapshots ||
+            (accepted[i] == 0 && std::chrono::steady_clock::now() < deadline);
+            ++n)
         {
           const auto result = take(i);
           accepted[i] += result == SnapshotResult::ok;
