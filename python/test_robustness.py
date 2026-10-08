@@ -19,5 +19,13 @@ class StringMembers(unittest.TestCase):
         self.assertEqual(values, {"n/tag": 1, "n/name[0]": "a", "n/name[1]": "b", "n/name[2]": "c"})
 
 
+class Booleans(unittest.TestCase):
+    def test_any_non_zero_byte_is_true(self):
+        schema = dt.parse_schema(HEADER + "bool flag\n")
+        for byte, expected in ((0, False), (1, True), (2, True), (255, True)):
+            with self.subTest(byte=byte):
+                self.assertIs(dt.parse_snapshot(schema, b"\x01", bytes([byte]))["flag"], expected)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -202,7 +203,14 @@ inline T Deserialize(BufferSpan& buffer)
   {
     throw std::runtime_error("DataTamerParser: payload truncated");
   }
-  std::memcpy(&var, buffer.data, N);
+  if constexpr(std::is_same_v<T, bool>)
+  {
+    var = buffer.data[0] != 0;  // another byte value is not a valid bool
+  }
+  else
+  {
+    std::memcpy(&var, buffer.data, N);
+  }
   buffer.data += N;
   buffer.size -= N;
   return var;

@@ -6,6 +6,7 @@ set(DATATAMER_TEST_SOURCES
     types_registry_tests.cpp
     template_type_tests.cpp
     parser_tests.cpp
+    parser_robustness_tests.cpp
     add_remove_sink_tests.cpp
     trait_tests.cpp
     type_definition_trait_tests.cpp
