@@ -91,7 +91,8 @@ class FieldNames(unittest.TestCase):
     def test_rejects_undefined_and_cyclic_types(self):
         with self.assertRaises(ValueError):
             dt.parse_schema("### version: 5\n### hash: 0\n### channel_name: c\n\nFoo x\n").field_names()
-        cyclic = "### version: 5\n### hash: 0\n### channel_name: c\n\nA a\n" + SEP + "\nMSG: A\nA a\n"
+        cyclic = ("### version: 5\n### hash: 0\n### channel_name: c\n\nA a\n"
+                  + SEP + "\nMSG: A\nA a\n")
         for text in (cyclic, cyclic.replace("A a\n", "A[60000] a\n")):  # no blowup
             with self.subTest(text=text), self.assertRaises(ValueError):
                 dt.parse_schema(text).field_names()

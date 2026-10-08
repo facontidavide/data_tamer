@@ -117,7 +117,8 @@ else()
     gtest_discover_tests(serialize_me_big_endian_test DISCOVERY_MODE PRE_TEST)
 endif()
 target_compile_definitions(serialize_me_big_endian_test PRIVATE SERIALIZE_LITTLEENDIAN=0)
-target_include_directories(serialize_me_big_endian_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(serialize_me_big_endian_test
+    PRIVATE ${PROJECT_SOURCE_DIR}/include)
 set_target_properties(serialize_me_big_endian_test PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 

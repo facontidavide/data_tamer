@@ -218,7 +218,8 @@ class McapMessageBody(unittest.TestCase):
                             bytes([1, 0, 0, 0, 7, 100, 0, 0, 0, 1, 2, 3])),
                            ("payload length 2^32-1",
                             bytes([1, 0, 0, 0, 7, 255, 255, 255, 255, 1, 2, 3])),
-                           ("bytes after the payload", bytes([1, 0, 0, 0, 7, 1, 0, 0, 0, 9, 0xEE]))):
+                           ("bytes after the payload",
+                            bytes([1, 0, 0, 0, 7, 1, 0, 0, 0, 9, 0xEE]))):
             with self.subTest(name), self.assertRaises(ValueError):
                 dt.split_mcap_message(body)
 
