@@ -69,6 +69,8 @@ The `LoggedValue` destructor waits for a snapshot in progress, so don't drop the
 ### Names
 
 Names are unique per channel, not empty, and contain no whitespace or control character.
+The names of custom types and of their fields follow the same rule. A channel name can
+contain spaces, but it can't be empty or contain a control character.
 A registration that throws changes nothing, so you can catch the exception and carry on.
 Use `/` to build a hierarchy, which
 PlotJuggler shows as a tree. `DataTamer::JoinNames()` drops empty components, so you don't

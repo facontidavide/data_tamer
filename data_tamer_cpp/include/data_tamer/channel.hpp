@@ -85,7 +85,9 @@ protected:
 
 public:
   /// Creates a channel. Prefer ChannelsRegistry::getChannel(), which also applies the
-  /// registry's defaults and default sinks.
+  /// registry's defaults and default sinks. The name is a line of the schema text: it
+  /// can hold spaces, but std::runtime_error is thrown if it is empty or holds a
+  /// control character.
   [[nodiscard]] static std::shared_ptr<LogChannel> create(std::string name);
 
   ~LogChannel();
@@ -104,10 +106,10 @@ public:
    * whenever another thread may take a snapshot meanwhile.
    *
    * The name must be unique in the channel, non-empty and free of whitespace and
-   * control characters; JoinNames() builds hierarchical names. Throws
-   * std::runtime_error for a duplicate or invalid name, and for a new name once
-   * logging started. A call that throws leaves the channel unchanged. Not real-time
-   * safe.
+   * control characters, and so must the name of a custom type and of each of its
+   * fields; JoinNames() builds hierarchical names. Throws std::runtime_error for a
+   * duplicate or invalid name, and for a new name once logging started. A call that
+   * throws leaves the channel unchanged. Not real-time safe.
    *
    * @return the ID for unregister(), setEnabled() and isEnabled()
    */
@@ -143,8 +145,8 @@ public:
    * bypassing the built-in serialization. Generic decoders may not be able to read
    * the result: prefer TypeDefinitionTrait<T> (or TypeDefinition()) when you can.
    *
-   * The name and the pointer follow the rules of registerValue(). Throws
-   * std::invalid_argument if `type_info` is null.
+   * The name, the pointer and `type_info->typeName()` follow the rules of
+   * registerValue(). Throws std::invalid_argument if `type_info` is null.
    */
   template <typename T>
   RegistrationID registerCustomValue(const std::string& name, const T* value,

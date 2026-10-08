@@ -235,6 +235,13 @@ per character. Do not log text.
 - A name must be non-empty and contain no whitespace or control character (any byte up
   to the space, and DEL; bytes above 0x7f, as in UTF-8, are fine): `std::runtime_error`,
   with the channel and the name in the message.
+- The same rule holds for the names the schema text takes from custom types: the type
+  name, its field names (`add("name", ...)`) and the `typeName()` of a
+  `registerCustomValue()` serializer. The registration throws `std::runtime_error`
+  naming the offender.
+- A channel name can contain spaces, but not a control character, and must not be
+  empty: `LogChannel::create()` and `ChannelsRegistry::getChannel()` throw
+  `std::runtime_error` otherwise.
 - A registration that throws leaves the channel unchanged (schema, hash and
   registrations), an allocation failure and `createLoggedValue()` included.
 - Registration accepts empty `/`-separated components (`"/loco//x/"`), but PlotJuggler
@@ -399,6 +406,9 @@ Rules:
 - `define()` or `TypeDefinition()` returns the type name. A `std::string_view` or
   `const char*` must point to storage that outlives the program (a string literal). A
   returned `std::string` is evaluated once and cached.
+- The type name and the field names follow the [name rules](#names): non-empty, no
+  whitespace or control character. Otherwise `registerValue()` throws
+  `std::runtime_error`.
 - For class templates, the trait can add `static std::string name()` (e.g.
   `"Vector" + std::to_string(N)`). `define()` may then return `void`.
 - Partial specializations use the second, defaulted template parameter

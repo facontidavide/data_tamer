@@ -1,4 +1,5 @@
 #include "data_tamer/channel.hpp"
+#include "data_tamer/data_tamer.hpp"
 #include "data_tamer/names.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 
@@ -11,9 +12,13 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace DataTamer;
@@ -32,7 +37,7 @@ std::string RegistrationError(const std::function<void()>& register_fn)
   {
     return err.what();
   }
-  ADD_FAILURE() << "registration did not throw";
+  ADD_FAILURE() << "no std::runtime_error thrown";
   return {};
 }
 
@@ -312,9 +317,9 @@ TEST(Names, AcceptsUtf8Names)
   }
 }
 
-// The field names of a TypeDefinition / TypeDefinitionTrait (nested types
-// included) are not checked at registration.
-TEST(Names, AcceptsAnyCustomFieldNames)
+// Field names of a TypeDefinition / TypeDefinitionTrait (nested types included) with
+// empty '/'-separated components are accepted, as value names are.
+TEST(Names, AcceptsNonCanonicalCustomFieldNames)
 {
   auto channel = LogChannel::create("chan");
   BadFields bad;
@@ -335,6 +340,192 @@ TEST(Names, AcceptsAnyCustomFieldNames)
   // The trait wins over the ADL overload.
   EXPECT_EQ(schema.custom_types.at("BothBadTrait").at(0).field_name, "x/");
   EXPECT_EQ(schema.custom_types.count("TreeNode"), 1u);
+}
+
+namespace
+{
+// A name the schema text cannot hold as a type or field name, and how an error
+// message shows it.
+struct BadName
+{
+  const char* name;
+  const char* shown;
+};
+// \177 is DEL (0x7f).
+constexpr std::array<BadName, 5> kBadNames{ {
+    { "a b", "a b" },
+    { "a\nb", "a\\x0ab" },
+    { "a\tb", "a\\x09b" },
+    { "a\177b", "a\\x7fb" },
+    { "", "" },
+} };
+
+// Custom types whose type name, nested type name or field name is kBadNames[I].name.
+template <size_t I>
+struct BadTypeName
+{
+  double x = 0;
+};
+template <size_t I, typename AddField>
+const char* TypeDefinition(BadTypeName<I>& obj, AddField& add)
+{
+  add("x", &obj.x);
+  return kBadNames[I].name;
+}
+
+template <size_t I>
+struct HoldsBadTypeName
+{
+  BadTypeName<I> inner;
+};
+template <size_t I, typename AddField>
+const char* TypeDefinition(HoldsBadTypeName<I>& obj, AddField& add)
+{
+  add("inner", &obj.inner);
+  return "HoldsBadTypeName";
+}
+
+template <size_t I>
+struct BadFieldName
+{
+  double x = 0;
+};
+template <size_t I, typename AddField>
+const char* TypeDefinition(BadFieldName<I>& obj, AddField& add)
+{
+  add(kBadNames[I].name, &obj.x);
+  return "BadFieldName";
+}
+
+// Calls `check` with std::integral_constant<size_t, I> for each index I of kBadNames.
+template <typename Check, size_t... I>
+void ForEachBadName(Check check, std::index_sequence<I...> /*indices*/)
+{
+  (check(std::integral_constant<size_t, I>{}), ...);
+}
+template <typename Check>
+void ForEachBadName(Check check)
+{
+  ForEachBadName(check, std::make_index_sequence<kBadNames.size()>{});
+}
+
+// Runs `registration` on a channel holding one scalar and returns the message of the
+// std::runtime_error it must throw. The schema text and hash must stay as they were.
+std::string RejectedRegistration(const std::function<void(LogChannel&)>& registration)
+{
+  double scalar = 0;
+  auto channel = LogChannel::create("chan");
+  channel->registerValue("scalar", &scalar);
+  const auto before = channel->getSchema();
+  const auto msg = RegistrationError([&] { registration(*channel); });
+  const auto after = channel->getSchema();
+  EXPECT_EQ(ToStr(after), ToStr(before));
+  EXPECT_EQ(after.hash, before.hash);
+  return msg;
+}
+}  // namespace
+
+// Custom type names and their field names are written into the schema text like value
+// names, one "<type> <name>" line per field, so the same rules apply to them, nested
+// types included.
+TEST(Names, RejectsCustomTypeAndFieldNamesTheSchemaCannotHold)
+{
+  ForEachBadName([](auto index) {
+    constexpr size_t kIndex = decltype(index)::value;
+    const std::string shown = "'" + std::string(kBadNames[kIndex].shown) + "'";
+    SCOPED_TRACE("bad name " + shown);
+    BadTypeName<kIndex> bad_type;
+    HoldsBadTypeName<kIndex> holds_bad_type;
+    BadFieldName<kIndex> bad_field;
+
+    auto msg = RejectedRegistration(
+        [&](LogChannel& channel) { (void)channel.registerValue("value", &bad_type); });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+
+    msg = RejectedRegistration([&](LogChannel& channel) {
+      (void)channel.registerValue("value", &holds_bad_type);
+    });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+
+    msg = RejectedRegistration(
+        [&](LogChannel& channel) { (void)channel.registerValue("value", &bad_field); });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+    EXPECT_TRUE(Contains(msg, "'BadFieldName'")) << msg;
+  });
+}
+
+// The type name of a registerCustomValue() serializer is the type of its field line.
+TEST(Names, RejectsSerializerTypeNamesTheSchemaCannotHold)
+{
+  for(const auto& bad : kBadNames)
+  {
+    const std::string shown = "'" + std::string(bad.shown) + "'";
+    SCOPED_TRACE("bad name " + shown);
+    Point3D point;
+    auto serializer = std::make_shared<CustomSerializerT<Point3D>>(bad.name);
+    const auto msg = RejectedRegistration([&](LogChannel& channel) {
+      (void)channel.registerCustomValue("point", &point, serializer);
+    });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+  }
+}
+
+// The channel name fills the schema header line "### channel_name: <name>": spaces are
+// fine there, but a control character, a line break above all, breaks the text.
+TEST(Names, RejectsChannelNamesTheSchemaCannotHold)
+{
+  const std::vector<BadName> bad_names = {
+    { "", "" },
+    { "a\nb", "a\\x0ab" },
+    { "a\rb", "a\\x0db" },
+    { "a\tb", "a\\x09b" },
+    { "a\001b", "a\\x01b" },
+    { "a\177b", "a\\x7fb" },
+  };
+  ChannelsRegistry registry;
+  for(const auto& bad : bad_names)
+  {
+    const std::string shown = "'" + std::string(bad.shown) + "'";
+    SCOPED_TRACE("bad name " + shown);
+    auto msg = RegistrationError([&] { (void)LogChannel::create(bad.name); });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+    msg = RegistrationError([&] { (void)registry.getChannel(bad.name); });
+    EXPECT_TRUE(Contains(msg, shown)) << msg;
+  }
+}
+
+namespace
+{
+struct Utf8Names
+{
+  double x = 0;
+};
+template <typename AddField>
+std::string_view TypeDefinition(Utf8Names& obj, AddField& add)
+{
+  add("\xc3\xa4", &obj.x);
+  return "Temp\xc3\xa9rature";
+}
+}  // namespace
+
+// Bytes above 0x7f are UTF-8 in type, field and channel names too, and a channel name
+// can hold spaces.
+TEST(Names, AcceptsUtf8InEveryNameAndSpacesInChannelNames)
+{
+  const std::string channel_name = "robot arm/\xc3\xa4";
+  auto channel = LogChannel::create(channel_name);
+  EXPECT_EQ(channel->channelName(), channel_name);
+  ChannelsRegistry registry;
+  EXPECT_EQ(registry.getChannel(channel_name)->channelName(), channel_name);
+
+  Utf8Names utf8;
+  Point3D point;
+  auto serializer = std::make_shared<CustomSerializerT<Point3D>>("Punkt\xc3\xa4");
+  EXPECT_NO_THROW((void)channel->registerValue("utf8", &utf8));
+  EXPECT_NO_THROW((void)channel->registerCustomValue("point", &point, serializer));
+  const auto schema = channel->getSchema();
+  EXPECT_EQ(schema.custom_types.at("Temp\xc3\xa9rature").at(0).field_name, "\xc3\xa4");
+  EXPECT_EQ(schema.fields.at(1).type_name, "Punkt\xc3\xa4");
 }
 
 TEST(Names, ErrorsNameChannelAndValue)

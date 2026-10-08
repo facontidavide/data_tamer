@@ -13,6 +13,8 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,7 +45,7 @@ std::string ChannelPrefix(const std::string& channel_name)
 }
 
 // The name with the bytes it cannot hold shown as \xNN, so an error stays on one line.
-std::string Printable(const std::string& name)
+std::string Printable(std::string_view name)
 {
   static constexpr char kHex[] = "0123456789abcdef";
   std::string text;
@@ -62,6 +64,48 @@ std::string Printable(const std::string& name)
     }
   }
   return text;
+}
+
+// Why `name` cannot be written into the schema text, or nullptr if it can. The text has
+// one item per line and a field line splits at its first space, so a name is not empty
+// and holds no whitespace or control character. A channel name (`allow_space`) fills
+// its header line and can hold spaces.
+const char* NameProblem(std::string_view name, bool allow_space = false)
+{
+  if(name.empty())
+  {
+    return "it is empty";
+  }
+  const size_t bad = details::FindForbiddenNameByte(name, allow_space);
+  if(bad == std::string_view::npos)
+  {
+    return nullptr;
+  }
+  if(name[bad] == ' ')
+  {
+    return "it contains a space";
+  }
+  return allow_space ? "it contains a control character" :
+                       "it contains a whitespace or control character";
+}
+
+// Throws std::runtime_error if `name`, a `what` ("value name", ...) of the channel's
+// schema, cannot be written into the schema text. A field name also names its type.
+void CheckSchemaName(const std::string& channel_name, const char* what,
+                     std::string_view name, std::string_view in_type = {})
+{
+  const char* problem = NameProblem(name);
+  if(problem == nullptr)
+  {
+    return;
+  }
+  std::string message =
+      ChannelPrefix(channel_name) + "invalid " + what + " '" + Printable(name) + "'";
+  if(!in_type.empty())
+  {
+    message += " in custom type '" + Printable(in_type) + "'";
+  }
+  throw std::runtime_error(message + ": " + problem);
 }
 }  // namespace
 
@@ -324,6 +368,20 @@ RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
     // such as typeSchema() included), then spare capacity for what is appended.
     const auto type = value_ptr.type();
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
+    // The type and field names this registration writes into the schema text.
+    if(type_info)
+    {
+      CheckSchemaName(_p->channel_name, "custom type name", type_name);
+    }
+    for(const auto& [pending_name, pending_fields] : types)
+    {
+      CheckSchemaName(_p->channel_name, "custom type name", pending_name);
+      for(const auto& pending_field : pending_fields)
+      {
+        CheckSchemaName(_p->channel_name, "field name", pending_field.field_name,
+                        pending_name);
+      }
+    }
     TypeField field{ name, type, type_name, value_ptr.isVector(),
                      value_ptr.vectorSize() };
     std::optional<CustomSchema> custom_schema;
@@ -426,6 +484,11 @@ RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
 
 LogChannel::LogChannel(std::string name) : _p(new Pimpl)
 {
+  if(const char* problem = NameProblem(name, true))
+  {
+    throw std::runtime_error("invalid channel name '" + Printable(name) +
+                             "': " + problem);
+  }
   _p->schema.channel_name = name;
   _p->channel_name = std::move(name);
   _p->schema.hash = ComputeSchemaHash(_p->schema);
@@ -780,27 +843,7 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
 
 void LogChannel::checkValueName(const std::string& name) const
 {
-  const char* problem = nullptr;
-  if(name.empty())
-  {
-    problem = "it is empty";
-  }
-  else
-  {
-    const auto bad = std::find_if(name.begin(), name.end(), [](char c) {
-      return details::IsForbiddenNameByte(static_cast<unsigned char>(c));
-    });
-    if(bad != name.end())
-    {
-      problem = *bad == ' ' ? "it contains a space" :
-                              "it contains a whitespace or control character";
-    }
-  }
-  if(problem != nullptr)
-  {
-    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "invalid value name '" +
-                             Printable(name) + "': " + problem);
-  }
+  CheckSchemaName(_p->channel_name, "value name", name);
 }
 
 TypesRegistry& LogChannel::typeRegistry()

@@ -15,6 +15,21 @@ inline bool IsForbiddenNameByte(unsigned char byte)
   return byte <= 0x20 || byte == 0x7F;
 }
 
+// Index of the first byte of `name` that IsForbiddenNameByte() rejects, or npos. With
+// `allow_space` a space passes: a channel name fills its header line and can hold one.
+inline size_t FindForbiddenNameByte(std::string_view name, bool allow_space = false)
+{
+  for(size_t i = 0; i < name.size(); ++i)
+  {
+    const auto byte = static_cast<unsigned char>(name[i]);
+    if(IsForbiddenNameByte(byte) && !(allow_space && byte == ' '))
+    {
+      return i;
+    }
+  }
+  return std::string_view::npos;
+}
+
 // Appends the non-empty '/'-separated components of `part` to `out`.
 inline void AppendNameComponents(std::string& out, std::string_view part)
 {
@@ -76,14 +91,9 @@ template <typename... Parts>
  */
 [[nodiscard]] inline bool IsCanonicalName(std::string_view name)
 {
-  for(const char c : name)
-  {
-    if(details::IsForbiddenNameByte(static_cast<unsigned char>(c)))
-    {
-      return false;
-    }
-  }
-  return !name.empty() && name.front() != '/' && name.back() != '/' &&
+  return !name.empty() &&
+         details::FindForbiddenNameByte(name) == std::string_view::npos &&
+         name.front() != '/' && name.back() != '/' &&
          name.find("//") == std::string_view::npos;
 }
 

@@ -32,7 +32,8 @@ public:
   using Ptr = std::shared_ptr<CustomSerializer>;
 
   virtual ~CustomSerializer() = default;
-  // Name of the type, as written in the schema.
+  // Name of the type, as written in the schema: non-empty, without whitespace or
+  // control characters, or the registration throws std::runtime_error.
   virtual const std::string& typeName() const = 0;
 
   // Optional opaque schema (encoding name and text) stored with the type.

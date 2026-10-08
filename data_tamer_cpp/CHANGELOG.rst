@@ -28,6 +28,13 @@ Unreleased
 * **Behaviour change**: names must be non-empty and free of whitespace and control
   characters (only the space was refused); ``IsCanonicalName()`` agrees. A ninth default
   sink throws in ``addDefaultSink()`` (it made every later ``getChannel()`` throw).
+* **Behaviour change**: custom type names, their field names, the ``typeName()`` of a
+  ``registerCustomValue()`` serializer and channel names are checked too: a line break
+  in any of them split the schema text, and a space in a type or field name broke its
+  field line. Type and field names follow the value name rules, and the registration
+  throws ``std::runtime_error``. A channel name can contain spaces, but
+  ``LogChannel::create()`` and ``getChannel()`` throw for an empty one or one with a
+  control character.
 * **Fixed**: a registration that throws leaves the channel unchanged (custom types, an
   allocation failure, ``createLoggedValue()``). Two C++ types that return one custom type
   name in a channel make ``registerValue()`` throw (the second used the first one's

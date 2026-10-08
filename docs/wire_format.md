@@ -118,13 +118,15 @@ the colon of `### key:`, trimmed; the space after the colon is optional
 2. `### hash: <uint64>` (digits only, at most 2^64-1) – the schema hash, see
    section 5.
 3. `### channel_name: <text>` – everything after the first space following the
-   colon, trimmed. May contain spaces.
+   colon, trimmed. May contain spaces, but is not empty and contains no control
+   character.
 4. Zero or more **field lines**: `<type-spec> <name>`. Exactly one space
    separates the two; the name is everything after it (trimmed). A name is not
    empty and contains no whitespace or control character. It may have empty
    `/`-separated components (leading, trailing or repeated `/`): writers do not
    reject them, although names built with `DataTamer::JoinNames()` have none. `type-spec`
-   is a basic type name or a custom type name, optionally followed by `[]`
+   is a basic type name or a custom type name (not empty, no whitespace or control
+   character), optionally followed by `[]`
    (dynamic vector) or `[N]` (fixed array, decimal N, 1 to 65535). Top-level field order is the mask bit order and the payload
    order.
 5. Zero or more **custom type sections**. Each starts with a line that consists

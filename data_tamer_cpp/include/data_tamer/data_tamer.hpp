@@ -73,7 +73,8 @@ public:
   void setChannelDefaults(const ChannelDefaults& defaults);
 
   /// Returns the channel with this name, creating it on first use with the channel
-  /// defaults and the default sinks. The registry keeps it until clear().
+  /// defaults and the default sinks. The registry keeps it until clear(). Throws
+  /// std::runtime_error for a name LogChannel::create() rejects.
   [[nodiscard]] std::shared_ptr<LogChannel> getChannel(std::string const& channel_name);
 
   /// Calls SinkWorker::stop() once on each sink the registry reaches: the default sinks
