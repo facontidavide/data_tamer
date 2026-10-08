@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -67,6 +68,37 @@ void take(const std::shared_ptr<LogChannel>& channel,
     sink.drain();
   }
 }
+
+// What a case has to open the file in use again: the channel and the sink, the scratch
+// directory and the path the sink is writing.
+struct Scene
+{
+  const std::shared_ptr<LogChannel>& channel;
+  const DataTamerTest::Attached<MCAPSink>& sink;
+  const ScratchDir& dir;
+  const std::string& path;
+};
+
+// Records 200 snapshots, opens the file in use again with `reopen`, records three more
+// and reads the file back as an indexed reader does: it holds the three.
+void expectNewRecordingReadable(const std::function<void(const Scene&)>& reopen)
+{
+  ScratchDir dir("reopen");
+  const auto path = dir.file("current.mcap");
+  uint64_t value = 7;
+  auto sink = manual<MCAPSink>(path);
+  auto channel = channelWith(sink, &value);
+
+  take(channel, sink, 1, 200);
+  reopen({ channel, sink, dir, path });
+  take(channel, sink, 1001, 1003);
+  sink.worker->stop();
+
+  const auto recording = readThroughSummary(path);
+  EXPECT_EQ(recording.summary_messages, 3u);
+  EXPECT_EQ(recording.log_times, (std::vector<uint64_t>{ 1001, 1002, 1003 }));
+  EXPECT_TRUE(recording.problems.empty()) << testing::PrintToString(recording.problems);
+}
 }  // namespace
 
 // Opening the file in use truncates it. The old writer is closed first: if it were
@@ -74,66 +106,28 @@ void take(const std::shared_ptr<LogChannel>& channel,
 // would describe the previous recording.
 TEST(MCAPSinkReopen, ResetWithoutRolloverLeavesTheNewRecordingReadable)
 {
-  ScratchDir dir("reopen_reset");
-  const auto path = dir.file("reset.mcap");
-  uint64_t value = 7;
-  auto sink = manual<MCAPSink>(path);
-  sink->setCreateNewFileOnReset(false);
-  sink->setMaxTimeBeforeReset(seconds(0));
-  auto channel = channelWith(sink, &value);
-
-  take(channel, sink, 1, 200);
-  sink->setMaxTimeBeforeReset(seconds(-1));  // the next snapshot resets the file
-  take(channel, sink, 201, 201);
-  sink->setMaxTimeBeforeReset(seconds(0));
-  take(channel, sink, 1001, 1003);
-  sink.worker->stop();
-
-  const auto recording = readThroughSummary(path);
-  EXPECT_EQ(recording.summary_messages, 3u);
-  EXPECT_EQ(recording.log_times, (std::vector<uint64_t>{ 1001, 1002, 1003 }));
-  EXPECT_TRUE(recording.problems.empty()) << testing::PrintToString(recording.problems);
+  expectNewRecordingReadable([](const Scene& scene) {
+    scene.sink->setCreateNewFileOnReset(false);
+    scene.sink->setMaxTimeBeforeReset(seconds(-1));  // the next snapshot resets the file
+    take(scene.channel, scene.sink, 201, 201);
+    scene.sink->setMaxTimeBeforeReset(seconds(0));
+  });
 }
 
 TEST(MCAPSinkReopen, RestartOnTheCurrentPathLeavesTheNewRecordingReadable)
 {
-  ScratchDir dir("reopen_restart");
-  const auto path = dir.file("restart.mcap");
-  uint64_t value = 7;
-  auto sink = manual<MCAPSink>(path);
-  auto channel = channelWith(sink, &value);
-
-  take(channel, sink, 1, 200);
-  sink->restartRecording(path);
-  take(channel, sink, 1001, 1003);
-  sink.worker->stop();
-
-  const auto recording = readThroughSummary(path);
-  EXPECT_EQ(recording.summary_messages, 3u);
-  EXPECT_EQ(recording.log_times, (std::vector<uint64_t>{ 1001, 1002, 1003 }));
-  EXPECT_TRUE(recording.problems.empty()) << testing::PrintToString(recording.problems);
+  expectNewRecordingReadable(
+      [](const Scene& scene) { scene.sink->restartRecording(scene.path); });
 }
 
 // The file in use is recognised under another name too: here a link to it.
 TEST(MCAPSinkReopen, RestartThroughALinkToTheCurrentFileLeavesTheNewRecordingReadable)
 {
-  ScratchDir dir("reopen_link");
-  const auto path = dir.file("current.mcap");
-  const auto link = dir.file("link.mcap");
-  uint64_t value = 7;
-  auto sink = manual<MCAPSink>(path);
-  auto channel = channelWith(sink, &value);
-  std::filesystem::create_symlink(path, link);
-
-  take(channel, sink, 1, 200);
-  sink->restartRecording(link);
-  take(channel, sink, 1001, 1003);
-  sink.worker->stop();
-
-  const auto recording = readThroughSummary(path);
-  EXPECT_EQ(recording.summary_messages, 3u);
-  EXPECT_EQ(recording.log_times, (std::vector<uint64_t>{ 1001, 1002, 1003 }));
-  EXPECT_TRUE(recording.problems.empty()) << testing::PrintToString(recording.problems);
+  expectNewRecordingReadable([](const Scene& scene) {
+    const auto link = scene.dir.file("link.mcap");
+    std::filesystem::create_symlink(scene.path, link);
+    scene.sink->restartRecording(link);
+  });
 }
 
 // The file in use is closed before it is opened again, so when that open fails the
