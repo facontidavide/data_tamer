@@ -3,6 +3,7 @@ set(DATATAMER_TEST_SOURCES
     dt_tests.cpp
     custom_types_tests.cpp
     custom_type_name_tests.cpp
+    template_type_tests.cpp
     parser_tests.cpp
     add_remove_sink_tests.cpp
     trait_tests.cpp

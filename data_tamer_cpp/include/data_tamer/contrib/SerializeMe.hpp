@@ -397,18 +397,24 @@ struct container_info_
   typedef _Tp value_type;
 };
 
-template <typename T>
+// A type with a TypeDefinition is a custom type, whatever its template shape.
+template <typename T, typename = void>
 struct container_info : container_info_<T, false, -1>
 {
 };
 
 template <template <class, class> class Container, class T, class... TArgs>
-struct container_info<Container<T, TArgs...>> : container_info_<T, true, 0>
+struct container_info<
+    Container<T, TArgs...>,
+    std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value>>
+  : container_info_<T, true, 0>
 {
 };
 
 template <typename T, size_t S>
-struct container_info<std::array<T, S>> : container_info_<T, true, int(S)>
+struct container_info<std::array<T, S>,
+                      std::enable_if_t<!has_TypeDefinition<std::array<T, S>>::value>>
+  : container_info_<T, true, int(S)>
 {
 };
 

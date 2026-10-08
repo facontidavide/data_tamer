@@ -116,7 +116,7 @@ private:
 // provided, else the value returned by the definition of T. A std::string_view or
 // const char* must outlive the program (a string literal); an owning string is
 // evaluated once and cached.
-template <typename T>
+template <typename T, typename = void>
 struct CustomTypeName
 {
   static std::string_view get()
@@ -158,14 +158,19 @@ struct CustomTypeName
   }
 };
 
+// A container is named after its elements, unless the type has a TypeDefinition itself.
 template <template <class, class> class Container, class T, class... TArgs>
-struct CustomTypeName<Container<T, TArgs...>>
+struct CustomTypeName<
+    Container<T, TArgs...>,
+    std::enable_if_t<!SerializeMe::has_TypeDefinition<Container<T, TArgs...>>::value>>
 {
   static std::string_view get() { return CustomTypeName<T>::get(); }
 };
 
 template <typename T, size_t N>
-struct CustomTypeName<std::array<T, N>>
+struct CustomTypeName<
+    std::array<T, N>,
+    std::enable_if_t<!SerializeMe::has_TypeDefinition<std::array<T, N>>::value>>
 {
   static std::string_view get() { return CustomTypeName<T>::get(); }
 };
