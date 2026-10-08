@@ -53,8 +53,8 @@ public:
   PriorityInheritingMutex& operator=(const PriorityInheritingMutex&) = delete;
 
   void lock() { pthread_mutex_lock(&mutex_); }
-  bool try_lock() { return pthread_mutex_trylock(&mutex_) == 0; }
-  void unlock() { pthread_mutex_unlock(&mutex_); }
+  bool try_lock() noexcept { return pthread_mutex_trylock(&mutex_) == 0; }
+  void unlock() noexcept { pthread_mutex_unlock(&mutex_); }
 
 private:
   pthread_mutex_t mutex_;
@@ -73,8 +73,6 @@ using PlatformWriteMutex = std::mutex;
 class WriteMutex
 {
 public:
-  static constexpr bool kPriorityInheritance = (DATA_TAMER_HAS_PI_MUTEX == 1);
-
   /// Default spin budget of tryLockWithSpin() and lockWithSpin(), in nanoseconds.
   static constexpr std::int64_t kLockSpinNs = 2000;
 
@@ -86,12 +84,13 @@ public:
   WriteMutex& operator=(WriteMutex&&) = delete;
 
   void lock() { mutex_.lock(); }
-  bool try_lock() { return mutex_.try_lock(); }
-  void unlock() { mutex_.unlock(); }
+  bool try_lock() noexcept { return mutex_.try_lock(); }
+  void unlock() noexcept { mutex_.unlock(); }
 
-  /// Spins on try_lock() for about spin_ns nanoseconds and never blocks.
+  /// Spins on try_lock() for about spin_ns nanoseconds and never blocks. A budget that
+  /// outlasts the clock spins until the lock is free.
   /// @return true if the lock was acquired.
-  bool tryLockWithSpin(std::int64_t spin_ns = kLockSpinNs)
+  bool tryLockWithSpin(std::int64_t spin_ns = kLockSpinNs) noexcept
   {
     if(try_lock())
     {
@@ -99,8 +98,12 @@ public:
     }
     // Read the clock every kTriesPerClockCheck attempts: it costs more than a try_lock.
     constexpr int kTriesPerClockCheck = 8;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::nanoseconds(spin_ns);
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    const auto budget = std::chrono::nanoseconds(spin_ns);
+    const auto deadline = budget < Clock::time_point::max() - start ?
+                              start + budget :
+                              Clock::time_point::max();
     do
     {
       for(int i = 0; i < kTriesPerClockCheck; i++)

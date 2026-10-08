@@ -11,6 +11,7 @@ set(DATATAMER_TEST_SOURCES
     alloc_counter.cpp
     alloc_counter_tests.cpp
     write_mutex_tests.cpp
+    write_mutex_spin_tests.cpp
     snapshot_pool_tests.cpp
     sink_queue_tests.cpp
     sink_lifecycle_tests.cpp
