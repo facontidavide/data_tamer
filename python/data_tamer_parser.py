@@ -70,6 +70,10 @@ class Schema:
     custom_types: dict[str, list[Field]] = field(default_factory=dict)
     # opaque custom encodings: type name -> (encoding, schema text)
     custom_schemas: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # fewest payload bytes one element of a custom type takes, by type name: filled by
+    # parse_snapshot(), so it is only right while custom_types is left alone
+    _min_sizes: dict[str, int] = field(default_factory=dict, init=False, repr=False,
+                                       compare=False)
 
     def field_names(self) -> list[str]:
         """The flattened names parse_snapshot() can produce, in payload order,
@@ -421,31 +425,32 @@ class _Reader:
         return value.decode("latin-1") if type_name == "char" else value
 
 
-def _min_element_size(f: Field, schema: Schema, memo: dict, depth: int) -> int:
+def _min_element_size(f: Field, schema: Schema, depth: int) -> int:
     """Fewest payload bytes one element of `f` takes: the size of a basic type, or the
-    sum of the fewest bytes of each field of the custom type (memo: by type name)."""
+    sum of the fewest bytes of each field of the custom type (kept on the schema)."""
     if f.is_basic:
         return _STRUCT[f.type_name].size
     if f.type_name not in schema.custom_types:
         raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
+    memo = schema._min_sizes
     if f.type_name not in memo:
         if depth > MAX_SCHEMA_DEPTH:
             raise ValueError("custom types nested too deeply (cyclic schema?)")
-        memo[f.type_name] = sum(_min_field_size(sub, schema, memo, depth + 1)
+        memo[f.type_name] = sum(_min_field_size(sub, schema, depth + 1)
                                 for sub in schema.custom_types[f.type_name])
     return memo[f.type_name]
 
 
-def _min_field_size(f: Field, schema: Schema, memo: dict, depth: int) -> int:
+def _min_field_size(f: Field, schema: Schema, depth: int) -> int:
     """Fewest payload bytes `f` takes: its elements at their fewest bytes, or only the
     4 byte count for a dynamic vector."""
     if f.is_vector and not f.array_size:
         return 4
-    return _min_element_size(f, schema, memo, depth) * (f.array_size if f.is_vector else 1)
+    return _min_element_size(f, schema, depth) * (f.array_size if f.is_vector else 1)
 
 
 def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
-                 memo: dict, depth: int = 0) -> None:
+                 depth: int = 0) -> None:
     if depth > MAX_SCHEMA_DEPTH:
         raise ValueError("custom types nested too deeply (cyclic schema?)")
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
@@ -454,7 +459,8 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
         if count:
             # An element takes at least `least` bytes: a count the payload cannot hold is
             # rejected. Elements of no byte hold no value, however many there are.
-            least = _min_element_size(f, schema, memo, depth)
+            least = (_STRUCT[f.type_name].size if f.is_basic
+                     else _min_element_size(f, schema, depth))
             if least == 0:
                 return
             if count * least > reader.remaining():
@@ -469,7 +475,7 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
         subs = schema.custom_types[f.type_name]
         for n in names:
             for sub in subs:
-                _parse_field(sub, schema, reader, n, out, memo, depth + 1)
+                _parse_field(sub, schema, reader, n, out, depth + 1)
     else:
         raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
 
@@ -531,10 +537,9 @@ def parse_snapshot(schema: Schema, active_mask: bytes, payload: bytes) -> dict[s
     """Decode one snapshot into {"field/path[i]": value}. Disabled fields are absent."""
     out: dict[str, object] = {}
     reader = _Reader(payload)
-    memo: dict[str, int] = {}
     for index, f in enumerate(schema.fields):
         if get_bit(active_mask, index):
-            _parse_field(f, schema, reader, "", out, memo)
+            _parse_field(f, schema, reader, "", out)
     if reader.pos != len(payload):
         raise ValueError(f"{len(payload) - reader.pos} trailing bytes in payload")
     return out

@@ -80,6 +80,36 @@ class WorkBound(unittest.TestCase):
         self.assertEqual(values, {})
 
 
+class SizeMemo(unittest.TestCase):
+    """A Schema keeps the fewest bytes of each custom type between snapshots."""
+
+    TEXT = f"Pair[] pairs\n{SEPARATOR}\nMSG: Pair\nuint32 a\nuint32 b\n"
+
+    def test_later_snapshots_are_checked_against_the_stored_size(self):
+        schema = dt.parse_schema(HEADER + self.TEXT)
+        two_pairs = struct.pack("<I", 2) + bytes(16)
+        three_pairs_cut = struct.pack("<I", 3) + bytes(20)  # they need 24 bytes
+        for _ in range(2):  # the second round runs with the size stored by the first
+            self.assertEqual(len(dt.parse_snapshot(schema, b"\x01", two_pairs)), 4)
+            with self.assertRaises(ValueError):
+                dt.parse_snapshot(schema, b"\x01", three_pairs_cut)
+
+    def test_memo_is_not_part_of_equality_or_repr(self):
+        decoded = dt.parse_schema(HEADER + self.TEXT)
+        fresh = dt.parse_schema(HEADER + self.TEXT)
+        dt.parse_snapshot(decoded, b"\x01", struct.pack("<I", 1) + bytes(8))
+        self.assertEqual(decoded, fresh)
+        self.assertEqual(repr(decoded), repr(fresh))
+        self.assertNotIn("min_sizes", repr(decoded))
+
+    def test_schema_built_by_hand_decodes(self):
+        pair = [dt.Field("a", "uint32"), dt.Field("b", "uint32")]
+        schema = dt.Schema(fields=[dt.Field("pairs", "Pair", True)],
+                           custom_types={"Pair": pair})
+        self.assertEqual(dt.parse_snapshot(schema, b"\x01", struct.pack("<I", 1) + bytes(8)),
+                         {"pairs[0]/a": 0, "pairs[0]/b": 0})
+
+
 class SchemaHeaders(unittest.TestCase):
     def test_empty_text_is_rejected(self):
         for text in ("", "\n", "  \n\r\n   \n"):
