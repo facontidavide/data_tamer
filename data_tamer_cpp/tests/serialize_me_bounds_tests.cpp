@@ -19,19 +19,24 @@ using DataTamerTest::GuardedBuffer;
 
 TEST(SerializeMeBounds, ByteVectorRejectsACountLargerThanTheBytesThatFollow)
 {
-  GuardedBuffer buffer({ 0xff, 0xff, 0x00, 0x00, 1, 2, 3, 4 });  // count 65535, 4 bytes
-  SpanBytesConst in(buffer.data(), buffer.size());
-  std::vector<uint8_t> out;
-  EXPECT_THROW(DeserializeFromBuffer(in, out), std::runtime_error);
-  EXPECT_TRUE(out.empty());
-}
-
-TEST(SerializeMeBounds, ByteVectorRejectsACountOneByteTooLarge)
-{
-  GuardedBuffer buffer({ 4, 0, 0, 0, 1, 2, 3 });
-  SpanBytesConst in(buffer.data(), buffer.size());
-  std::vector<uint8_t> out;
-  EXPECT_THROW(DeserializeFromBuffer(in, out), std::runtime_error);
+  struct Case
+  {
+    const char* label;
+    std::vector<uint8_t> encoding;
+  };
+  const std::vector<Case> cases = {
+    { "count 65535, 4 bytes follow", { 0xff, 0xff, 0x00, 0x00, 1, 2, 3, 4 } },
+    { "count 4, 3 bytes follow", { 4, 0, 0, 0, 1, 2, 3 } },
+  };
+  for(const auto& c : cases)
+  {
+    SCOPED_TRACE(c.label);
+    GuardedBuffer buffer(c.encoding);
+    SpanBytesConst in(buffer.data(), buffer.size());
+    std::vector<uint8_t> out;
+    EXPECT_THROW(DeserializeFromBuffer(in, out), std::runtime_error);
+    EXPECT_TRUE(out.empty());
+  }
 }
 
 TEST(SerializeMeBounds, ByteVectorReadsExactlyTheBytesThatFollow)
@@ -63,21 +68,18 @@ std::string_view TypeDefinition(OneByte& p, AddField& add)
 }
 }  // namespace
 
-TEST(SerializeMeBounds, ByteEnumArrayDoesNotWritePastTheBuffer)
+// 16 one-byte elements do not fit into 8 bytes: the write is refused, not made.
+TEST(SerializeMeBounds, ArrayOfOneByteElementsDoesNotWritePastTheBuffer)
 {
-  std::array<Flag8, 16> values;
-  values.fill(Flag8::A);
-  GuardedBuffer buffer(8);
-  SpanBytes out(buffer.data(), buffer.size());
-  EXPECT_THROW(SerializeIntoBuffer(out, values), std::runtime_error);
-}
-
-TEST(SerializeMeBounds, OneByteStructArrayDoesNotWritePastTheBuffer)
-{
-  std::array<OneByte, 16> values;
-  GuardedBuffer buffer(8);
-  SpanBytes out(buffer.data(), buffer.size());
-  EXPECT_THROW(SerializeIntoBuffer(out, values), std::runtime_error);
+  const auto expectRefused = [](const auto& values) {
+    GuardedBuffer buffer(8);
+    SpanBytes out(buffer.data(), buffer.size());
+    EXPECT_THROW(SerializeIntoBuffer(out, values), std::runtime_error);
+  };
+  std::array<Flag8, 16> enums;
+  enums.fill(Flag8::A);
+  expectRefused(enums);
+  expectRefused(std::array<OneByte, 16>{});
 }
 
 TEST(SerializeMeBounds, ByteEnumArrayFillsAnExactlySizedBuffer)

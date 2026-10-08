@@ -57,35 +57,36 @@ TEST(StringEncoding, RegisteredStringIsSerializedAsACharVector)
   EXPECT_EQ(recording.payload(), (std::vector<uint8_t>{ 3, 0, 0, 0, 'a', 'b', 'c' }));
 }
 
+// The whole of a string longer than 64 KiB is serialized, whether it was that long when
+// the channel started (and a real-time snapshot takes it) or grew afterwards (and the
+// snapshot may grow the slot).
 TEST(StringEncoding, StringLongerThan64KiBIsSerialized)
 {
-  DataTamerTest::Recording recording;
-  Named named;
-  named.name = std::string(70 * 1024, 'x');
-  recording.channel->registerValue("n", &named);
-  recording.channel->startLogging();
+  struct Case
+  {
+    const char* label;
+    std::string at_start;  // the string when logging starts
+    bool real_time;        // tryTakeSnapshot() or takeSnapshot()
+  };
+  const std::string big(70 * 1024, 'x');
+  for(const auto& c : { Case{ "long at the start", big, true },
+                        Case{ "grown after the start", "abc", false } })
+  {
+    SCOPED_TRACE(c.label);
+    DataTamerTest::Recording recording;
+    Named named;
+    named.name = c.at_start;
+    recording.channel->registerValue("n", &named);
+    recording.channel->startLogging();
 
-  DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
-  EXPECT_NO_THROW(result = recording.channel->tryTakeSnapshot());
-  EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
-  recording.sink.drain();
-  EXPECT_EQ(recording.sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
-}
-
-TEST(StringEncoding, StringThatGrowsPast64KiBIsSerialized)
-{
-  DataTamerTest::Recording recording;
-  Named named;
-  named.name = "abc";
-  recording.channel->registerValue("n", &named);
-  recording.channel->startLogging();
-
-  named.name = std::string(70 * 1024, 'x');
-  DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
-  EXPECT_NO_THROW(result = recording.channel->takeSnapshot());
-  EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
-  recording.sink.drain();
-  EXPECT_EQ(recording.sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
+    named.name = big;
+    DataTamer::SnapshotResult result = DataTamer::SnapshotResult::rejected;
+    EXPECT_NO_THROW(result = c.real_time ? recording.channel->tryTakeSnapshot() :
+                                           recording.channel->takeSnapshot());
+    EXPECT_EQ(result, DataTamer::SnapshotResult::ok);
+    recording.sink.drain();
+    EXPECT_EQ(recording.sink->latestPayloadSize(), size_t{ 1 + 4 + 70 * 1024 });
+  }
 }
 
 TEST(StringEncoding, SerializeMeSizesAndRoundTripsAString)
