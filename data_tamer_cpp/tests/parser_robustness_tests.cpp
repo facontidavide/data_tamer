@@ -130,7 +130,7 @@ TEST(ParserRobustness, CountLargerThanThePayloadCanHoldIsRejectedBeforeAnyValue)
   // 3 pairs need 24 bytes and 20 follow the count
   std::vector<uint8_t> payload = { 3, 0, 0, 0 };
   payload.resize(4 + 20, 7);
-  EXPECT_THROW(ParseSnapshot(schema, viewOf(mask, payload), count_values),
+  EXPECT_THROW((void)ParseSnapshot(schema, viewOf(mask, payload), count_values),
                std::runtime_error);
   EXPECT_EQ(values, 0u) << "values were decoded before the count was rejected";
 
@@ -147,9 +147,10 @@ TEST(ParserRobustness, FixedArrayLargerThanThePayloadIsRejectedBeforeAnyValue)
   const std::vector<uint8_t> mask = { 1 };
   const std::vector<uint8_t> payload(7, 1);
   size_t values = 0;
-  EXPECT_THROW(ParseSnapshot(schema, viewOf(mask, payload),
-                             [&](const std::string&, const VarNumber&) { values++; }),
-               std::runtime_error);
+  EXPECT_THROW(
+      (void)ParseSnapshot(schema, viewOf(mask, payload),
+                          [&](const std::string&, const VarNumber&) { values++; }),
+      std::runtime_error);
   EXPECT_EQ(values, 0u);
 }
 
@@ -175,8 +176,8 @@ TEST(ParserRobustness, CyclicTypeInAVectorIsRejected)
       BuildSchemaFromText(kHeader + "A[] as\n" + kSeparator + "\nMSG: A\nA a\n");
   const std::vector<uint8_t> mask = { 1 };
   const std::vector<uint8_t> one_element = { 1, 0, 0, 0 };
-  EXPECT_THROW(ParseSnapshot(schema, viewOf(mask, one_element),
-                             [](const std::string&, const VarNumber&) {}),
+  EXPECT_THROW((void)ParseSnapshot(schema, viewOf(mask, one_element),
+                                   [](const std::string&, const VarNumber&) {}),
                std::runtime_error);
   const std::vector<uint8_t> no_element = { 0, 0, 0, 0 };
   EXPECT_TRUE(ParseSnapshot(schema, viewOf(mask, no_element),

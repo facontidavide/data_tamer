@@ -144,6 +144,8 @@ endfunction()
 
 data_tamer_compile_fail(endian_swap_size compile_fail_endian_swap.cpp
     -DSERIALIZE_LITTLEENDIAN=0)
+data_tamer_compile_fail(parse_snapshot_result compile_fail_parse_snapshot_result.cpp
+    $<IF:$<CXX_COMPILER_ID:MSVC>,/we4834,-Werror=unused-result>)
 
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE

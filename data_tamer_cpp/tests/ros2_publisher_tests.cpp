@@ -399,7 +399,7 @@ TEST(DataTamerROS2Publisher, AggregateWithYamlSchemas)
                 registry, *batch,
                 [&](const DataTamerParser::Schema& schema,
                     const DataTamerParser::SnapshotView& view) {
-                  DataTamerParser::ParseSnapshot(
+                  (void)DataTamerParser::ParseSnapshot(
                       schema, view,
                       [&](const std::string& name, const DataTamerParser::VarNumber&) {
                         names.push_back(name);

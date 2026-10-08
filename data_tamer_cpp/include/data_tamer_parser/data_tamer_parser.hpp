@@ -142,8 +142,8 @@ SnapshotView SplitMcapMessage(BufferSpan body);
 /// left after the last field (the callback has already run). Throws std::runtime_error
 /// on malformed data.
 template <typename NumberCallback>
-bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                   const NumberCallback& callback_number);
+[[nodiscard]] bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
+                                 const NumberCallback& callback_number);
 
 //---------------------------------------------------------
 // Helpers for the data_tamer_msgs messages of ROS2PublisherSink. They are templates on
@@ -1262,8 +1262,8 @@ bool ParseSnapshotRecursive(const TypeField& field,
 }
 
 template <typename NumberCallback>
-inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                          const NumberCallback& callback_number)
+[[nodiscard]] inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
+                                        const NumberCallback& callback_number)
 {
   if(schema.hash != snapshot.schema_hash)
   {
