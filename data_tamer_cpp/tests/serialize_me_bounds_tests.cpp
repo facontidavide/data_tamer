@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -125,4 +126,31 @@ TEST(SerializeMeCorruptInput, BoolArrayElementsAreValidBools)
   const std::vector<uint8_t> raw{ representation(values[0]), representation(values[1]),
                                   representation(values[2]), representation(values[3]) };
   EXPECT_EQ(raw, (std::vector<uint8_t>{ 1, 0, 1, 1 }));
+}
+
+namespace
+{
+// A container that claims 2^32 elements without holding any.
+template <class T, class Unused = void>
+struct HugeContainer
+{
+  size_t size() const { return size_t{ 1 } << 32; }
+  const T* begin() const { return nullptr; }
+  const T* end() const { return nullptr; }
+};
+}  // namespace
+
+TEST(SerializeMeBounds, ContainerWithTooManyElementsForTheCountIsRejected)
+{
+  if constexpr(sizeof(size_t) <= sizeof(uint32_t))
+  {
+    GTEST_SKIP() << "size_t has 32 bits";
+  }
+  else
+  {
+    std::vector<uint8_t> storage(64);
+    SpanBytes out(storage);
+    EXPECT_THROW(SerializeIntoBuffer(out, HugeContainer<uint16_t>{}), std::runtime_error);
+    EXPECT_EQ(out.size(), storage.size()) << "the truncated count 0 was written";
+  }
 }

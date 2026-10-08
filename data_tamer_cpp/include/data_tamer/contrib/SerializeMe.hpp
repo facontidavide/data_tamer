@@ -724,6 +724,13 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline void SerializeIntoBuffer(SpanBytes& buffer, Container<T, TArgs...> const& vect)
 {
+  if constexpr(sizeof(size_t) > sizeof(uint32_t))
+  {
+    if(vect.size() > std::numeric_limits<uint32_t>::max())
+    {
+      throw std::runtime_error("SerializeIntoBuffer: container exceeds maximum size");
+    }
+  }
   const auto num_values = static_cast<uint32_t>(vect.size());
   SerializeIntoBuffer(buffer, num_values);
 
