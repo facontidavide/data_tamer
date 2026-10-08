@@ -38,11 +38,8 @@ public:
   size_t size() const { return size_.load(std::memory_order_acquire); }
 
   /// Precondition: index < size() as observed by this thread.
-  std::atomic<uint32_t>& operator[](size_t index) const
-  {
-    const auto [block, offset] = locate(index);
-    return blocks_[block].load(std::memory_order_acquire)[offset];
-  }
+  const std::atomic<uint32_t>& operator[](size_t index) const { return word(index); }
+  std::atomic<uint32_t>& operator[](size_t index) { return word(index); }
 
   /// Control thread only. Throws std::length_error when the table is full.
   void push_back(uint32_t value)
@@ -64,6 +61,12 @@ public:
   }
 
 private:
+  std::atomic<uint32_t>& word(size_t index) const
+  {
+    const auto [block, offset] = locate(index);
+    return blocks_[block].load(std::memory_order_acquire)[offset];
+  }
+
   static std::pair<size_t, size_t> locate(size_t index)
   {
     size_t block = 0, base = 0, capacity = kFirstBlock;

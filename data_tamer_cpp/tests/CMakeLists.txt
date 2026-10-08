@@ -162,6 +162,9 @@ data_tamer_compile_fail_test(pool_try_acquire_result_is_nodiscard
 data_tamer_compile_fail_test(pool_adopt_result_is_nodiscard
     snapshot_pool_nodiscard.cpp DT_IGNORE_ADOPT)
 
+data_tamer_compile_fail_test(atomic_word_table_const_is_read_only
+    atomic_word_table_const.cpp DT_WRITE_THROUGH_CONST)
+
 foreach(case VALUE VECTOR MEMBER LOGGED)
     string(TOLOWER ${case} case_name)
     data_tamer_compile_fail_test(long_double_${case_name}_is_rejected
