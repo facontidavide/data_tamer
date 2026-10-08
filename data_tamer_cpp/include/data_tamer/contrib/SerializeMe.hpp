@@ -50,12 +50,20 @@ public:
   Span(std::array<T, N>& v) : data_(v.data()), size_(N)
   {}
 
-  Span(std::vector<T>& v) : data_(v.data()), size_(v.size()) {}
+  // A template, so that Span<const T> never forms the ill-formed std::vector<const T>&.
+  template <typename U, std::enable_if_t<std::is_same_v<U, T>, int> = 0>
+  Span(std::vector<U>& v) : data_(v.data()), size_(v.size())
+  {}
 
   /// Read-only view of a vector: Span<const uint8_t> from a (const) std::vector<uint8_t>.
   /// Like std::span it also binds to a temporary: do not keep the span past it.
   template <typename U, std::enable_if_t<std::is_same_v<const U, T>, int> = 0>
   Span(const std::vector<U>& v) : data_(v.data()), size_(v.size())
+  {}
+
+  /// Read-only view of a (const) std::array<uint8_t, N>, as for a vector.
+  template <typename U, size_t N, std::enable_if_t<std::is_same_v<const U, T>, int> = 0>
+  Span(const std::array<U, N>& v) : data_(v.data()), size_(N)
   {}
 
   T const* data() const;

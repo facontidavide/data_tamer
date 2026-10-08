@@ -4,8 +4,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 // Return types of an ADL TypeDefinition(): the name may be a view, a C string or an
 // owning string, as it may be for DataTamer::TypeDefinitionTrait<T>::define().
@@ -68,4 +71,23 @@ TEST(SerializeMeApi, ChannelRegistersTypesNamedByAnyAdlReturnType)
   EXPECT_NE(schema.find("CStringName c_string\n"), std::string::npos) << schema;
   EXPECT_NE(schema.find("OwnedName owned\n"), std::string::npos) << schema;
   EXPECT_NE(schema.find("MSG: OwnedName\nfloat64 x\n"), std::string::npos) << schema;
+}
+
+TEST(SerializeMeApi, ConstSpanViewsAnArray)
+{
+  using SerializeMe::SpanBytes;
+  using SerializeMe::SpanBytesConst;
+  using Bytes = std::array<uint8_t, 3>;
+  EXPECT_TRUE((std::is_constructible_v<SpanBytesConst, Bytes&>));
+  EXPECT_TRUE((std::is_constructible_v<SpanBytesConst, const Bytes&>));
+  EXPECT_TRUE((std::is_constructible_v<SpanBytes, Bytes&>));
+  EXPECT_FALSE((std::is_constructible_v<SpanBytes, const Bytes&>));  // would drop const
+
+  if constexpr(std::is_constructible_v<SpanBytesConst, const Bytes&>)
+  {
+    const Bytes values = { 7, 8, 9 };
+    const SpanBytesConst view(values);
+    EXPECT_EQ(view.data(), values.data());
+    EXPECT_EQ(view.size(), 3u);
+  }
 }
