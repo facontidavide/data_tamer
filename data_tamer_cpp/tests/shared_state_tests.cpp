@@ -5,9 +5,14 @@
 
 #include <atomic>
 #include <thread>
+#include <utility>
 
 using namespace DataTamer;
 using DataTamerTest::AllocCounter;
+
+// Once the holder is initialized, publishing a re-registration cannot fail. The limit
+// on the generation is checked by the caller, with canReregister().
+static_assert(noexcept(std::declval<ChannelSharedState&>().setReregistered(0)));
 
 TEST(ChannelSharedState, SeriesStartEnabledAndMaskStartsDirty)
 {
@@ -128,8 +133,8 @@ TEST(ChannelSharedState, EnableUpdatesNeverRestoreRegistration)
   EXPECT_TRUE(state.mask_dirty.exchange(false, std::memory_order_seq_cst));
 }
 
-// Exhausting a slot's generation counter is refused before it can wrap to the
-// never-valid generation zero.
+// The last generation can be reached, and canReregister() refuses the next one before
+// it can wrap to the never-valid generation zero.
 TEST(ChannelSharedState, GenerationExhaustionIsRefused)
 {
   ChannelSharedState state;
@@ -139,8 +144,7 @@ TEST(ChannelSharedState, GenerationExhaustionIsRefused)
     state.setReregistered(0);
   }
   EXPECT_EQ(state.generation(0), ChannelSharedState::kMaxGeneration);
-  EXPECT_THROW(state.setReregistered(0), std::length_error);
-  EXPECT_EQ(state.generation(0), ChannelSharedState::kMaxGeneration);
+  EXPECT_FALSE(state.canReregister(0));
   EXPECT_TRUE(state.isEnabled(0));
 }
 

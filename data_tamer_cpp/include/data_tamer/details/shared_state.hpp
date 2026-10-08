@@ -237,19 +237,13 @@ public:
   /// Control thread only. Publishes a replacement registration once its holder is
   /// initialized; returns the new generation, which makes older ids stale.
   /// Precondition: canReregister(index).
-  uint32_t setReregistered(size_t index)
+  uint32_t setReregistered(size_t index) noexcept
   {
-    const auto previous = flags_[index].load(std::memory_order_seq_cst);
-    const uint32_t generation = (previous >> kGenerationShift) + 1;
-    if(generation > kMaxGeneration)
-    {
-      throw std::length_error("registration slot exhausted: it was re-registered "
-                              "16 million times");
-    }
-    flags_[index].store((generation << kGenerationShift) | kRegistered | kEnabled,
+    const uint32_t next = generation(index) + 1;
+    flags_[index].store((next << kGenerationShift) | kRegistered | kEnabled,
                         std::memory_order_seq_cst);
     mask_dirty.store(true, std::memory_order_seq_cst);
-    return generation;
+    return next;
   }
 
   /// Lock-free. Changes the enabled bit only, with no staleness check.
