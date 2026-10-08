@@ -1,5 +1,4 @@
 // The dump callback of MCAPRingSink and the counters it can read.
-#include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
 #include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
@@ -11,10 +10,11 @@
 #include <string>
 
 using namespace DataTamer;
-using DataTamerTest::channelWith;
 using DataTamerTest::manual;
+using DataTamerTest::ringOptions;
 using DataTamerTest::ScratchDir;
-using std::chrono::nanoseconds;
+using DataTamerTest::Source;
+using std::chrono::seconds;
 
 namespace
 {
@@ -27,22 +27,18 @@ struct Counters
 // Writes one dump to `path` and returns the counters its callback read.
 Counters countersSeenByTheCallback(const std::string& path)
 {
-  MCAPRingOptions options;
-  options.filepath = path;
-  options.capacity_bytes = 1 << 20;
-  auto sink = manual<MCAPRingSink>(options);
+  auto sink = manual<MCAPRingSink>(ringOptions(path, seconds(10)));
   Counters seen;
   sink->setDumpCallback([&](const MCAPRingDump&) {
     seen.written = sink->stats().dumps_written;
     seen.failed = sink->stats().dumps_failed;
   });
-  int64_t value = 0;
-  auto channel = channelWith(sink, &value);
-  EXPECT_EQ(channel->takeSnapshot(nanoseconds(100)), SnapshotResult::ok);
+  Source source("ring_callback", sink);
+  source.take(100);
   sink.drain();
   EXPECT_TRUE(sink->requestDump());
-  EXPECT_EQ(channel->takeSnapshot(nanoseconds(200)), SnapshotResult::ok);  // trigger
-  EXPECT_EQ(channel->takeSnapshot(nanoseconds(300)), SnapshotResult::ok);  // complete
+  source.take(200);  // trigger
+  source.take(300);  // complete
   sink.drain();
   sink->waitForWriter();
   return seen;

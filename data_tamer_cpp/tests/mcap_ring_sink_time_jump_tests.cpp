@@ -1,5 +1,4 @@
 // MCAPRingSink after the snapshot clock jumped back, as in a simulation reset.
-#include "data_tamer/channel.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "mcap_test_utils.hpp"
@@ -8,14 +7,14 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <memory>
 #include <vector>
 
 using namespace DataTamer;
-using DataTamerTest::channelWith;
 using DataTamerTest::logTimes;
 using DataTamerTest::manual;
+using DataTamerTest::ringOptions;
 using DataTamerTest::ScratchDir;
+using DataTamerTest::Source;
 using std::chrono::seconds;
 
 // A request that no snapshot has triggered yet is flushed around the newest timestamp of
@@ -26,16 +25,12 @@ TEST(MCAPRingSinkTimeJump, FlushOfAnUntriggeredRequestStaysOnTheNewRun)
   for(const bool by_stop : { false, true })
   {
     ScratchDir dir("ring_time_jump");
-    MCAPRingOptions options;
-    options.filepath = dir.file("jump.mcap");
-    options.window = seconds(10);
-    options.capacity_bytes = 1 << 20;
+    const auto options = ringOptions(dir.file("jump.mcap"), seconds(10));
     auto sink = manual<MCAPRingSink>(options);
-    int64_t value = 0;
-    auto channel = channelWith(sink, &value);
+    Source source("jump", sink);
     for(const int64_t at : { 995, 996, 997, 998, 999, 1000, 1, 2, 3, 4, 5 })
     {
-      ASSERT_EQ(channel->takeSnapshot(seconds(at)), SnapshotResult::ok);
+      source.take(seconds(at));
     }
     sink.drain();
 
@@ -61,23 +56,16 @@ TEST(MCAPRingSinkTimeJump, FlushOfAnUntriggeredRequestStaysOnTheNewRun)
 TEST(MCAPRingSinkTimeJump, FlushAfterAJumpUsesTheNewestTimestampOfTheNewRun)
 {
   ScratchDir dir("ring_time_jump_channels");
-  MCAPRingOptions options;
-  options.filepath = dir.file("jump.mcap");
-  options.window = seconds(3);
-  options.capacity_bytes = 1 << 20;
+  const auto options = ringOptions(dir.file("jump.mcap"), seconds(3));
   auto sink = manual<MCAPRingSink>(options);
-  int64_t value = 0;
-  auto a = channelWith(sink, &value, "a");
-  auto b = channelWith(sink, &value, "b");
-  const auto take = [](const std::shared_ptr<LogChannel>& channel, int64_t at) {
-    ASSERT_EQ(channel->takeSnapshot(seconds(at)), SnapshotResult::ok);
-  };
-  take(a, 1000);
-  take(b, 999);
-  take(a, 1);  // both clocks restart, and b lags behind a
-  take(b, 2);
-  take(a, 6);
-  take(b, 5);
+  Source a("a", sink);
+  Source b("b", sink);
+  a.take(seconds(1000));
+  b.take(seconds(999));
+  a.take(seconds(1));  // both clocks restart, and b lags behind a
+  b.take(seconds(2));
+  a.take(seconds(6));
+  b.take(seconds(5));
   sink.drain();
 
   ASSERT_TRUE(sink->requestDump());
@@ -94,22 +82,15 @@ TEST(MCAPRingSinkTimeJump, FlushAfterAJumpUsesTheNewestTimestampOfTheNewRun)
 TEST(MCAPRingSinkTimeJump, FlushOfACollectingDumpKeepsTheRunOfItsTrigger)
 {
   ScratchDir dir("ring_time_jump_collecting");
-  MCAPRingOptions options;
-  options.filepath = dir.file("jump.mcap");
-  options.window = seconds(10);
-  options.capacity_bytes = 1 << 20;
+  const auto options = ringOptions(dir.file("jump.mcap"), seconds(10));
   auto sink = manual<MCAPRingSink>(options);
-  int64_t value = 0;
-  auto channel = channelWith(sink, &value);
-  const auto take = [&](int64_t at) {
-    ASSERT_EQ(channel->takeSnapshot(seconds(at)), SnapshotResult::ok);
-  };
-  take(1000);
+  Source source("jump", sink);
+  source.take(seconds(1000));
   sink.drain();
   ASSERT_TRUE(sink->requestDump(seconds(100)));
-  take(1001);  // the trigger: the dump collects until 1101 s
-  take(1);     // the clock steps back
-  take(2);
+  source.take(seconds(1001));  // the trigger: the dump collects until 1101 s
+  source.take(seconds(1));     // the clock steps back
+  source.take(seconds(2));
   sink.drain();
   ASSERT_TRUE(sink->dumpRequested());
 

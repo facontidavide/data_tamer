@@ -16,10 +16,11 @@
 #include <vector>
 
 using namespace DataTamer;
-using DataTamerTest::channelWith;
 using DataTamerTest::logTimes;
 using DataTamerTest::manual;
+using DataTamerTest::ringOptions;
 using DataTamerTest::ScratchDir;
+using DataTamerTest::Source;
 using DataTamerTest::summaryMessageCount;
 using std::chrono::nanoseconds;
 using std::chrono::seconds;
@@ -29,11 +30,10 @@ TEST(MCAPNegativeTimestamp, MCAPSinkCountsAnErrorAndDoesNotWriteTheMessage)
   ScratchDir dir("negative_mcap_sink");
   const auto path = dir.file("negative.mcap");
   auto sink = manual<MCAPSink>(path);
-  int64_t value = 0;
-  auto channel = channelWith(sink, &value);
+  Source source("negative", sink);
   for(const int64_t at : { 5, -1, 7 })
   {
-    ASSERT_EQ(channel->takeSnapshot(nanoseconds(at)), SnapshotResult::ok);
+    source.take(at);
     sink.drain();
   }
   sink.worker->stop();
@@ -46,16 +46,12 @@ TEST(MCAPNegativeTimestamp, MCAPSinkCountsAnErrorAndDoesNotWriteTheMessage)
 TEST(MCAPNegativeTimestamp, MCAPRingSinkCountsAnErrorAndDoesNotStoreTheSnapshot)
 {
   ScratchDir dir("negative_ring_sink");
-  MCAPRingOptions options;
-  options.filepath = dir.file("negative.mcap");
-  options.window = seconds(10);
-  options.capacity_bytes = 1 << 20;
+  const auto options = ringOptions(dir.file("negative.mcap"), seconds(10));
   auto sink = manual<MCAPRingSink>(options);
-  int64_t value = 0;
-  auto channel = channelWith(sink, &value);
+  Source source("negative", sink);
   for(const int64_t at : { 10, -1, 20 })
   {
-    ASSERT_EQ(channel->takeSnapshot(nanoseconds(at)), SnapshotResult::ok);
+    source.take(at);
   }
   sink.drain();
   EXPECT_EQ(sink.worker->errors(), 1u);
