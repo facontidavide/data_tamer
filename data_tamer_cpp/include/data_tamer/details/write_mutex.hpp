@@ -100,10 +100,7 @@ public:
     constexpr int kTriesPerClockCheck = 8;
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
-    const auto budget = std::chrono::nanoseconds(spin_ns);
-    const auto deadline = budget < Clock::time_point::max() - start ?
-                              start + budget :
-                              Clock::time_point::max();
+    const std::chrono::nanoseconds budget(spin_ns);
     do
     {
       for(int i = 0; i < kTriesPerClockCheck; i++)
@@ -114,7 +111,7 @@ public:
         }
         details::spinPause();
       }
-    } while(std::chrono::steady_clock::now() < deadline);
+    } while(Clock::now() - start < budget);
     return false;
   }
 
