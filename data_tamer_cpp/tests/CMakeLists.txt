@@ -67,64 +67,90 @@ if(DATA_TAMER_BUILD_ROS)
 endif()
 
 if(DATA_TAMER_BUILD_ROS AND gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
-    ament_add_gtest(datatamer_test ${DATATAMER_TEST_SOURCES} ros2_publisher_tests.cpp)
-    # ament_add_gtest links with the plain signature; CMake forbids mixing it with keywords.
-    target_link_libraries(datatamer_test data_tamer ${DATA_TAMER_MCAP_TARGET})
+    set(DATA_TAMER_USE_AMENT_GTEST ON)
+    list(APPEND DATATAMER_TEST_SOURCES ros2_publisher_tests.cpp)
 else()
     find_package(GTest REQUIRED)
     include(GoogleTest)
 
-    add_executable(datatamer_test ${DATATAMER_TEST_SOURCES})
-    target_compile_options(datatamer_test PRIVATE $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror=deprecated-declarations>)
-    target_link_libraries(datatamer_test PRIVATE data_tamer ${DATA_TAMER_MCAP_TARGET} GTest::gtest_main)
-
-    # Optional launcher for the test binary (the tsan preset uses it to run under
+    # Optional launcher for the test binaries (the tsan preset uses it to run under
     # `setarch -R`). CROSSCOMPILING_EMULATOR is honoured both by test discovery
     # and by the discovered tests, so per-test granularity is kept.
-    set(DATA_TAMER_TEST_WRAPPER "" CACHE FILEPATH "Optional launcher that execs the test binary (used for TSAN)")
-    if(DATA_TAMER_TEST_WRAPPER)
-        set_target_properties(datatamer_test PROPERTIES CROSSCOMPILING_EMULATOR "${DATA_TAMER_TEST_WRAPPER}")
-    endif()
-    gtest_discover_tests(datatamer_test DISCOVERY_MODE PRE_TEST)
+    set(DATA_TAMER_TEST_WRAPPER "" CACHE FILEPATH
+        "Optional launcher that execs the test binary (used for TSAN)")
 endif()
 
+# data_tamer_add_gtest(<target> SOURCES <files...> [LIBRARIES <targets...>])
+# A gtest program with one CTest test per gtest test: ament_add_gtest under ROS 2, an
+# executable with GTest::gtest_main and test discovery otherwise. The plain build
+# also runs it under DATA_TAMER_TEST_WRAPPER and turns a deprecated call into an error.
+function(data_tamer_add_gtest target)
+    cmake_parse_arguments(ARG "" "" "SOURCES;LIBRARIES" ${ARGN})
+    if(DATA_TAMER_USE_AMENT_GTEST)
+        ament_add_gtest(${target} ${ARG_SOURCES})
+        # ament_add_gtest links with the plain signature; CMake forbids mixing it with
+        # keywords.
+        if(ARG_LIBRARIES)
+            target_link_libraries(${target} ${ARG_LIBRARIES})
+        endif()
+    else()
+        add_executable(${target} ${ARG_SOURCES})
+        target_compile_options(${target} PRIVATE
+            $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror=deprecated-declarations>)
+        target_link_libraries(${target} PRIVATE ${ARG_LIBRARIES} GTest::gtest_main)
+        if(DATA_TAMER_TEST_WRAPPER)
+            set_target_properties(${target} PROPERTIES
+                CROSSCOMPILING_EMULATOR "${DATA_TAMER_TEST_WRAPPER}")
+        endif()
+        gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST)
+    endif()
+endfunction()
+
+# data_tamer_strict_cxx17(<target> [WARNINGS])
+# Compiles the target as strict C++17, without compiler extensions. WARNINGS also makes
+# every warning an error, as for the library.
+function(data_tamer_strict_cxx17 target)
+    cmake_parse_arguments(ARG "WARNINGS" "" "" ${ARGN})
+    set_target_properties(${target} PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    if(ARG_WARNINGS)
+        target_compile_options(${target} PRIVATE
+            $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
+            $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>)
+    endif()
+endfunction()
+
+# data_tamer_add_build_test(<test> <target>)
+# A test that builds the target, which is excluded from the default build, and passes
+# when the build succeeds.
+function(data_tamer_add_build_test name target)
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
+                --target ${target})
+    # The nested builds share one build directory: run them one at a time.
+    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK build_tree)
+endfunction()
+
+data_tamer_add_gtest(datatamer_test
+    SOURCES ${DATATAMER_TEST_SOURCES}
+    LIBRARIES data_tamer ${DATA_TAMER_MCAP_TARGET})
 # Tests are built as C++20 like the library.
 target_compile_features(datatamer_test PRIVATE cxx_std_20)
 
 # The allocation-failure tests replace operator new, so they are a program of their own.
-if(DATA_TAMER_BUILD_ROS AND gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
-    ament_add_gtest(datatamer_fault_test registration_fault_tests.cpp)
-    target_link_libraries(datatamer_fault_test data_tamer ${DATA_TAMER_MCAP_TARGET})
-else()
-    add_executable(datatamer_fault_test registration_fault_tests.cpp)
-    target_link_libraries(datatamer_fault_test
-        PRIVATE data_tamer ${DATA_TAMER_MCAP_TARGET} GTest::gtest_main)
-    if(DATA_TAMER_TEST_WRAPPER)
-        set_target_properties(datatamer_fault_test PROPERTIES
-            CROSSCOMPILING_EMULATOR "${DATA_TAMER_TEST_WRAPPER}")
-    endif()
-    gtest_discover_tests(datatamer_fault_test DISCOVERY_MODE PRE_TEST)
-endif()
+data_tamer_add_gtest(datatamer_fault_test
+    SOURCES registration_fault_tests.cpp
+    LIBRARIES data_tamer ${DATA_TAMER_MCAP_TARGET})
 target_compile_features(datatamer_fault_test PRIVATE cxx_std_20)
 
 # SerializeMe's byte-swapping path, built as for a big endian host. It is its own
 # executable: SerializeMe's inline functions differ from the ones in datatamer_test.
-if(DATA_TAMER_BUILD_ROS AND gtest_vendor_FOUND AND ament_cmake_gtest_FOUND)
-    ament_add_gtest(serialize_me_big_endian_test serialize_me_big_endian_tests.cpp)
-else()
-    add_executable(serialize_me_big_endian_test serialize_me_big_endian_tests.cpp)
-    target_link_libraries(serialize_me_big_endian_test PRIVATE GTest::gtest_main)
-    if(DATA_TAMER_TEST_WRAPPER)
-        set_target_properties(serialize_me_big_endian_test PROPERTIES
-            CROSSCOMPILING_EMULATOR "${DATA_TAMER_TEST_WRAPPER}")
-    endif()
-    gtest_discover_tests(serialize_me_big_endian_test DISCOVERY_MODE PRE_TEST)
-endif()
+data_tamer_add_gtest(serialize_me_big_endian_test
+    SOURCES serialize_me_big_endian_tests.cpp)
 target_compile_definitions(serialize_me_big_endian_test PRIVATE SERIALIZE_LITTLEENDIAN=0)
 target_include_directories(serialize_me_big_endian_test
     PRIVATE ${PROJECT_SOURCE_DIR}/include)
-set_target_properties(serialize_me_big_endian_test PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+data_tamer_strict_cxx17(serialize_me_big_endian_test)
 
 # Golden vectors for docs/wire_format.md, shared with the Python reference decoder.
 target_compile_definitions(datatamer_test PRIVATE
@@ -173,8 +199,7 @@ add_library(public_headers_cxx17 OBJECT public_headers_cxx17.cpp)
 target_include_directories(public_headers_cxx17 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 # sinks/mcap_encoding.hpp includes the MCAP headers.
 target_link_libraries(public_headers_cxx17 PRIVATE ${DATA_TAMER_MCAP_TARGET})
-set_target_properties(public_headers_cxx17 PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+data_tamer_strict_cxx17(public_headers_cxx17)
 
 # include/data_tamer/fwd.hpp must declare the types exactly as the full headers
 # define them, and work alone and in either include order. Object libraries only:
@@ -189,30 +214,26 @@ foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(${target} PRIVATE ${variant})
     target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
-    set_target_properties(${target} PROPERTIES
-        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    data_tamer_strict_cxx17(${target} WARNINGS)
     target_compile_options(${target} PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
-        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>
         $<$<BOOL:${DATA_TAMER_HAS_WMISMATCHED_TAGS}>:-Wmismatched-tags>)
 endforeach()
+
+# An object library of a source in tests/compile_fail/, built under the strict flags.
+function(data_tamer_add_probe target source)
+    add_library(${target} OBJECT ${ARGN} compile_fail/${source})
+    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    data_tamer_strict_cxx17(${target} WARNINGS)
+endfunction()
 
 # Compile-fail checks. A probe in tests/compile_fail/ compiles as written
 # (<stem>_control, part of the default build). <name>_fail adds `definition`, which
 # breaks the probe; the test builds it and passes when that build fails or, with
 # REGEX, when its output matches, which also checks the message the user gets.
-# OPTIONS are compile options of both variants, FAIL_OPTIONS of the failing one.
-function(data_tamer_add_probe target source)
-    add_library(${target} OBJECT ${ARGN} compile_fail/${source})
-    target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
-    set_target_properties(${target} PROPERTIES
-        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-    target_compile_options(${target} PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
-        $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror>)
-endfunction()
-
+# OPTIONS are compile options of both variants, FAIL_OPTIONS of the failing one. All
+# calls on one probe share its OPTIONS: the control target is made by the first call and
+# takes that call's.
 function(data_tamer_compile_fail_test name source definition)
     cmake_parse_arguments(ARG "" "REGEX" "OPTIONS;FAIL_OPTIONS" ${ARGN})
     get_filename_component(stem ${source} NAME_WE)
@@ -225,11 +246,7 @@ function(data_tamer_compile_fail_test name source definition)
     if(definition)
         target_compile_definitions(${name}_fail PRIVATE ${definition})
     endif()
-    add_test(NAME ${name}
-        COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG>
-                --target ${name}_fail)
-    # The nested builds share one build directory: run them one at a time.
-    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK build_tree)
+    data_tamer_add_build_test(${name} ${name}_fail)
     if(ARG_REGEX)
         set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARG_REGEX}")
     else()
@@ -297,22 +314,16 @@ endif()
 # only if the header defines the members it calls; a test builds it on demand.
 add_executable(logged_value_alone EXCLUDE_FROM_ALL logged_value_alone.cpp)
 target_link_libraries(logged_value_alone PRIVATE data_tamer)
-set_target_properties(logged_value_alone PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-add_test(NAME logged_value_header_alone
-    COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target logged_value_alone)
-set_tests_properties(logged_value_header_alone PROPERTIES RESOURCE_LOCK build_tree)
+data_tamer_strict_cxx17(logged_value_alone)
+data_tamer_add_build_test(logged_value_header_alone logged_value_alone)
 
 # The standalone parser is copied into other projects: with its templates instantiated
 # it must compile without a warning under the strict flags of this library.
 add_library(parser_header_warnings OBJECT parser_header_warnings.cpp)
 target_include_directories(parser_header_warnings PRIVATE ${PROJECT_SOURCE_DIR}/include)
-set_target_properties(parser_header_warnings PROPERTIES
-    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+data_tamer_strict_cxx17(parser_header_warnings WARNINGS)
 target_compile_options(parser_header_warnings PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>
-    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wconversion
-        -Wno-sign-conversion -Werror>)
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wconversion -Wno-sign-conversion>)
 
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built
