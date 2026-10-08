@@ -6,6 +6,7 @@
 #include <string>
 #include <string_view>
 #include <map>
+#include <type_traits>
 #include <vector>
 #include <variant>
 
@@ -63,33 +64,61 @@ using VarNumber = std::variant<
 /// Inverse of ToStr(); BasicType::OTHER for an unknown name.
 [[nodiscard]] BasicType FromStr(const std::string& str);
 
+/// The wire type of T. Integers map by size and signedness, so `long long` and
+/// `wchar_t` work like `int64_t` and `int32_t`; an enum maps to its underlying type.
+/// A custom type and a numeric type without a wire type (long double) give OTHER.
 template <typename T>
 inline constexpr BasicType GetBasicType()
 {
-  if constexpr(std::is_enum_v<T>)
+  using Type = std::remove_cv_t<T>;
+  if constexpr(std::is_enum_v<Type>)
   {
-    return GetBasicType<std::underlying_type_t<T>>();
+    return GetBasicType<std::underlying_type_t<Type>>();
   }
-
-  // clang-format off
-  if constexpr (std::is_same_v<T, bool>) return BasicType::BOOL;
-  if constexpr (std::is_same_v<T, char>) return BasicType::CHAR;
-  if constexpr (std::is_same_v<T, std::int8_t>) return BasicType::INT8;
-  if constexpr (std::is_same_v<T, std::uint8_t>) return BasicType::UINT8;
-
-  if constexpr (std::is_same_v<T, std::int16_t>) return BasicType::INT16;
-  if constexpr (std::is_same_v<T, std::uint16_t>) return BasicType::UINT16;
-
-  if constexpr (std::is_same_v<T, std::int32_t>) return BasicType::INT32;
-  if constexpr (std::is_same_v<T, std::uint32_t>) return BasicType::UINT32;
-
-  if constexpr (std::is_same_v<T, std::uint64_t>) return BasicType::UINT64;
-  if constexpr (std::is_same_v<T, std::int64_t>) return BasicType::INT64;
-
-  if constexpr (std::is_same_v<T, float>) return BasicType::FLOAT32;
-  if constexpr (std::is_same_v<T, double>) return BasicType::FLOAT64;
-  // clang-format on
-  return BasicType::OTHER;
+  else if constexpr(std::is_same_v<Type, bool>)
+  {
+    return BasicType::BOOL;
+  }
+  else if constexpr(std::is_same_v<Type, char>)
+  {
+    return BasicType::CHAR;
+  }
+  else if constexpr(std::is_integral_v<Type>)
+  {
+    constexpr bool is_signed = std::is_signed_v<Type>;
+    if constexpr(sizeof(Type) == 1)
+    {
+      return is_signed ? BasicType::INT8 : BasicType::UINT8;
+    }
+    else if constexpr(sizeof(Type) == 2)
+    {
+      return is_signed ? BasicType::INT16 : BasicType::UINT16;
+    }
+    else if constexpr(sizeof(Type) == 4)
+    {
+      return is_signed ? BasicType::INT32 : BasicType::UINT32;
+    }
+    else if constexpr(sizeof(Type) == 8)
+    {
+      return is_signed ? BasicType::INT64 : BasicType::UINT64;
+    }
+    else
+    {
+      return BasicType::OTHER;
+    }
+  }
+  else if constexpr(std::is_same_v<Type, float>)
+  {
+    return BasicType::FLOAT32;
+  }
+  else if constexpr(std::is_same_v<Type, double>)
+  {
+    return BasicType::FLOAT64;
+  }
+  else
+  {
+    return BasicType::OTHER;
+  }
 }
 
 template <typename T>

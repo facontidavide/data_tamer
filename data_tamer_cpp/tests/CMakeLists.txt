@@ -14,6 +14,7 @@ set(DATATAMER_TEST_SOURCES
     sink_lifecycle_tests.cpp
     channel_stats_tests.cpp
     value_ptr_tests.cpp
+    basic_type_tests.cpp
     logged_value_tests.cpp
     shared_state_tests.cpp
     channel_control_tests.cpp
@@ -121,6 +122,8 @@ endforeach()
 # (<stem>_control, part of the default build). The test defines a macro that breaks
 # the probe: <name>_fail is left out of the default build, and the test passes when
 # building it fails. Both variants share the flags, so the macro is the only cause.
+# With a fourth argument the test passes when the build output matches that regular
+# expression instead, which also checks the message the user gets.
 function(data_tamer_add_probe target source)
     add_library(${target} OBJECT ${ARGN} compile_fail/${source})
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
@@ -142,14 +145,24 @@ function(data_tamer_compile_fail_test name source definition)
     add_test(NAME ${name}
         COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ${name}_fail)
     # The nested builds share one build directory: run them one at a time.
-    set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE
-        RESOURCE_LOCK data_tamer_compile_fail)
+    set_tests_properties(${name} PROPERTIES RESOURCE_LOCK data_tamer_compile_fail)
+    if(ARGC GREATER 3)
+        set_tests_properties(${name} PROPERTIES PASS_REGULAR_EXPRESSION "${ARGV3}")
+    else()
+        set_tests_properties(${name} PROPERTIES WILL_FAIL TRUE)
+    endif()
 endfunction()
 
 data_tamer_compile_fail_test(pool_try_acquire_result_is_nodiscard
     snapshot_pool_nodiscard.cpp DT_IGNORE_TRY_ACQUIRE)
 data_tamer_compile_fail_test(pool_adopt_result_is_nodiscard
     snapshot_pool_nodiscard.cpp DT_IGNORE_ADOPT)
+
+foreach(case VALUE VECTOR MEMBER LOGGED)
+    string(TOLOWER ${case} case_name)
+    data_tamer_compile_fail_test(long_double_${case_name}_is_rejected
+        long_double_registration.cpp DT_LONG_DOUBLE_${case} "has no wire type")
+endforeach()
 
 # The inline stats() functions (LogChannel, SinkWorker, MCAPRingSink) are hidden:
 # a shared object that calls them must not export a copy. The probe is built

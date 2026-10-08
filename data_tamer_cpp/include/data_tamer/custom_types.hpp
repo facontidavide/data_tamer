@@ -113,6 +113,8 @@ struct CustomTypeName
 {
   static std::string_view get()
   {
+    static_assert(!IsNumericType<T>(), "numeric type has no wire type: use int, float "
+                                       "or double");
     static_assert(SerializeMe::has_TypeDefinition<T>(), "Missing TypeDefinition");
     if constexpr(SerializeMe::has_TypeDefinitionTrait<T>::value &&
                  SerializeMe::has_TypeDefinitionTraitName<T>::value)
