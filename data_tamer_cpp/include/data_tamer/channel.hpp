@@ -9,8 +9,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace DataTamer
@@ -383,12 +385,18 @@ private:
   bool schemaFrozen() const;
   bool hasCustomType(const std::string& type_name) const;
 
+  /// The custom types a registration adds to the schema, by type name.
+  using PendingTypes = std::map<std::string, FieldsVector>;
+
+  /// Adds to `types` the custom types `T` needs that the schema lacks, without changing
+  /// the channel. Throws if the schema is frozen and `T` is not in it.
   template <typename T>
-  void updateTypeRegistry();
+  void discoverTypes(PendingTypes& types);
 
   template <typename T>
-  void updateTypeRegistryImpl(FieldsVector& fields, const char* name);
+  void discoverTypesImpl(PendingTypes& types, FieldsVector& fields, const char* name);
 
+  /// Used by the registerValue() templates of binaries built against older headers.
   void addCustomType(const std::string& custom_type_name, const FieldsVector& fields);
 
   /// Throws std::runtime_error if `name` is empty or contains whitespace or control
@@ -396,9 +404,17 @@ private:
   /// channel unchanged.
   void checkValueName(const std::string& name) const;
 
+  /// Registers a value that needs no new custom type.
   [[nodiscard]] RegistrationID registerValueImpl(const std::string& name,
                                                  ValuePtr&& value_ptr,
                                                  CustomSerializer::Ptr type_info);
+
+  /// Registers the value and adds `types` to the schema as one step: it completes, or
+  /// the channel is unchanged.
+  [[nodiscard]] RegistrationID registerValueWithTypes(const std::string& name,
+                                                      ValuePtr&& value_ptr,
+                                                      CustomSerializer::Ptr type_info,
+                                                      PendingTypes&& types);
 };
 
 //----------------------------------------------------------------------
@@ -406,7 +422,8 @@ private:
 //----------------------------------------------------------------------
 
 template <typename T>
-void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_name)
+void LogChannel::discoverTypesImpl(PendingTypes& types, FieldsVector& fields,
+                                   const char* field_name)
 {
   using SerializeMe::container_info;
   TypeField field;
@@ -423,7 +440,7 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
     if constexpr(GetBasicType<Type>() == BasicType::OTHER)
     {
       field.type_name = CustomTypeName<Type>::get();
-      updateTypeRegistry<Type>();
+      discoverTypes<Type>(types);
     }
     else
     {
@@ -436,7 +453,7 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
     if constexpr(GetBasicType<T>() == BasicType::OTHER)
     {
       field.type_name = CustomTypeName<T>::get();
-      updateTypeRegistry<T>();
+      discoverTypes<T>(types);
     }
     else
     {
@@ -447,7 +464,7 @@ void LogChannel::updateTypeRegistryImpl(FieldsVector& fields, const char* field_
 }
 
 template <typename T>
-inline void LogChannel::updateTypeRegistry()
+inline void LogChannel::discoverTypes(PendingTypes& types)
 {
   if constexpr(!IsNumericType<
                    T>())  // everything below must not be instantiated for numbers
@@ -455,7 +472,6 @@ inline void LogChannel::updateTypeRegistry()
     using namespace SerializeMe;
     static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
 
-    FieldsVector fields;
     const std::string type_name(CustomTypeName<T>::get());
     if(schemaFrozen())
     {
@@ -467,17 +483,25 @@ inline void LogChannel::updateTypeRegistry()
       }
       return;
     }
-    if(auto added_serializer = typeRegistry().addType<T>(type_name, true))
+    if(hasCustomType(type_name))
     {
-      auto func = [this, &fields](const char* field_name, const auto* member) {
-        using MemberType =
-            typename std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
-        updateTypeRegistryImpl<MemberType>(fields, field_name);
-      };
-      T dummy;
-      SerializeMe::InvokeTypeDefinition(dummy, func);
-      addCustomType(type_name, fields);
+      return;
     }
+    // Entered before its fields are visited: a type that contains itself finds the entry.
+    const auto [entry, added] = types.try_emplace(type_name);
+    if(!added)
+    {
+      return;
+    }
+    FieldsVector fields;
+    auto func = [this, &types, &fields](const char* field_name, const auto* member) {
+      using MemberType =
+          typename std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
+      discoverTypesImpl<MemberType>(types, fields, field_name);
+    };
+    T dummy;
+    SerializeMe::InvokeTypeDefinition(dummy, func);
+    entry->second = std::move(fields);
   }
 }
 
@@ -496,9 +520,10 @@ inline RegistrationID LogChannel::registerValue(const std::string& name,
   }
   else
   {
-    updateTypeRegistry<T>();
+    PendingTypes types;
+    discoverTypes<T>(types);
     auto def = typeRegistry().getSerializer<T>();
-    return registerValueImpl(name, ValuePtr(value_ptr, def), def);
+    return registerValueWithTypes(name, ValuePtr(value_ptr, def), def, std::move(types));
   }
 }
 
@@ -539,9 +564,10 @@ inline RegistrationID LogChannel::registerValue(const std::string& prefix,
   }
   else
   {
-    updateTypeRegistry<T>();
+    PendingTypes types;
+    discoverTypes<T>(types);
     auto def = typeRegistry().getSerializer<T>();
-    return registerValueImpl(prefix, ValuePtr(vect), def);
+    return registerValueWithTypes(prefix, ValuePtr(vect), def, std::move(types));
   }
 }
 
@@ -558,9 +584,10 @@ inline RegistrationID LogChannel::registerValue(const std::string& prefix,
   }
   else
   {
-    updateTypeRegistry<T>();
+    PendingTypes types;
+    discoverTypes<T>(types);
     auto def = typeRegistry().getSerializer<T>();
-    return registerValueImpl(prefix, ValuePtr(vect, def), def);
+    return registerValueWithTypes(prefix, ValuePtr(vect, def), def, std::move(types));
   }
 }
 

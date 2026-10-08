@@ -24,6 +24,7 @@ set(DATATAMER_TEST_SOURCES
     logged_value_api_tests.cpp
     shared_state_tests.cpp
     channel_control_tests.cpp
+    registration_atomicity_tests.cpp
     channel_capacity_tests.cpp
     transaction_tests.cpp
     abi_tests.cpp

@@ -277,6 +277,14 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
                                              ValuePtr&& value_ptr,
                                              CustomSerializer::Ptr type_info)
 {
+  return registerValueWithTypes(name, std::move(value_ptr), std::move(type_info), {});
+}
+
+RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
+                                                  ValuePtr&& value_ptr,
+                                                  CustomSerializer::Ptr type_info,
+                                                  PendingTypes&& types)
+{
   // The public registration template holds control_mutex, including type
   // discovery, and has already validated the name with checkValueName().
   auto it = _p->registered_values.find(name);
@@ -295,12 +303,18 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
     // User code (typeSchema) runs before anything is published, so a throw
     // leaves the channel exactly as it was.
     std::optional<CustomSchema> custom_schema;
-    if(type_info && !_p->schema.custom_types.contains(type_info->typeName()))
+    if(type_info && !_p->schema.custom_types.contains(type_info->typeName()) &&
+       !types.contains(type_info->typeName()))
     {
       custom_schema = type_info->typeSchema();
     }
     _p->series.reserve(_p->series.size() + 1);
     _p->schema.fields.reserve(_p->schema.fields.size() + 1);
+
+    for(auto& [pending_name, pending_fields] : types)
+    {
+      _p->schema.custom_types[pending_name] = std::move(pending_fields);
+    }
 
     Pimpl::ValueHolder instance;
     instance.name = name;
