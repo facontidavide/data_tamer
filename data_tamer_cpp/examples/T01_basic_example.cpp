@@ -16,16 +16,16 @@ int main()
   auto channel = ChannelsRegistry::Global().getChannel("chan");
 
   // If you don't want to use addDefaultSink, you can do:
-  // channel->addDataSink(std::make_shared<DummySink>())
+  // channel->addDataSink(DummySink::create());
 
   // You can register any arithmetic value. You are responsible for their lifetime
   double value_real = 3.14;
   int value_int = 42;
-  [[maybe_unused]] auto id1 = channel->registerValue("value_real", &value_real);
+  auto id1 = channel->registerValue("value_real", &value_real);
   [[maybe_unused]] auto id2 = channel->registerValue("value_int", &value_int);
 
   // If you prefer to use RAII, use this method instead
-  // logged_float will disable itself when it goes out of scope.
+  // logged_float unregisters itself when it goes out of scope.
   auto logged_float = channel->createLoggedValue<float>("real");
 
   // this is the way you store the current snapshot of the values

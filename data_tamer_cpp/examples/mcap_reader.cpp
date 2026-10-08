@@ -1,8 +1,8 @@
 #include "data_tamer_parser/data_tamer_parser.hpp"
 #include <mcap/reader.hpp>
 
-// Try reading the generated [test_sample.mcap]
-// using examples/mcap_writer_sample.cpp
+// Reads an MCAP file written by DataTamer (for instance test_sample.mcap from
+// T03_mcap_writer) and counts the samples of each time series.
 int main(int argc, char** argv)
 {
   if(argc != 2)
@@ -37,8 +37,7 @@ int main(int argc, char** argv)
     hash_to_schema[dt_schema.hash] = dt_schema;
   }
 
-  // this application will do nothing with the actual data. We will simple count the
-  // number of messages per time series
+  // count the samples of each time series; the values themselves are not used
   using MessageCount = std::map<std::string, size_t>;
   std::map<std::string, MessageCount> message_counts_per_channel;
 

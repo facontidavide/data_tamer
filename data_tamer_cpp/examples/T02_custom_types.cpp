@@ -2,7 +2,6 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/dummy_sink.hpp"
 #include <iostream>
-#include <thread>
 
 // check the custom type in the following file,  that defines:
 //
@@ -11,11 +10,6 @@
 // - Pose
 
 #include "geometry_types.hpp"
-
-struct Bar
-{
-  int a;
-};
 
 int main()
 {
@@ -30,7 +24,7 @@ int main()
   Point3D point;
   Pose pose;
   std::vector<Point3D> points_vect(5);
-  std::array<int32_t, 3> value_array;
+  std::array<int32_t, 3> value_array = { 1, 2, 3 };
 
   channel->registerValue<Point3D>("point", &point);
   channel->registerValue("pose", &pose);
@@ -40,8 +34,7 @@ int main()
   // Print the schema to understand how they are serialized
   std::cout << channel->getSchema() << std::endl;
 
-  // Note has the size of the message is almost the same as the raw data.
-  // The only overhead is the size of points_vect
+  // The payload is the raw data plus the size of points_vect (4 bytes).
   size_t expected_size = sizeof(double) * 3 +  // point
                          sizeof(double) * 7 +  // pose
                          sizeof(uint32_t) +
@@ -49,7 +42,7 @@ int main()
                          sizeof(int32_t) * 3;        // value_array
 
   (void)channel->takeSnapshot();
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  dummy_sink->drain();  // deliver the snapshot before reading it
 
   std::cout << "\nMessage size: " << dummy_sink->as<DummySink>().latestPayloadSize()
             << " expected: " << expected_size << std::endl;

@@ -55,6 +55,6 @@ int main()
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  ChannelsRegistry::Global().stopAll();  // deliver what is queued, close the file
   std::cout << "DONE" << std::endl;
 }

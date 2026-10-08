@@ -57,7 +57,7 @@ int main(int argc, char* argv[])
     }
     if(count++ % 500 == 0)
     {
-      RCLCPP_INFO(node->get_logger(), "snapshots: %d\n", count);
+      RCLCPP_INFO(node->get_logger(), "snapshots: %d", count);
     }
     if(channel->takeSnapshot() != SnapshotResult::ok)
     {

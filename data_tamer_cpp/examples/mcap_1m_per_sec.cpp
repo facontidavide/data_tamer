@@ -26,12 +26,12 @@ void WritingThread(const std::string& channel_name)
     GREEN = 1,
     BLUE = 2
   };
-  Color color;
+  Color color = RED;
 
-  channel->registerValue("real64", &real64);
-  channel->registerValue("real32", &real32);
-  channel->registerValue("int16", &int16);
-  channel->registerValue("color", &color);
+  const RegistrationID ids[] = { channel->registerValue("real64", &real64),
+                                 channel->registerValue("real32", &real32),
+                                 channel->registerValue("int16", &int16),
+                                 channel->registerValue("color", &color) };
 
   int count = 0;
   double t = 0;
@@ -67,6 +67,12 @@ void WritingThread(const std::string& channel_name)
   }
   std::cout << "average execution time of takeSnapshot(): " << time_diff_nsec / count
             << " nanoseconds" << std::endl;
+
+  // The channel outlives this thread in the registry: stop it reading these locals.
+  for(const auto& id : ids)
+  {
+    channel->unregister(id);
+  }
 }
 
 int main()
@@ -75,12 +81,8 @@ int main()
   auto mcap_sink = MCAPSink::create("test_1M.mcap");
   ChannelsRegistry::Global().addDefaultSink(mcap_sink);
 
-  // Create (or get) a channel using the global registry (singleton)
-  auto channel = ChannelsRegistry::Global().getChannel("chan");
-
-  // Each WritingThread has 300 traced values.
-  // In total, we will collect 300*4 = 1200 traced values at 1 KHz
-  // for 10 seconds (12 million data points)
+  // Each thread logs 301 values (three vectors of 100 and a color) at 1 kHz for
+  // 10 seconds: about 12 million data points in total.
   const int N = 4;
   std::thread writers[N];
   for(int i = 0; i < N; i++)
@@ -92,4 +94,5 @@ int main()
   {
     writers[i].join();
   }
+  ChannelsRegistry::Global().stopAll();  // close test_1M.mcap
 }
