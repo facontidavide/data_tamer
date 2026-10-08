@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -33,6 +34,16 @@ using namespace DataTamer;
 using DataTamerTest::ringOptions;
 using DataTamerTest::Source;
 using std::chrono::nanoseconds;
+
+// requestDump() and dumpRequested() are called from real-time threads: they cannot throw.
+// A trait rather than noexcept(sink.requestDump()): that expression also builds the
+// default argument, whose std::chrono constructor is not declared noexcept.
+static_assert(std::is_nothrow_invocable_r_v<bool, decltype(&MCAPRingSink::requestDump),
+                                            MCAPRingSink&, std::chrono::nanoseconds>,
+              "requestDump() must be noexcept");
+static_assert(std::is_nothrow_invocable_r_v<bool, decltype(&MCAPRingSink::dumpRequested),
+                                            const MCAPRingSink&>,
+              "dumpRequested() must be noexcept");
 
 namespace
 {

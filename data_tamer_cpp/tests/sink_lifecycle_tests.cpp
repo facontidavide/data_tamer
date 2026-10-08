@@ -1,7 +1,9 @@
 // DataSink::onStop() and onStart(), ChannelsRegistry::stopAll(),
-// addDefaultSink() on existing channels and ChannelsRegistry::setChannelDefaults().
+// addDefaultSink() on existing channels and ChannelsRegistry::setChannelDefaults(), and
+// the typed access of a SinkWorker and the bookkeeping of a DummySink next to them.
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
+#include "data_tamer/sinks/dummy_sink.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
@@ -16,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
 
@@ -393,6 +396,29 @@ TEST(ChannelsRegistry, AddDefaultSinkIsUndoneWhenAChannelRefusesIt)
   EXPECT_EQ(registry.getChannel("after")->getNumberOfSinks(), 0u);
 }
 
+// A channel holds eight sinks, so a ninth default sink could never reach any channel.
+// It is refused when added, and getChannel() goes on working.
+TEST(ChannelsRegistry, RefusesANinthDefaultSinkBeforeAnyChannelExists)
+{
+  ChannelsRegistry registry;
+  std::vector<std::shared_ptr<SinkWorker>> sinks;
+  for(size_t i = 0; i < LogChannel::kMaxSinks; ++i)
+  {
+    sinks.push_back(DummySink::create());
+    registry.addDefaultSink(sinks.back());
+  }
+  EXPECT_THROW(registry.addDefaultSink(DummySink::create()), std::runtime_error);
+
+  // The registry still creates channels, with the eight sinks it accepted.
+  std::shared_ptr<LogChannel> channel;
+  ASSERT_NO_THROW(channel = registry.getChannel("controller"));
+  EXPECT_EQ(channel->getNumberOfSinks(), LogChannel::kMaxSinks);
+
+  // A sink that is a default sink already is not a new one.
+  EXPECT_NO_THROW(registry.addDefaultSink(sinks.front()));
+  EXPECT_EQ(registry.getChannel("controller")->getNumberOfSinks(), LogChannel::kMaxSinks);
+}
+
 TEST(ChannelsRegistry, ChannelDefaultsApplyToNewChannelsOnly)
 {
   ChannelsRegistry registry;
@@ -539,4 +565,45 @@ TEST(ChannelsRegistry, StopAllStopsEverySinkItReachesOnce)
   registry.stopAll();
   EXPECT_EQ(direct_journal->stopCount(), 2);
   EXPECT_EQ(default_journal->stopCount(), 1);
+}
+
+//------------------------------------------------------------------------------
+// SinkWorker and DummySink
+
+// A const worker still gives typed, read-only access to its sink, and the counters
+// a real-time thread reads are noexcept.
+TEST(SinkWorkerApi, ConstTypedAccessAndNoexceptCounters)
+{
+  const auto worker = DataTamerTest::manual<DummySink>().worker;
+  const SinkWorker& view = *worker;
+  EXPECT_EQ(view.as<DummySink>().schemasCount(), 0u);
+  EXPECT_THROW((void)view.as<LifecycleSink>(), std::bad_cast);
+  static_assert(noexcept(view.delivered()));
+  static_assert(noexcept(view.errors()));
+  static_assert(noexcept(view.queueHighWater()));
+  EXPECT_EQ(view.delivered(), 0u);
+}
+
+// The channel announces its schema again when the worker is attached again. The count of
+// the snapshots already delivered must survive it.
+TEST(DummySink, SnapshotCountSurvivesTheWorkerBeingAttachedAgain)
+{
+  auto sink = manual<DummySink>();
+  double value = 1.0;
+  auto channel = channelWith(sink, &value);
+  for(int i = 0; i < 3; ++i)
+  {
+    ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+    sink.drain();
+  }
+  const auto hash = sink->firstSchemaHash();
+  ASSERT_EQ(sink->snapshotsCount(hash), 3);
+
+  channel->removeDataSink(sink.worker);
+  ASSERT_TRUE(channel->addDataSink(sink.worker));
+  ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
+  sink.drain();
+
+  EXPECT_EQ(sink->snapshotsCount(hash), 4);
+  EXPECT_EQ(sink->schemasCount(), 1u);
 }

@@ -22,7 +22,6 @@ set(DATATAMER_TEST_SOURCES
     value_ptr_bounds_tests.cpp
     basic_type_tests.cpp
     logged_value_tests.cpp
-    logged_value_api_tests.cpp
     shared_state_tests.cpp
     channel_control_tests.cpp
     registration_atomicity_tests.cpp
@@ -44,19 +43,15 @@ set(DATATAMER_TEST_SOURCES
     mcap_sink_rollover_failure_tests.cpp
     mcap_ring_sink_time_jump_tests.cpp
     mcap_ring_sink_callback_tests.cpp
-    mcap_ring_sink_api_tests.cpp
-    dummy_sink_tests.cpp
     mcap_negative_timestamp_tests.cpp
     wire_format_tests.cpp
     name_tests.cpp
-    registry_limit_tests.cpp
     lock_order_tests.cpp
     visibility_tests.cpp
     worker_lifecycle_tests.cpp
     announcement_tests.cpp
     rt_syscall_tests.cpp
-    multi_producer_tests.cpp
-    sink_worker_api_tests.cpp)
+    multi_producer_tests.cpp)
 
 # look for gtest from ROS, but only when building for ROS 2
 if(DATA_TAMER_BUILD_ROS)
