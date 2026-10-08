@@ -293,7 +293,10 @@ template <typename T>
 inline void TypesRegistry::checkSameType(const CustomSerializer::Ptr& stored,
                                          const std::string& type_name)
 {
-  if(typeid(*stored) != typeid(CustomSerializerT<T>))
+  // Through a reference: clang warns that `typeid(*stored)` evaluates its operand
+  // (-Wpotentially-evaluated-expression).
+  const CustomSerializer& stored_ref = *stored;
+  if(typeid(stored_ref) != typeid(CustomSerializerT<T>))
   {
     throw std::runtime_error("custom type name '" + type_name +
                              "' is used by two C++ types: give each its own name");
