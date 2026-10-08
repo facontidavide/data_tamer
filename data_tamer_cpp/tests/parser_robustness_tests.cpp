@@ -233,3 +233,23 @@ TEST(ParserRobustness, LegacyTextWithoutAnyHeaderIsStillRead)
   EXPECT_EQ(schema.fields[1].field_name, "y");
   EXPECT_EQ(schema.fields[1].array_size, 3u);
 }
+
+TEST(ParserRobustness, VersionAndHashMustBeUnsignedDecimals)
+{
+  const std::string tail = "### channel_name: c\n\nfloat64 x\n";
+  for(const char* bad :
+      { "", "x", "-1", "+5", "12abc", "5.0", "1e3", "0x10", "99999999999999999999999" })
+  {
+    EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: " + std::string(bad) +
+                                     "\n" + tail),
+                 std::runtime_error)
+        << "hash [" << bad << "]";
+    EXPECT_THROW(BuildSchemaFromText("### version: " + std::string(bad) +
+                                     "\n### hash: 1\n" + tail),
+                 std::runtime_error)
+        << "version [" << bad << "]";
+  }
+  const auto largest =
+      BuildSchemaFromText("### version: 5\n### hash: 18446744073709551615\n" + tail);
+  EXPECT_EQ(largest.hash, UINT64_MAX);
+}

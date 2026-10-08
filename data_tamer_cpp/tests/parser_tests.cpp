@@ -95,12 +95,12 @@ TEST(DataTamerParser, SchemaHash)
 TEST(DataTamerParser, DeclaredSchemaHashUsesFullUint64Range)
 {
   const auto schema = BuildSchemaFromText("### hash: 18446744073709551615\nfloat64 "
-                                         "value\n");
+                                          "value\n");
   EXPECT_EQ(schema.hash, std::numeric_limits<uint64_t>::max());
   ASSERT_EQ(schema.fields.size(), 1U);
   EXPECT_EQ(schema.fields.front().field_name, "value");
   EXPECT_THROW(BuildSchemaFromText("### hash: 18446744073709551616\nfloat64 value\n"),
-               std::out_of_range);
+               std::runtime_error);
 }
 
 TEST(DataTamerParser, CustomTypes)

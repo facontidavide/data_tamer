@@ -97,5 +97,19 @@ class SchemaHeaders(unittest.TestCase):
         self.assertEqual(schema.fields, [dt.Field("x", "float64")])
 
 
+class SchemaNumbers(unittest.TestCase):
+    TAIL = "### channel_name: c\n\nfloat64 x\n"
+
+    def test_version_and_hash_must_be_unsigned_decimals(self):
+        for bad in ("", "x", "-1", "+5", "12abc", "5.0", "1e3", "0x10", "1_0", "\u0665",
+                    "99999999999999999999999"):  # "\u0665" is an Arabic-Indic digit
+            with self.subTest(bad=bad, header="hash"), self.assertRaises(ValueError):
+                dt.parse_schema(f"### version: 5\n### hash: {bad}\n" + self.TAIL)
+            with self.subTest(bad=bad, header="version"), self.assertRaises(ValueError):
+                dt.parse_schema(f"### version: {bad}\n### hash: 1\n" + self.TAIL)
+        largest = dt.parse_schema("### version: 5\n### hash: 18446744073709551615\n" + self.TAIL)
+        self.assertEqual(largest.hash, 2**64 - 1)
+
+
 if __name__ == "__main__":
     unittest.main()

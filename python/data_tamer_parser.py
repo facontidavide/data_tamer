@@ -164,10 +164,10 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
         if line.startswith("====="):
             continue
         if line.startswith("### version:"):
-            if int(line.split(":", 1)[1]) not in _READABLE_VERSIONS:
+            if _parse_uint(line.split(":", 1)[1].strip(), "version") not in _READABLE_VERSIONS:
                 raise ValueError(f"unsupported schema version in {line!r}")
         elif line.startswith("### hash:"):
-            schema.hash = int(line.split(":", 1)[1])
+            schema.hash = _parse_uint(line.split(":", 1)[1].strip(), "hash")
         elif line.startswith("### channel_name:"):
             schema.channel_name = line.split(":", 1)[1].strip()
         elif line.startswith("MSG: "):

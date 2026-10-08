@@ -892,17 +892,27 @@ inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = fals
     };
     if(isHeader("version"))
     {
+      const auto number = detail::ParseUnsigned(header_value);
+      if(!number)
+      {
+        throw std::runtime_error("DataTamerParser: invalid version in: " + line);
+      }
       // Version 4 differs only in how the hash was computed.
-      version = std::stoi(header_value);
-      if(version != SCHEMA_VERSION && version != 4)
+      if(*number != uint64_t(SCHEMA_VERSION) && *number != 4)
       {
         throw std::runtime_error("Wrong SCHEMA_VERSION");
       }
+      version = int(*number);
       continue;
     }
     if(isHeader("hash"))
     {
-      declared_schema = std::stoull(header_value);
+      const auto number = detail::ParseUnsigned(header_value);
+      if(!number)
+      {
+        throw std::runtime_error("DataTamerParser: invalid hash in: " + line);
+      }
+      declared_schema = *number;
       continue;
     }
     if(isHeader("channel_name"))
