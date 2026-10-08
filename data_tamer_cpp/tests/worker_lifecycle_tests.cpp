@@ -3,6 +3,7 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/data_tamer.hpp"
+#include "gate.hpp"
 #include "hang_watchdog.hpp"
 #include "test_sinks.hpp"
 
@@ -11,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <latch>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -18,6 +20,7 @@
 #include <vector>
 
 using namespace DataTamer;
+using DataTamerTest::Attached;
 using DataTamerTest::expectFinishes;
 
 namespace
@@ -121,8 +124,7 @@ protected:
 /// What a QueryingSink saw; outlives the sink.
 struct QueryJournal
 {
-  std::atomic<bool> holding{ false };   // a callback holds the channel
-  std::atomic<bool> released{ false };  // the test let it go on
+  DataTamerTest::Gate gate;  // parks the callback while it holds the channel
   std::atomic<int> stops{ 0 };
   std::atomic<bool> destroyed{ false };
 };
@@ -144,11 +146,7 @@ protected:
     if(auto channel = channel_.lock())
     {
       (void)channel->getSchema();
-      journal_->holding = true;
-      while(!journal_->released)
-      {
-        std::this_thread::yield();
-      }
+      journal_->gate.pause();
     }  // the last reference to the channel, and so to this worker, can end here
   }
   void onStop() override { ++journal_->stops; }
@@ -161,13 +159,10 @@ private:
 /// Runs `function` on two threads released together; returns how many calls threw.
 int runTwiceAtOnce(const std::function<void()>& function)
 {
-  std::atomic<int> ready{ 0 };
+  std::latch ready(2);
   std::atomic<int> thrown{ 0 };
   const auto run = [&] {
-    ready.fetch_add(1);
-    while(ready.load() < 2)
-    {
-    }
+    ready.arrive_and_wait();
     try
     {
       function();
@@ -210,22 +205,20 @@ TEST(WorkerLifecycle, LifecycleCallsFromOwnCallbacksThrowLogicError)
       SCOPED_TRACE(std::string(call.name) + " from " +
                    (from == ReentrantSink::From::Schema ? "onSchema()" : "onSnapshot()"));
       expectFinishes([from, call] {
-        auto owned = std::make_unique<ReentrantSink>(from, call.function);
-        auto* sink = owned.get();
-        auto worker = std::make_shared<SinkWorker>(std::move(owned));
-        sink->self = worker.get();
+        Attached<ReentrantSink> sink(from, call.function);
+        sink->self = sink.worker.get();
         auto channel = LogChannel::create("reentrant");
         double value = 1;
         channel->registerValue("value", &value);
         channel->startLogging();
-        channel->addDataSink(worker);  // onSchema() on this thread
+        channel->addDataSink(sink);  // onSchema() on this thread
         ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
         ASSERT_TRUE(waitFor([&] { return sink->snapshots == 1; }));
         EXPECT_EQ(sink->outcome, Outcome::LogicError);
         // The worker still accepts and delivers, and stop() still finishes the sink.
         EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
         EXPECT_TRUE(waitFor([&] { return sink->snapshots == 2; }));
-        worker->stop();
+        sink.worker->stop();
         EXPECT_EQ(sink->stops, 1);
       });
     }
@@ -241,39 +234,37 @@ TEST(WorkerLifecycle, ConcurrentLifecycleCallsOnOneWorker)
     for(int round = 0; round < 100; ++round)
     {
       ChannelsRegistry registry;
-      std::vector<CountingSink*> sinks;
+      std::vector<Attached<CountingSink>> sinks;
       for(int i = 0; i < 4; ++i)
       {
-        auto owned = std::make_unique<CountingSink>();
-        sinks.push_back(owned.get());
-        registry.addDefaultSink(std::make_shared<SinkWorker>(std::move(owned)));
+        sinks.emplace_back();
+        registry.addDefaultSink(sinks.back());
       }
       auto channel = registry.getChannel("stops");
       double value = 1;
       channel->registerValue("value", &value);
       ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
       ASSERT_EQ(runTwiceAtOnce([&] { registry.stopAll(); }), 0);
-      for(auto* sink : sinks)
+      for(const auto& sink : sinks)
       {
         ASSERT_EQ(sink->stops, 1);
       }
     }
-    auto owned = std::make_unique<CountingSink>();
-    auto* sink = owned.get();
-    SinkWorker worker(std::move(owned));
+    Attached<CountingSink> sink;
     for(int round = 0; round < 100; ++round)
     {
       const int stops = sink->stops;
-      ASSERT_EQ(runTwiceAtOnce([&] { worker.stop(); }), 0);
+      ASSERT_EQ(runTwiceAtOnce([&] { sink.worker->stop(); }), 0);
       ASSERT_EQ(sink->stops, stops + 1);  // the second stop() found it stopped
       std::atomic<bool> stopping{ false };
-      ASSERT_EQ(runTwiceAtOnce(
-                    [&] { stopping.exchange(true) ? worker.stop() : worker.start(); }),
+      ASSERT_EQ(runTwiceAtOnce([&] {
+                  stopping.exchange(true) ? sink.worker->stop() : sink.worker->start();
+                }),
                 0);
       // Stopped, so the start() finishes first or the stop() does nothing.
       ASSERT_GE(sink->stops - sink->starts, 0);
       ASSERT_LE(sink->stops - sink->starts, 1);
-      worker.start();
+      sink.worker->start();
       ASSERT_EQ(sink->stops, sink->starts);
     }
   });
@@ -290,11 +281,11 @@ TEST(WorkerLifecycle, WorkerReleasedByItsOwnCallbackFinishesTheSink)
     double value = 1;
     channel->registerValue("value", &value);
     channel->addDataSink(  // the channel holds the only reference to the worker
-        std::make_shared<SinkWorker>(std::make_unique<QueryingSink>(channel, journal)));
+        SinkWorker::create<QueryingSink>(channel, journal));
     ASSERT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-    ASSERT_TRUE(waitFor([&] { return journal->holding.load(); }));
+    ASSERT_TRUE(journal->gate.waitEntered());
     channel.reset();
-    journal->released = true;
+    journal->gate.release();
     EXPECT_TRUE(waitFor([&] { return journal->destroyed.load(); }));
     EXPECT_EQ(journal->stops, 1);
   });
