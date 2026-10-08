@@ -164,7 +164,8 @@ struct has_TypeDefinitionTraitName<
 {
 };
 
-// True if a TypeDefinition() overload is found for T by argument-dependent lookup:
+// True if a TypeDefinition() overload is found for T by argument-dependent lookup. It
+// returns the type name as a std::string_view, a const char* or a std::string:
 //
 // template <typename Func> std::string_view TypeDefinition(T&, Func&);
 
@@ -175,10 +176,9 @@ struct has_TypeDefinitionADL : std::false_type
 
 template <typename T>
 struct has_TypeDefinitionADL<
-    T, enable_if_same_t<std::string_view,
-                        decltype(TypeDefinition(std::declval<T&>(),
-                                                std::declval<EmptyFunc&>()))>>
-  : std::true_type
+    T, std::enable_if_t<std::is_convertible_v<
+           decltype(TypeDefinition(std::declval<T&>(), std::declval<EmptyFunc&>())),
+           std::string_view>>> : std::true_type
 {
 };
 
