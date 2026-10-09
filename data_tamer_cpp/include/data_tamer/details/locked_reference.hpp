@@ -6,10 +6,10 @@ namespace DataTamer
 {
 
 /**
- * @brief Read-only access to a non-scalar LoggedValue. Holds the channel's
- * write transaction for its lifetime, so it nests inside scopedWrite() and
- * inside another guard on the same channel. Not movable, like std::lock_guard:
- * `auto p = value->getConstPtr();` is fine (elided), storing it is not.
+ * @brief Read-only access to a non-scalar LoggedValue. Holds the channel's write
+ * transaction while it lives, so it nests inside scopedWrite() and other guards, and
+ * must be destroyed on the thread that created it. Not movable:
+ * `auto p = value->getConstPtr();` is fine, storing it is not.
  */
 template <typename T>
 class ConstPtr
@@ -27,8 +27,8 @@ private:
   ChannelSharedState::Transaction tx_;
 };
 
-/// Mutable counterpart of ConstPtr: the snapshot thread waits while it lives,
-/// so keep the scope short and allocation-free.
+/// Mutable counterpart of ConstPtr. The snapshot thread waits while it lives: keep the
+/// scope short and allocation-free.
 template <typename T>
 class MutablePtr
 {

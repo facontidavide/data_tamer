@@ -2,6 +2,7 @@
 #include "data_tamer/details/snapshot_pool.hpp"
 #include "data_tamer/sinks/mcap_sink.hpp"
 #include "alloc_counter.hpp"
+#include "hang_watchdog.hpp"
 #include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
 
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -26,6 +28,7 @@ using namespace DataTamer;
 using DataTamerTest::attach;
 using DataTamerTest::Attached;
 using DataTamerTest::channelWith;
+using DataTamerTest::droppedBy;
 using DataTamerTest::manual;
 using Delivery = SinkWorker::Delivery;
 
@@ -49,6 +52,15 @@ public:
 Attached<QueueSink> queueSink(Delivery delivery = Delivery::Manual)
 {
   return attach<QueueSink>(delivery);
+}
+
+// Busy wait: a sleep lasts far longer than the few microseconds asked for.
+void spinFor(std::chrono::microseconds length)
+{
+  const auto until = std::chrono::steady_clock::now() + length;
+  while(std::chrono::steady_clock::now() < until)
+  {
+  }
 }
 }  // namespace
 
@@ -99,8 +111,8 @@ TEST(SinkQueue, RefusedFanoutReleasesItsReferenceWithoutExhaustingPool)
     running.drain();
   }
   EXPECT_EQ(received, 224);
-  EXPECT_EQ(channel->droppedSnapshots(stopped), 192u);
-  EXPECT_EQ(channel->droppedSnapshots(running), 0u);
+  EXPECT_EQ(droppedBy(*channel, stopped), 192u);
+  EXPECT_EQ(droppedBy(*channel, running), 0u);
   EXPECT_EQ(channel->poolExhausted(), 0u);
   stopped.worker->start();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
@@ -124,7 +136,7 @@ TEST(SinkQueue, PoolExhaustionIsSeparateAndRetainedSlotsAreReusable)
   EXPECT_NE(channel->takeSnapshot(), SnapshotResult::ok);
   EXPECT_EQ(channel->poolExhausted(), 1u);
   EXPECT_EQ(channel->stats().pool_exhausted, 1u);
-  EXPECT_EQ(channel->droppedSnapshots(sink), 0u);
+  EXPECT_EQ(droppedBy(*channel, sink), 0u);
   retained.clear();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
   channel->removeDataSink(sink);
@@ -280,8 +292,8 @@ TEST(SinkQueue, RejectedWhenEverySinkRefusesPartialWhenSomeDo)
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::partial);
   second.worker->stop();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::rejected);
-  EXPECT_EQ(channel->droppedSnapshots(first), 2u);
-  EXPECT_EQ(channel->droppedSnapshots(second), 1u);
+  EXPECT_EQ(droppedBy(*channel, first), 2u);
+  EXPECT_EQ(droppedBy(*channel, second), 1u);
   first.worker->start();
   second.worker->start();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
@@ -640,8 +652,8 @@ TEST(SinkQueue, FastConsumerCannotReleaseParentBeforeSecondFanout)
   first.worker->stop();
   second.worker->stop();
   EXPECT_GT(accepted, 0u);
-  EXPECT_EQ(channel->droppedSnapshots(first), 0u);
-  EXPECT_EQ(channel->droppedSnapshots(second), 0u);
+  EXPECT_EQ(droppedBy(*channel, first), 0u);
+  EXPECT_EQ(droppedBy(*channel, second), 0u);
   EXPECT_EQ(received[0].size(), accepted);
   EXPECT_EQ(received[0], received[1]);
 }
@@ -715,18 +727,23 @@ struct CountingChannels
     ADD_FAILURE() << "snapshot of an unknown channel";
   }
 
-  /// One producer thread per channel takes `snapshots` snapshots; returns how
-  /// many each channel had accepted, and counts the refused ones (rejected or
-  /// partial) in `refused`.
+  /// One producer thread per channel takes `snapshots` snapshots, then goes on until
+  /// one is accepted (10 s at most: under load, a whole run can fall between a
+  /// removeDataSink() and the next addDataSink()); returns how many each channel had
+  /// accepted, and counts the refused ones (rejected or partial) in `refused`.
   std::vector<uint64_t> runProducers(uint64_t snapshots, std::vector<uint64_t>& refused)
   {
     std::vector<uint64_t> accepted(channels.size(), 0);
     refused.assign(channels.size(), 0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     std::vector<std::thread> producers;
     for(size_t i = 0; i < channels.size(); ++i)
     {
       producers.emplace_back([&, i] {
-        for(uint64_t n = 0; n < snapshots; ++n)
+        for(uint64_t n = 0;
+            n < snapshots ||
+            (accepted[i] == 0 && std::chrono::steady_clock::now() < deadline);
+            ++n)
         {
           const auto result = take(i);
           accepted[i] += result == SnapshotResult::ok;
@@ -848,7 +865,7 @@ TEST(SinkQueue, PoolIsTheOnlyBoundAcrossChannelsRoundsAndReattachment)
   counting.verify(whole_pools);
   for(size_t i = 0; i < kChannels; ++i)
   {
-    EXPECT_EQ(counting.channels[i]->droppedSnapshots(sink), 0u);
+    EXPECT_EQ(droppedBy(*counting.channels[i], sink), 0u);
   }
 }
 
@@ -1091,4 +1108,99 @@ TEST(SinkQueue, EverySnapshotWakesAnIdleWorker)
         << "round " << n;
   }
   sink.worker->stop();
+}
+
+// A snapshot wakes a sleeping worker after it released the write mutex and left its
+// epoch, so another thread can remove and destroy the worker before the wake: the
+// worker's stop() then waits for it. Workers come and go while a channel logs from its
+// own thread, with pauses that let each worker fall asleep between snapshots. A lost
+// wake hangs (the watchdog fails the test), and a wake into a freed worker shows
+// under AddressSanitizer or ThreadSanitizer.
+TEST(SinkQueue, WorkerRemovedAndDestroyedBeforeItsWake)
+{
+  DataTamerTest::expectFinishes(
+      [] {
+        uint64_t value = 0;
+        auto channel = LogChannel::create("owed_wake");
+        channel->registerValue("value", &value);
+        channel->startLogging();
+        std::atomic<bool> done{ false };
+        std::atomic<uint64_t> accepted{ 0 };
+        std::thread producer([&] {
+          for(int n = 0; !done; ++n)
+          {
+            spinFor(std::chrono::microseconds(n % 40));
+            accepted += channel->tryTakeSnapshot() == SnapshotResult::ok ? 1 : 0;
+          }
+        });
+        for(int round = 0; round < 2000; ++round)
+        {
+          auto worker = attach<QueueSink>(Delivery::Threaded);
+          channel->addDataSink(worker);
+          spinFor(std::chrono::microseconds(round % 100));
+          channel->removeDataSink(worker);
+        }  // the last reference to each worker is dropped here
+        done = true;
+        producer.join();
+        EXPECT_GT(accepted.load(), 0u);
+      },
+      std::chrono::seconds(60));
+}
+
+// WorkerRemovedAndDestroyedBeforeItsWake with the last reference dropped by a drain()
+// callback: ~SinkWorker() leaves the stop to a thread of its own and the SinkWorker is
+// gone at once, while a snapshot can still owe its worker the wake. Seven sleeping
+// workers in the lower slots are woken first, which gives the drain time to win the
+// race. A wake through the dead SinkWorker crashes or shows under the sanitizers, and a
+// lost one hangs.
+TEST(SinkQueue, WorkerReleasedByADrainCallbackBeforeItsWake)
+{
+  DataTamerTest::expectFinishes(
+      [] {
+        uint64_t value = 0;
+        auto channel = LogChannel::create("owed_wake_drain");
+        channel->registerValue("value", &value);
+        channel->startLogging();
+        // addDataSink() takes the highest free slot: keep the last one for the rounds.
+        auto placeholder = queueSink();
+        channel->addDataSink(placeholder);
+        std::vector<Attached<QueueSink>> sleepers;
+        for(size_t i = 1; i < LogChannel::kMaxSinks; ++i)
+        {
+          sleepers.push_back(queueSink(Delivery::Threaded));
+          channel->addDataSink(sleepers.back());
+        }
+        channel->removeDataSink(placeholder);
+        std::atomic<bool> done{ false };
+        std::thread producer([&] {
+          for(int n = 0; !done; ++n)
+          {
+            spinFor(std::chrono::microseconds(25 + n % 40));  // the workers fall asleep
+            (void)channel->tryTakeSnapshot();
+          }
+        });
+        const auto drainer = std::this_thread::get_id();
+        int released_by_callback = 0;
+        for(int round = 0; round < 1000; ++round)
+        {
+          std::shared_ptr<SinkWorker> last =
+              std::make_shared<SinkWorker>(std::make_unique<QueueSink>());
+          SinkWorker* worker = last.get();
+          worker->as<QueueSink>().callback = [&last, drainer](const SnapshotRef&) {
+            if(std::this_thread::get_id() == drainer)
+            {
+              last.reset();
+            }
+          };
+          channel->addDataSink(last);
+          spinFor(std::chrono::microseconds(round % 100));
+          channel->removeDataSink(last);
+          worker->drain();  // a snapshot still queued drops `last`
+          released_by_callback += last ? 0 : 1;
+        }
+        done = true;
+        producer.join();
+        EXPECT_GT(released_by_callback, 0);
+      },
+      std::chrono::seconds(60));
 }

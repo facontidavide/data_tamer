@@ -36,6 +36,11 @@ from dataclasses import dataclass, field
 SCHEMA_VERSION = 5
 SCHEMA_YAML_VERSION = 6  # the YAML rendering of the same schema (spec section 2.1)
 _READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
+# A type section starts with a line of "=": the writer emits _SEPARATOR_WIDTH of them and
+# the reader accepts _MIN_SEPARATOR_WIDTH or more.
+_SEPARATOR_WIDTH = 59
+_MIN_SEPARATOR_WIDTH = 30
+_TRIM = " \r"  # all a line or a value loses at its ends (spec section 2): a tab stays
 
 # Basic type name -> little-endian struct; the order is the BasicType id order.
 _STRUCT = {
@@ -69,6 +74,10 @@ class Schema:
     custom_types: dict[str, list[Field]] = field(default_factory=dict)
     # opaque custom encodings: type name -> (encoding, schema text)
     custom_schemas: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # fewest payload bytes one element of a custom type takes, by type name: filled by
+    # parse_snapshot(), so it is only right while custom_types is left alone
+    _min_sizes: dict[str, int] = field(default_factory=dict, init=False, repr=False,
+                                       compare=False)
 
     def field_names(self) -> list[str]:
         """The flattened names parse_snapshot() can produce, in payload order,
@@ -80,7 +89,8 @@ class Schema:
         (the decoder emits "vec[0]", "points[1]/x", ...). "[]" is a placeholder:
         a field whose own name ends in "[]" would be listed the same way. A field of an opaque
         custom type is listed under its own name; its content is not described
-        by the schema, and parse_snapshot() raises ValueError when it is enabled.
+        by the schema, and parse_snapshot() raises ValueError when it is enabled,
+        unless it is a dynamic vector with no element.
 
         Raises ValueError for an undefined or cyclic custom type, for nesting
         deeper than parse_snapshot() accepts (MAX_SCHEMA_DEPTH), and when the
@@ -112,11 +122,19 @@ def _parse_type_spec(spec: str, name: str) -> Field:
     return Field(name, type_name, True, int(inner) if inner else 0)
 
 
+def _valid_name(name: str) -> bool:
+    """A field name is not empty and holds no character up to the space and no DEL
+    (spec section 2); characters above 0x7f are fine."""
+    return bool(name) and all(c > " " and c != "\x7f" for c in name)
+
+
 def _parse_field_line(line: str) -> Field:
     type_part, _, name = line.partition(" ")
-    name = name.strip()
+    name = name.strip(_TRIM)
     if not name:
         raise ValueError(f"field line without a name: {line!r}")
+    if not _valid_name(name):
+        raise ValueError(f"invalid field name in {line!r}")
     return _parse_type_spec(type_part, name)
 
 
@@ -152,39 +170,65 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     if _first_line(text).startswith("version:"):
         return _parse_schema_yaml(text, verify_hash)
     schema = Schema()
-    lines = iter(text.splitlines())
+    lines = text.split("\n")
     target = schema.fields
     last_type = ""
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("====="):
+    seen_line = False
+    previous = ""  # the last non-blank line: "separator", "MSG" or "" for any other
+    for index, raw in enumerate(lines):
+        line = raw.strip(_TRIM)
+        if not line:
             continue
-        if line.startswith("### version:"):
-            if int(line.split(":", 1)[1]) not in _READABLE_VERSIONS:
+        seen_line = True
+        after_separator = previous == "separator"
+        if after_separator and not line.startswith("MSG: "):
+            raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
+        opens_section = previous == "MSG"
+        previous = ""
+        if len(line) >= _MIN_SEPARATOR_WIDTH and not line.strip("="):
+            previous = "separator"
+            continue
+        key, colon, value = line.partition(":")  # a header is "### key: value"
+        value = value.strip(_TRIM)
+        if colon and key == "### version":
+            if _parse_uint(value, "version") not in _READABLE_VERSIONS:
                 raise ValueError(f"unsupported schema version in {line!r}")
-        elif line.startswith("### hash:"):
-            schema.hash = int(line.split(":", 1)[1])
-        elif line.startswith("### channel_name:"):
-            schema.channel_name = line.split(":", 1)[1].strip()
+        elif colon and key == "### hash":
+            schema.hash = _parse_uint(value, "hash")
+        elif colon and key == "### channel_name":
+            schema.channel_name = value
         elif line.startswith("MSG: "):
-            last_type = line[5:].strip()
+            if not after_separator:
+                raise ValueError(f'"MSG: " not right after a separator, in {line!r}')
+            last_type = line[5:].strip(_TRIM)
             target = schema.custom_types.setdefault(last_type, [])
+            previous = "MSG"
         elif line.startswith("ENCODING: "):
-            # Opaque sections come last and own the rest of the text (spec section 2).
-            schema.custom_schemas[last_type] = (line[10:].strip(), "\n".join(lines))
+            # Opaque sections come last and own the rest of the text (spec section 2), one
+            # final newline (which the writer adds) apart.
+            if not opens_section:
+                raise ValueError(f"ENCODING: outside the start of a section, in {line!r}")
+            foreign = "\n".join(lines[index + 1:])
+            schema.custom_schemas[last_type] = (line[10:].strip(_TRIM), foreign.removesuffix("\n"))
             del schema.custom_types[last_type]
             break
         else:
             target.append(_parse_field_line(line))
+    if not seen_line:
+        raise ValueError("empty schema text")
+    if previous == "separator":
+        raise ValueError('expected "MSG: <type name>" after the last separator')
     if verify_hash and schema.hash != schema_hash(text):
         raise ValueError("schema hash does not match its text")
     return schema
 
 
 def _first_line(text: str) -> str:
+    """The first line that is not blank or a YAML comment. A line that starts with "###"
+    is a header of the line format, not a comment (spec section 2.1)."""
     for raw in text.split("\n"):
-        line = raw.strip(" \r")
-        if line and not line.startswith("#"):
+        line = raw.strip(_TRIM)
+        if line and (not line.startswith("#") or line.startswith("###")):
             return line
     return ""
 
@@ -198,7 +242,7 @@ def _field_line(f: Field) -> str:
 def to_text(schema: Schema) -> str:
     """Render a schema in the version 5 line format, byte for byte as the C++
     writer does; schema_hash() of the result is the schema hash (section 5)."""
-    sep = "=" * 59 + "\n"
+    sep = "=" * _SEPARATOR_WIDTH + "\n"
     out = [f"### version: {SCHEMA_VERSION}\n### hash: {schema.hash}\n"
            f"### channel_name: {schema.channel_name}\n\n"]
     out += [_field_line(f) + "\n" for f in schema.fields]
@@ -327,7 +371,10 @@ def _parse_yaml_tree(text: str) -> list:
 def _flatten(nodes: list, prefix: str, out: list[Field]) -> None:
     for key, value, children in nodes:
         if children is None:
-            out.append(_parse_type_spec(value, prefix + key))
+            name = prefix + key
+            if not _valid_name(name):
+                raise ValueError(f"YAML schema: invalid field name {name!r}")
+            out.append(_parse_type_spec(value, name))
         else:
             _flatten(children, prefix + key + "/", out)
 
@@ -377,6 +424,19 @@ def _parse_schema_yaml(text: str, verify_hash: bool) -> Schema:
 MAX_SCHEMA_DEPTH = 64  # deeper nesting is treated as a malformed (cyclic) schema
 
 
+# The two functions below build the errors, and the callers test the depth and look the
+# fields up themselves: a call per field would cost a flat snapshot about 5%.
+def _nesting_error() -> ValueError:
+    return ValueError("custom types nested too deeply (cyclic schema?)")
+
+
+def _undecodable_error(schema: Schema, type_name: str) -> ValueError:
+    """The error for a custom type the schema does not describe field by field."""
+    if type_name in schema.custom_schemas:
+        return ValueError(f"type {type_name!r} has an opaque encoding; cannot continue")
+    return ValueError(f"unknown type {type_name!r}")
+
+
 def get_bit(mask: bytes, index: int) -> bool:
     if (index >> 3) >= len(mask):
         raise ValueError("active mask shorter than the schema")
@@ -400,14 +460,51 @@ class _Reader:
         return value.decode("latin-1") if type_name == "char" else value
 
 
+def _min_element_size(f: Field, schema: Schema, depth: int) -> int:
+    """Fewest payload bytes one element of `f` takes: the size of a basic type, or the
+    sum of the fewest bytes of each field of the custom type (kept on the schema)."""
+    if f.is_basic:
+        return _STRUCT[f.type_name].size
+    memo = schema._min_sizes
+    if f.type_name not in memo:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
+        if depth > MAX_SCHEMA_DEPTH:
+            raise _nesting_error()
+        memo[f.type_name] = sum(_min_field_size(sub, schema, depth + 1) for sub in subs)
+    return memo[f.type_name]
+
+
+def _min_field_size(f: Field, schema: Schema, depth: int) -> int:
+    """Fewest payload bytes `f` takes: its elements at their fewest bytes, or only the
+    4 byte count for a dynamic vector."""
+    if f.is_vector and not f.array_size:
+        return 4
+    return _min_element_size(f, schema, depth) * (f.array_size if f.is_vector else 1)
+
+
 def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: dict,
                  depth: int = 0) -> None:
     if depth > MAX_SCHEMA_DEPTH:
-        raise ValueError("custom types nested too deeply (cyclic schema?)")
+        raise _nesting_error()
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
     if f.is_vector:
         count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
-        if f.is_basic and count * _STRUCT[f.type_name].size > reader.remaining():
+        if not count:
+            # Nothing to read: an opaque type has nothing to skip, but a type the schema
+            # does not define at all makes it malformed, whatever the count.
+            if (not f.is_basic and f.type_name not in schema.custom_types
+                    and f.type_name not in schema.custom_schemas):
+                raise _undecodable_error(schema, f.type_name)
+            return
+        # An element takes at least `least` bytes: a count the payload cannot hold is
+        # rejected. Elements of no byte hold no value, however many there are.
+        least = (_STRUCT[f.type_name].size if f.is_basic
+                 else _min_element_size(f, schema, depth))
+        if least == 0:
+            return
+        if count * least > reader.remaining():
             raise ValueError("payload truncated")
         names = (f"{name}[{i}]" for i in range(count))  # lazy: the count is untrusted
     else:
@@ -415,13 +512,13 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
     if f.is_basic:
         for n in names:
             out[n] = reader.number(f.type_name)
-    elif f.type_name in schema.custom_types:
-        subs = schema.custom_types[f.type_name]
+    else:
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
         for n in names:
             for sub in subs:
                 _parse_field(sub, schema, reader, n, out, depth + 1)
-    else:
-        raise ValueError(f"type {f.type_name!r} has an opaque encoding; cannot continue")
 
 
 MAX_FIELD_NAMES = 1_000_000  # Schema.field_names() refuses to list more names
@@ -435,20 +532,20 @@ def _names_count(f: Field, schema: Schema, memo: dict, depth: int) -> int:
     linear in the number of type references, whatever the array sizes.
     """
     if depth > MAX_SCHEMA_DEPTH:
-        raise ValueError("custom types nested too deeply (cyclic schema?)")
+        raise _nesting_error()
     per_element, height = 1, 0  # basic or opaque type: one name, no nesting
     if not f.is_basic and f.type_name not in schema.custom_schemas:
-        if f.type_name not in schema.custom_types:
-            raise ValueError(f"type {f.type_name!r} is not defined in the schema")
+        subs = schema.custom_types.get(f.type_name)
+        if subs is None:
+            raise _undecodable_error(schema, f.type_name)
         if f.type_name in memo:
             if memo[f.type_name] is None:
                 raise ValueError(f"custom type {f.type_name!r} contains itself (cyclic schema)")
             per_element, height = memo[f.type_name]
             if depth + height > MAX_SCHEMA_DEPTH:
-                raise ValueError("custom types nested too deeply")
+                raise _nesting_error()
         else:
             memo[f.type_name] = None
-            subs = schema.custom_types[f.type_name]
             per_element = sum(_names_count(sub, schema, memo, depth + 1) for sub in subs)
             height = 1 + max((memo[sub.type_name][1] for sub in subs
                               if memo.get(sub.type_name)), default=0) if subs else 0
@@ -490,15 +587,23 @@ def parse_snapshot(schema: Schema, active_mask: bytes, payload: bytes) -> dict[s
 
 
 def split_mcap_message(data: bytes) -> tuple[bytes, bytes]:
-    """Split an MCAPSink message body into (active_mask, payload)."""
-    (mask_len,) = struct.unpack_from("<I", data, 0)
-    mask = data[4:4 + mask_len]
-    (payload_len,) = struct.unpack_from("<I", data, 4 + mask_len)
-    start = 8 + mask_len
-    payload = data[start:start + payload_len]
-    if start + payload_len != len(data):
+    """Split an MCAPSink message body into (active_mask, payload).
+
+    Raises ValueError if the body is shorter than the lengths it declares, or longer.
+    """
+    def length_at(pos: int) -> int:
+        if pos + 4 > len(data):
+            raise ValueError("MCAP message body truncated")
+        return struct.unpack_from("<I", data, pos)[0]
+
+    mask_end = 4 + length_at(0)
+    start = mask_end + 4
+    payload_end = start + length_at(mask_end)
+    if payload_end > len(data):
+        raise ValueError("MCAP message body truncated")
+    if payload_end < len(data):
         raise ValueError("MCAP message body has trailing bytes")
-    return mask, payload
+    return data[4:mask_end], data[start:payload_end]
 
 
 class SchemaRegistry:

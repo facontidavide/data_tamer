@@ -2,7 +2,6 @@
 
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/details/abi.hpp"
-#include "data_tamer/sinks/mcap_sink.hpp"  // details::NumberedPath
 
 #include <chrono>
 #include <cstddef>
@@ -17,82 +16,70 @@ namespace DataTamer
 /// Configuration of an MCAPRingSink.
 struct MCAPRingOptions
 {
-  /// Dump number N (1, 2, 3, ...) is written to details::NumberedPath(filepath, N):
-  /// "crash.mcap" -> "crash_1.mcap", "crash_2.mcap", ... Numbers whose file
-  /// exists already (dumps of an earlier run, for instance) are skipped, so
-  /// no file is ever overwritten.
+  /// Dump N (1, 2, ...) goes to details::NumberedPath(filepath, N): "crash.mcap" ->
+  /// "crash_1.mcap", "crash_2.mcap". Names that exist already are skipped, so no file
+  /// is ever overwritten.
   std::string filepath = "flight_recorder.mcap";
-  /// How much history before the trigger a dump contains, in snapshot time.
+  /// History kept before the trigger, in snapshot time.
   std::chrono::nanoseconds window = std::chrono::seconds(10);
-  /// Size of the RAM ring. A second buffer of the same size holds the dump
-  /// being written, so the sink uses about 2 * capacity_bytes. When the ring
-  /// is full the oldest snapshots are evicted, even if younger than `window`
-  /// or part of an active dump (see MCAPRingDump::truncated).
+  /// Size of the RAM ring. A second buffer of the same size holds the dump being
+  /// written, so the sink uses about 2 * capacity_bytes. A full ring evicts its oldest
+  /// snapshots even if younger than `window` (see MCAPRingDump::truncated).
   size_t capacity_bytes = size_t(64) * 1024 * 1024;
   /// Compress the dump files with zstd.
   bool compression = false;
 };
 
-/// Outcome of one dump, passed to the MCAPRingSink dump callback.
+/// Outcome of one dump, passed to the dump callback.
 struct MCAPRingDump
 {
   std::string path;
   /// Timestamp of the snapshot that triggered the dump.
   std::chrono::nanoseconds trigger_time{ 0 };
-  /// Requested interval: the dump holds the stored snapshots whose timestamp
-  /// is in [start, end]. flushPendingDump() may cut `end`.
+  /// Requested interval [start, end]. flushPendingDump() can cut `end`.
   std::chrono::nanoseconds start{ 0 };
   std::chrono::nanoseconds end{ 0 };
   /// Timestamps of the oldest and newest message written (0 if none).
   std::chrono::nanoseconds first_message{ 0 };
   std::chrono::nanoseconds last_message{ 0 };
   size_t messages = 0;
-  /// The ring was full and evicted snapshots of [start, end] before the
-  /// dump was written: the file starts later than `start`, or misses part or
-  /// all of the interval when the dump waited long for a busy writer. Raise
-  /// capacity_bytes. (Evictions before the trigger are tracked by their newest
-  /// timestamp; after snapshot time jumps backwards, e.g. a simulation reset,
-  /// only evictions stamped within [start, end] count.)
+  /// The ring evicted snapshots of [start, end] before the dump was written, so the file
+  /// can start late or miss part of the interval. Raise capacity_bytes.
   bool truncated = false;
-  /// False if the file could not be opened or written (disk full, I/O error):
-  /// `error` says why. A partially written file is left at `path`.
+  /// False if the file could not be opened or written (disk full, I/O error): `error`
+  /// says why, and a partial file can be left at `path`.
   bool ok = false;
   std::string error;
 };
 
-/// Counters and ring content of an MCAPRingSink, returned by
-/// MCAPRingSink::stats(). Each field also has its own getter on the sink.
+/// Counters and ring content, returned by MCAPRingSink::stats().
 struct MCAPRingStats
 {
   uint64_t dumps_written = 0;
   uint64_t dumps_failed = 0;
-  /// Dumps that were complete but found the writer busy with the previous one,
-  /// and were handed over at a later snapshot (counted once per dump).
+  /// Complete dumps that found the writer busy with the previous one and were handed
+  /// over at a later snapshot (counted once per dump).
   uint64_t writer_busy_retries = 0;
-  /// Snapshots evicted from the ring because it was full (not because of age).
+  /// Snapshots evicted because the ring was full, not because of age.
   uint64_t evicted_by_capacity = 0;
   /// Snapshots larger than the whole ring, never stored.
   uint64_t dropped_oversize = 0;
   /// Current content of the ring.
   size_t stored_snapshots = 0;
   size_t stored_bytes = 0;
-  /// Snapshot timestamps of the first and the last record in the ring, in
-  /// delivery order: the next one to be evicted and the one stored last. Their
-  /// difference is the history the ring holds now. Age eviction keeps it at
-  /// most about `window` (more while a dump is active); if it stays below
-  /// `window` while evicted_by_capacity grows, capacity_bytes is too small.
-  /// Channels are delivered separately, so records of other channels may be
-  /// older or newer by the delivery skew, and newest < oldest after snapshot
-  /// time jumps backwards (simulation reset). Both are 0 when stored_snapshots
-  /// is 0; 0 is also a valid timestamp, so test stored_snapshots.
+  /// Timestamps of the first and last record in the ring, in delivery order (both 0 if
+  /// the ring is empty: check stored_snapshots). Their difference is the history held:
+  /// if it stays below `window` while evicted_by_capacity grows, capacity_bytes is too
+  /// small. With several channels it is off by the delivery skew, and newest < oldest
+  /// after snapshot time jumps backwards.
   std::chrono::nanoseconds oldest_timestamp{ 0 };
   std::chrono::nanoseconds newest_timestamp{ 0 };
 };
 
 /**
- * @brief Flight recorder: keeps the last `window` of every channel attached to
- * it in a preallocated RAM ring and writes an MCAP file only when asked to,
- * with requestDump(), for example on a protective stop or a fault.
+ * @brief Flight recorder: keeps the last `window` of every attached channel in a
+ * preallocated RAM ring and writes an MCAP file only on requestDump(), for example
+ * on a protective stop or a fault.
  *
  *   MCAPRingOptions options;
  *   options.filepath = "fault.mcap";
@@ -101,40 +88,31 @@ struct MCAPRingStats
  *   channel->addDataSink(worker);
  *   auto& recorder = worker->as<MCAPRingSink>();
  *   ...
- *   recorder.requestDump(std::chrono::seconds(2));  // from any thread, RT-safe
+ *   (void)recorder.requestDump(std::chrono::seconds(2));  // any thread, RT-safe
  *
- * Trigger and content. The trigger is the first snapshot delivered to the sink
- * after the request, and all times are snapshot timestamps, so a dump behaves
- * the same in simulation, replay and on hardware. With trigger time T, the
- * dump contains the stored snapshots of every channel with a timestamp in
- * [T - window, T + post_trigger], and the MCAP schema and channel records of
- * the channels that appear in it. It is complete at the first delivered
- * snapshot with a timestamp > T + post_trigger. Each channel queues its
- * snapshots separately, so delivery is not strictly in timestamp order across
- * channels: a snapshot of another channel stamped <= T + post_trigger but
- * delivered after the one that completed the dump is not included.
+ * Content. The trigger is the first snapshot delivered after the request, and all times
+ * are snapshot timestamps, so a dump behaves the same in simulation, replay and on
+ * hardware. With trigger time T, the dump holds the stored snapshots of every channel
+ * stamped in [T - window, T + post_trigger]. It is complete at the first delivered
+ * snapshot stamped after T + post_trigger: a snapshot of another channel delivered
+ * later is not included, even if stamped earlier. A snapshot with a negative timestamp
+ * is not stored and is counted in SinkWorker::errors().
  *
- * Real time. onSnapshot() copies mask and payload into the ring and releases
- * the pool slot at once; after the ring is allocated it allocates nothing.
- * A finished dump is copied into the second buffer and written to disk by a
- * writer thread of the sink, so the SinkWorker never waits for file I/O. If
- * the writer is still busy with the previous dump, the hand-off is retried at
- * the next snapshot; meanwhile age eviction spares the dumped interval (capacity
- * eviction does not, see MCAPRingDump::truncated). The hand-off copies the
- * records of [start, end] into the second buffer on the worker thread, a
- * memcpy of up to capacity_bytes.
+ * Threads. onSnapshot() copies each snapshot into the ring, releases its pool slot at
+ * once and allocates nothing. A finished dump is copied (a memcpy of up to capacity_bytes
+ * on the worker thread) into a second buffer and written by a writer thread of the sink,
+ * so the SinkWorker never waits for file I/O. If that thread is still busy with the
+ * previous dump, the hand-off is retried at the next snapshot.
  *
- * Flush. flushPendingDump() writes the active request at once with what the
- * ring holds, from any thread except the dump callback, whether the worker is
- * running or not; there is no need to stop the worker. At shutdown,
- * SinkWorker::stop() (and the worker's destructor) calls it from onStop() once
- * the last snapshot is delivered, and waits for the writer, so a request made
- * just before shutdown is written. The sink's own destructor finishes the file
- * being written but does not start a pending dump.
+ * Shutdown. SinkWorker::stop() (and the worker's destructor) writes a pending request
+ * and waits for the writer, so a request made just before shutdown is not lost. The
+ * sink's own destructor finishes the file in progress but starts no pending dump.
  */
 class MCAPRingSink : public DataSink
 {
 public:
+  /// Allocates both buffers now. Throws std::invalid_argument if capacity_bytes is 0 or
+  /// window is negative.
   explicit MCAPRingSink(MCAPRingOptions options);
   ~MCAPRingSink() override;
   MCAPRingSink(const MCAPRingSink&) = delete;
@@ -148,54 +126,52 @@ public:
 
   /**
    * @brief Ask for a dump that also covers `post_trigger` after the trigger.
-   * Lock-free and allocation-free (a single compare-exchange): call it from any
-   * thread, real-time ones included.
+   * Lock-free and allocation-free: callable from any thread, real-time ones included.
    *
-   * Returns false, and the request is ignored, while an earlier request is still
-   * active: from its requestDump() until its dump has been handed to the writer
-   * thread. Requests are not coalesced: an ignored request does not extend the
-   * active dump. Writing the file to disk does not block new requests.
+   * Returns false, and ignores the request, while an earlier one is active (until its
+   * dump is handed to the writer thread). Requests are not merged, and a file being
+   * written does not block new ones.
    */
-  bool requestDump(std::chrono::nanoseconds post_trigger = std::chrono::nanoseconds(0));
+  [[nodiscard]] bool requestDump(
+      std::chrono::nanoseconds post_trigger = std::chrono::nanoseconds(0)) noexcept;
 
   /// True from an accepted requestDump() until its dump is handed to the writer.
-  [[nodiscard]] bool dumpRequested() const;
+  [[nodiscard]] bool dumpRequested() const noexcept;
 
   /**
-   * @brief Write the active request, if any, with what the ring holds now,
-   * and wait until it is on disk. A request no snapshot has triggered yet uses
-   * the newest snapshot timestamp seen as trigger; a dump still waiting for
-   * its post-trigger interval is cut at the newest timestamp seen. Snapshots
-   * queued but not yet delivered are not in the ring: after SinkWorker::stop()
-   * or drain() they are. SinkWorker::stop() calls it after the last delivery.
+   * @brief Write the active request now, with what the ring holds, and wait until it is
+   * on disk. A request no snapshot has triggered yet takes the newest timestamp of the
+   * current run as its trigger, and a dump still collecting its post-trigger interval
+   * is cut at the newest timestamp seen. A new run starts when the snapshot clock of a
+   * channel steps back by more than `window`, as in a simulation reset. A smaller step
+   * back stays in the run, such as snapshots of one channel taken by several threads
+   * and delivered slightly out of order.
+   * Queued snapshots that are not delivered yet are not in the ring (SinkWorker::drain()
+   * delivers them).
    *
-   * Safe while the SinkWorker delivers snapshots: the worker keeps storing
-   * them, and a snapshot that completes the request first hands it off itself.
-   * The worker waits for the ring lock while the dump interval is copied into
-   * the writer's buffer (the same copy a snapshot-completed dump makes). Never
-   * call it from the dump callback (std::logic_error).
+   * Callable from any thread, whether the worker runs or is stopped, but not from the
+   * dump callback (std::logic_error). Delivery waits while the dump interval is copied.
    *
-   * Returns true if a request was active when it was called (triggered, or
-   * pending once the sink has received a snapshot); that dump is then on disk
-   * (see MCAPRingDump::ok for the outcome). In every case it returns after the
-   * writer has finished all dumps handed to it so far, so a request accepted
-   * before the call and already handed off is on disk too.
+   * Returns true if a request was active, false if there was none or the sink has
+   * received no snapshot yet. The outcome is in MCAPRingDump::ok. In every case it
+   * returns after the writer has finished every dump handed to it so far.
    */
   bool flushPendingDump();
 
-  /// Wait until the writer thread has no dump in progress.
+  /// Wait until the writer thread has no dump in progress. Throws std::logic_error if
+  /// called from the dump callback.
   void waitForWriter();
 
-  /// Called on the writer thread after each dump, successful or not. It may
-  /// call stats(), dumpRequested() and requestDump(); waitForWriter() and
-  /// flushPendingDump() would wait for the callback itself and throw
-  /// std::logic_error there.
+  /// Called on the writer thread after each dump, successful or not, until the sink is
+  /// destroyed (so also during SinkWorker::stop()): what it captures must outlive the
+  /// sink. The callback can call stats(), dumpRequested() and requestDump(), but not
+  /// waitForWriter() or flushPendingDump() (std::logic_error). Exceptions it throws are
+  /// ignored.
   void setDumpCallback(std::function<void(const MCAPRingDump&)> callback);
 
-  /// All counters at once. Built here, in the header, from the getters below,
-  /// so that MCAPRingStats can gain fields without changing the library ABI.
-  /// Each field is read separately: while the worker delivers, the fields
-  /// may come from slightly different moments.
+  /// All counters, read one by one: while the worker delivers, the fields can come from
+  /// slightly different moments. Inline on purpose (built from the getters below), so
+  /// MCAPRingStats can gain fields without an ABI break.
   [[nodiscard]] DATA_TAMER_INLINE_LOCAL MCAPRingStats stats() const
   {
     MCAPRingStats stats;
@@ -211,9 +187,8 @@ public:
     return stats;
   }
 
-  /// One getter per MCAPRingStats field, each read under the sink's lock;
-  /// see the field for its meaning. Callable from any thread, including the
-  /// dump callback; not real-time safe (they take a mutex).
+  /// One getter per MCAPRingStats field (see there). Callable from any thread,
+  /// including the dump callback. Not real-time safe: they take a mutex.
   [[nodiscard]] uint64_t dumpsWritten() const;
   [[nodiscard]] uint64_t dumpsFailed() const;
   [[nodiscard]] uint64_t writerBusyRetries() const;
@@ -232,8 +207,7 @@ protected:
 
 private:
   struct Pimpl;
-  // Shared with the writer thread, so that it outlives a sink destroyed from
-  // its own dump callback.
+  // Shared with the writer thread: it outlives a sink destroyed from its dump callback.
   std::shared_ptr<Pimpl> _p;
 };
 

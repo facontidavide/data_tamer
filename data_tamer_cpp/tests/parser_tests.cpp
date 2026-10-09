@@ -95,12 +95,12 @@ TEST(DataTamerParser, SchemaHash)
 TEST(DataTamerParser, DeclaredSchemaHashUsesFullUint64Range)
 {
   const auto schema = BuildSchemaFromText("### hash: 18446744073709551615\nfloat64 "
-                                         "value\n");
+                                          "value\n");
   EXPECT_EQ(schema.hash, std::numeric_limits<uint64_t>::max());
   ASSERT_EQ(schema.fields.size(), 1U);
   EXPECT_EQ(schema.fields.front().field_name, "value");
   EXPECT_THROW(BuildSchemaFromText("### hash: 18446744073709551616\nfloat64 value\n"),
-               std::out_of_range);
+               std::runtime_error);
 }
 
 TEST(DataTamerParser, CustomTypes)
@@ -178,7 +178,7 @@ TEST(DataTamerParser, PlainParsing)
         std::visit([](const auto& var) { return double(var); }, number);
   };
 
-  DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback);
+  ASSERT_TRUE(DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback));
 
   for(const auto& [name, value] : parsed_values)
   {
@@ -218,7 +218,7 @@ TEST(DataTamerParser, CustomParsing)
     parsed_values[field_name] = value;
   };
 
-  DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback);
+  ASSERT_TRUE(DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback));
 
   for(const auto& [name, value] : parsed_values)
   {
@@ -273,7 +273,7 @@ TEST(DataTamerParser, VectorParsing)
     parsed_values[field_name] = value;
   };
 
-  DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback);
+  ASSERT_TRUE(DataTamerParser::ParseSnapshot(schema_out, snapshot_view, callback));
 
   for(const auto& [name, value] : parsed_values)
   {
@@ -310,8 +310,8 @@ TEST(DataTamerParser, VectorParsing)
   ASSERT_EQ(parsed_values.at("quats[1]/z"), 33);
 }
 
-// Version 4 texts (std::hash recipe) must still parse and verify exactly as before;
-// version 5 texts verify with the platform-independent recipe.
+// Version 4 texts verify with their std::hash recipe, version 5 texts with the
+// platform-independent one.
 TEST(DataTamerParser, ReadsAndVerifiesBothSchemaVersions)
 {
   auto channel = DataTamer::LogChannel::create("chan");
@@ -376,7 +376,7 @@ TEST(DataTamerParser, RejectsMalformedInput)
   truncated.payload.size -= 4;
   try
   {
-    ParseSnapshot(schema, truncated, count_values);
+    (void)ParseSnapshot(schema, truncated, count_values);
     FAIL() << "truncated payload accepted";
   }
   catch(const std::runtime_error& e)
@@ -394,7 +394,7 @@ TEST(DataTamerParser, RejectsMalformedInput)
   // mask too short for the schema
   SnapshotView short_mask = view;
   short_mask.active_mask.size = 0;
-  EXPECT_THROW(ParseSnapshot(schema, short_mask, count_values), std::runtime_error);
+  EXPECT_THROW((void)ParseSnapshot(schema, short_mask, count_values), std::runtime_error);
 
   // dynamic vector whose count exceeds the payload
   auto huge = snapshot.payload;
@@ -403,7 +403,7 @@ TEST(DataTamerParser, RejectsMalformedInput)
   std::memcpy(huge.data() + count_offset, &bogus, sizeof(bogus));
   SnapshotView huge_view = view;
   huge_view.payload = { huge.data(), huge.size() };
-  EXPECT_THROW(ParseSnapshot(schema, huge_view, count_values), std::runtime_error);
+  EXPECT_THROW((void)ParseSnapshot(schema, huge_view, count_values), std::runtime_error);
 
   // a custom type name that merely starts with a primitive name is a custom type
   const auto tricky = BuildSchemaFromText("### version: 5\n### hash: 1\n### "
@@ -430,7 +430,8 @@ TEST(DataTamerParser, RejectsMalformedInput)
   const uint8_t one_bit = 1;
   const uint8_t no_payload = 0;
   SnapshotView cyclic_view{ 1, 0, { &one_bit, 1 }, { &no_payload, 0 } };
-  EXPECT_THROW(ParseSnapshot(cyclic, cyclic_view, count_values), std::runtime_error);
+  EXPECT_THROW((void)ParseSnapshot(cyclic, cyclic_view, count_values),
+               std::runtime_error);
 
   // malformed array extents
   EXPECT_THROW(BuildSchemaFromText("### version: 5\n### hash: 1\n### channel_name: "

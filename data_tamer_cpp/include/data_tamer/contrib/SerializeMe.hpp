@@ -25,6 +25,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -32,12 +33,13 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace SerializeMe
 {
 
-// Poor man version of Span
+// Minimal non-owning view of contiguous memory (a subset of std::span).
 template <typename T>
 class Span
 {
@@ -50,12 +52,20 @@ public:
   Span(std::array<T, N>& v) : data_(v.data()), size_(N)
   {}
 
-  Span(std::vector<T>& v) : data_(v.data()), size_(v.size()) {}
+  // A template, so that Span<const T> never forms the ill-formed std::vector<const T>&.
+  template <typename U, std::enable_if_t<std::is_same_v<U, T>, int> = 0>
+  Span(std::vector<U>& v) : data_(v.data()), size_(v.size())
+  {}
 
   /// Read-only view of a vector: Span<const uint8_t> from a (const) std::vector<uint8_t>.
   /// Like std::span it also binds to a temporary: do not keep the span past it.
   template <typename U, std::enable_if_t<std::is_same_v<const U, T>, int> = 0>
   Span(const std::vector<U>& v) : data_(v.data()), size_(v.size())
+  {}
+
+  /// Read-only view of a (const) std::array<uint8_t, N>, as for a vector.
+  template <typename U, size_t N, std::enable_if_t<std::is_same_v<const U, T>, int> = 0>
+  Span(const std::array<U, N>& v) : data_(v.data()), size_(N)
   {}
 
   T const* data() const;
@@ -64,6 +74,7 @@ public:
 
   size_t size() const;
 
+  /// Drops the first `offset` elements; throws std::runtime_error if there are fewer.
   void trimFront(size_t offset);
 
 private:
@@ -73,13 +84,10 @@ private:
 
 using SpanBytes = Span<uint8_t>;
 using SpanBytesConst = Span<uint8_t const>;
-using StringSize = uint16_t;
+using StringSize = uint32_t;
 
 const auto EmptyFuncion = [](const char*, void*) {};
 using EmptyFunc = decltype(EmptyFuncion);
-
-template <typename T1, typename T2>
-using enable_if_same_t = std::enable_if_t<std::is_same_v<T1, T2>>;
 
 }  // namespace SerializeMe
 
@@ -88,8 +96,8 @@ namespace DataTamer
 /**
  * @brief Customization point that describes a type without reopening its namespace.
  *
- * Specialize it (fully, or partially using the second parameter for
- * std::enable_if / std::void_t) in namespace DataTamer:
+ * Specialize it in namespace DataTamer. define() calls add("name", &member) for each
+ * field and returns the type name:
  *
  *   template <>
  *   struct DataTamer::TypeDefinitionTrait<third_party::Point>
@@ -103,26 +111,15 @@ namespace DataTamer
  *     }
  *   };
  *
- * Optionally, the specialization may also provide
- *
- *   static std::string name();
- *
- * to build the type name at runtime (useful for class templates, e.g.
- * "Vector" + std::to_string(N)). It is evaluated once per type (per shared
- * library, as for any function-local static) and cached;
- * when present, the value returned by define() is ignored and define() may
- * return void.
- *
- * define() may also return an owning string (e.g. std::string): it is then
- * evaluated once per type and cached.
- *
- * If a type has both a TypeDefinitionTrait specialization and a
- * TypeDefinition() overload found by argument-dependent lookup, the trait wins.
- * A specialization whose define() can not be called as
- * define(T&, AddField&) is a compile error (it is never silently ignored).
- *
- * The specialization must be visible before the type is first used with
- * DataTamer (as for any template specialization).
+ * - The name is a view of static storage (a string literal). define() also runs in
+ *   every snapshot, once per instance, where a returned std::string would be built
+ *   each time, and allocate if the name is long.
+ * - A name built at runtime (class templates) goes in an optional
+ *   `static std::string name()`, which runs once; define() then returns void.
+ * - The second template parameter allows partial specializations (std::enable_if).
+ * - The trait wins over an ADL TypeDefinition(). A define() that cannot be called as
+ *   define(T&, AddField&) is a compile error.
+ * - The specialization must be visible before the type is first used.
  */
 template <typename T, typename = void>
 struct TypeDefinitionTrait
@@ -135,8 +132,7 @@ struct TypeDefinitionTrait
 namespace SerializeMe
 {
 
-// True if DataTamer::TypeDefinitionTrait<T> is specialized with a
-// static define(T&, AddField&) function.
+// True if DataTamer::TypeDefinitionTrait<T> has a static define(T&, AddField&).
 template <typename T, class = void>
 struct has_TypeDefinitionTrait : std::false_type
 {
@@ -176,8 +172,8 @@ struct has_TypeDefinitionTraitName<
 {
 };
 
-// Check if a Function like this is implemented in the namespace of T
-// (found by argument-dependent lookup):
+// True if a TypeDefinition() overload is found for T by argument-dependent lookup. It
+// returns the type name as a std::string_view, a const char* or a std::string:
 //
 // template <typename Func> std::string_view TypeDefinition(T&, Func&);
 
@@ -188,16 +184,14 @@ struct has_TypeDefinitionADL : std::false_type
 
 template <typename T>
 struct has_TypeDefinitionADL<
-    T, enable_if_same_t<std::string_view,
-                        decltype(TypeDefinition(std::declval<T&>(),
-                                                std::declval<EmptyFunc&>()))>>
-  : std::true_type
+    T, std::enable_if_t<std::is_convertible_v<
+           decltype(TypeDefinition(std::declval<T&>(), std::declval<EmptyFunc&>())),
+           std::string_view>>> : std::true_type
 {
 };
 
-// True if T is described either by DataTamer::TypeDefinitionTrait<T> or by
-// a TypeDefinition() overload found by ADL.
-// (The second parameter is unused; kept for source compatibility.)
+// True if T is described by DataTamer::TypeDefinitionTrait<T> or by an ADL
+// TypeDefinition() overload. The second parameter is unused (source compatibility).
 template <typename T, class = void>
 struct has_TypeDefinition : std::bool_constant<has_TypeDefinitionTrait<T>::value ||
                                                has_TypeDefinitionADL<T>::value>
@@ -208,9 +202,8 @@ struct has_TypeDefinition : std::bool_constant<has_TypeDefinitionTrait<T>::value
                 "static define(T&, AddField&) callable with a generic AddField");
 };
 
-// Call the definition of T: DataTamer::TypeDefinitionTrait<T>::define() if
-// specialized, otherwise the ADL overload TypeDefinition(obj, add_field).
-// Every place that walks the fields of a custom type must go through this.
+// Calls the definition of T: the trait's define() if specialized, otherwise the ADL
+// TypeDefinition(). Every walk over the fields of a custom type must go through it.
 template <typename T, typename AddField>
 inline decltype(auto) InvokeTypeDefinition(T& obj, AddField& add_field)
 {
@@ -227,6 +220,7 @@ inline decltype(auto) InvokeTypeDefinition(T& obj, AddField& add_field)
 
 //------------- Forward declarations of BufferSize ------------------
 
+/// Number of bytes SerializeIntoBuffer() writes for `val`.
 template <typename T, bool = true>
 size_t BufferSize(const T& val);
 
@@ -244,6 +238,8 @@ size_t BufferSize(const Container<T, TArgs...>& vect);
 
 //---------- Forward declarations of DeserializeFromBuffer -----------
 
+/// Reads `dest` from the front of `buffer` and advances the span past the bytes read.
+/// Throws std::runtime_error if the buffer is too short.
 template <typename T, bool = true>
 void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest);
 
@@ -261,6 +257,8 @@ void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>& dest)
 
 //---------- Forward declarations of SerializeIntoBuffer -----------
 
+/// Writes `value` at the front of `buffer` and advances the span past the bytes written
+/// (encoding: docs/wire_format.md). Throws std::runtime_error if the buffer is too small.
 template <typename T, bool = true>
 void SerializeIntoBuffer(SpanBytes& buffer, const T& value);
 
@@ -309,8 +307,7 @@ inline void Span<T>::trimFront(size_t offset)
   data_ += offset;
 }
 
-// The wire format uses a little endian encoding (since that's efficient for
-// the common platforms).
+// The wire format is little endian (docs/wire_format.md); big endian hosts byte-swap.
 #if defined(__s390x__)
 #define SERIALIZE_LITTLEENDIAN 0
 #endif  // __s390x__
@@ -334,16 +331,24 @@ inline void Span<T>::trimFront(size_t offset)
 #endif  // !defined(SERIALIZE_LITTLEENDIAN)
 
 template <typename T>
+inline constexpr bool is_number()
+{
+  return std::is_arithmetic_v<T> || std::is_same_v<T, std::byte> || std::is_enum_v<T>;
+}
+
+template <typename T>
 inline T EndianSwap(T t)
 {
-  static_assert(std::is_arithmetic<T>::value, "This function accepts only numeric types");
+  static_assert(is_number<T>(), "This function accepts only numeric types");
+  static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                "This function accepts only 1, 2, 4 and 8 byte types");
 #if defined(_MSC_VER)
 #define DESERIALIZE_ME_BYTESWAP16 _byteswap_ushort
 #define DESERIALIZE_ME_BYTESWAP32 _byteswap_ulong
 #define DESERIALIZE_ME_BYTESWAP64 _byteswap_uint64
 #else
 #if defined(__GNUC__) && __GNUC__ * 100 + __GNUC_MINOR__ < 408 && !defined(__clang__)
-// __builtin_bswap16 was missing prior to GCC 4.8.
+// GCC before 4.8 has no __builtin_bswap16.
 #define DESERIALIZE_ME_BYTESWAP16(x)                                                     \
   static_cast<uint16_t>(__builtin_bswap32(static_cast<uint32_t>(x) << 16))
 #else
@@ -353,7 +358,7 @@ inline T EndianSwap(T t)
 #define DESERIALIZE_ME_BYTESWAP64 __builtin_bswap64
 #endif
   if constexpr(sizeof(T) == 1)
-  {  // Compile-time if-then's.
+  {
     return t;
   }
   else if constexpr(sizeof(T) == 2)
@@ -378,7 +383,7 @@ inline T EndianSwap(T t)
     u.i = DESERIALIZE_ME_BYTESWAP32(u.i);
     return u.t;
   }
-  else if(sizeof(T) == 8)
+  else
   {
     union
     {
@@ -389,16 +394,10 @@ inline T EndianSwap(T t)
     u.i = DESERIALIZE_ME_BYTESWAP64(u.i);
     return u.t;
   }
-  else
-  {
-    std::runtime_error("Problem with IndianSwap");
-  }
 }
-template <typename T>
-inline constexpr bool is_number()
-{
-  return std::is_arithmetic_v<T> || std::is_same_v<T, std::byte> || std::is_enum_v<T>;
-}
+#undef DESERIALIZE_ME_BYTESWAP16
+#undef DESERIALIZE_ME_BYTESWAP32
+#undef DESERIALIZE_ME_BYTESWAP64
 
 template <typename _Tp, bool _is_container, int _size>
 struct container_info_
@@ -408,18 +407,24 @@ struct container_info_
   typedef _Tp value_type;
 };
 
-template <typename T>
+// A type with a TypeDefinition is a custom type, whatever its template shape.
+template <typename T, typename = void>
 struct container_info : container_info_<T, false, -1>
 {
 };
 
 template <template <class, class> class Container, class T, class... TArgs>
-struct container_info<Container<T, TArgs...>> : container_info_<T, true, 0>
+struct container_info<
+    Container<T, TArgs...>,
+    std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value>>
+  : container_info_<T, true, 0>
 {
 };
 
 template <typename T, size_t S>
-struct container_info<std::array<T, S>> : container_info_<T, true, int(S)>
+struct container_info<std::array<T, S>,
+                      std::enable_if_t<!has_TypeDefinition<std::array<T, S>>::value>>
+  : container_info_<T, true, int(S)>
 {
 };
 
@@ -484,16 +489,28 @@ inline size_t BufferSize(const std::string& str)
 
 template <class T, size_t N,
           std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
-inline size_t BufferSize(const std::array<T, N>&)
+inline size_t BufferSize([[maybe_unused]] const std::array<T, N>& vect)
 {
-  return BufferSize(T{}) * N;
+  if constexpr(is_number<T>())
+  {
+    return sizeof(T) * N;
+  }
+  else
+  {
+    size_t total = 0;
+    for(const auto& v : vect)
+    {
+      total += BufferSize(v);
+    }
+    return total;
+  }
 }
 
 template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline size_t BufferSize(const Container<T, TArgs...>& vect)
 {
-  if constexpr(std::is_trivially_copyable_v<T> && is_vector<Container<T, TArgs...>>())
+  if constexpr(is_number<T>() && is_vector<Container<T, TArgs...>>())
   {
     return sizeof(uint32_t) + vect.size() * sizeof(T);
   }
@@ -524,11 +541,18 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest)
     {
       throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
     }
-    std::memcpy(&dest, buffer.data(), S);  // buffer.data() may be misaligned for T
+    if constexpr(std::is_same_v<T, bool>)
+    {
+      dest = buffer.data()[0] != 0;  // another byte value is not a valid bool
+    }
+    else
+    {
+      std::memcpy(&dest, buffer.data(), S);  // buffer.data() may be misaligned for T
 
 #if SERIALIZE_LITTLEENDIAN == 0
-    dest = EndianSwap<T>(dest);
+      dest = EndianSwap<T>(dest);
 #endif
+    }
     buffer = SpanBytesConst(buffer.data() + S, buffer.size() - S);  // NOLINT
   }
   else
@@ -541,12 +565,18 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, T& dest)
   }
 }
 
+/// Reads the uint32 count that SerializeCount() writes.
+inline uint32_t DeserializeCount(SpanBytesConst& buffer)
+{
+  uint32_t count = 0;
+  DeserializeFromBuffer(buffer, count);
+  return count;
+}
+
 template <>
 inline void DeserializeFromBuffer(SpanBytesConst& buffer, std::string& dest)
 {
-  StringSize size = 0;
-  DeserializeFromBuffer(buffer, size);
-
+  const uint32_t size = DeserializeCount(buffer);
   if(size > buffer.size())
   {
     throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
@@ -565,9 +595,9 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, std::array<T, N>& dest
     throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
   }
 
-  if constexpr(sizeof(T) == 1)
+  if constexpr(sizeof(T) == 1 && !std::is_same_v<T, bool>)
   {
-    memcpy(dest.data(), buffer.data(), N);
+    std::memcpy(dest.data(), buffer.data(), N);
     buffer.trimFront(N);
   }
   else
@@ -583,26 +613,19 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>& dest)
 {
-  uint32_t num_values = 0;
-  DeserializeFromBuffer(buffer, num_values);
+  const uint32_t num_values = DeserializeCount(buffer);
 
-  // if the container offers contiguous memory, you can just use memcpy
+  // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
-    if constexpr(container_info<Container<T, TArgs...>>::size == 0)
+    const size_t size = num_values * BufferSize(T{});
+    if(size > buffer.size())
     {
-      dest.resize(num_values);
-    }
-    else if constexpr(std::is_array_v<Container<T, TArgs...>>)
-    {
-      if(std::size(dest) != num_values)
-      {
-        throw std::runtime_error("DeserializeFromBuffer: wrong size in static container");
-      }
+      throw std::runtime_error("DeserializeFromBuffer: buffer overflow");
     }
 
-    const size_t size = num_values * BufferSize(T{});
-    memcpy(dest.data(), buffer.data(), size);
+    dest.resize(num_values);
+    std::memcpy(dest.data(), buffer.data(), size);
     buffer.trimFront(size);
   }
   else
@@ -612,7 +635,7 @@ inline void DeserializeFromBuffer(SpanBytesConst& buffer, Container<T, TArgs...>
     {
       T temp;
       DeserializeFromBuffer(buffer, temp);
-      std::back_inserter(dest) = std::move(temp);
+      dest.push_back(std::move(temp));
     }
   }
 }
@@ -629,17 +652,14 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
   if constexpr(is_number<T>())
   {
     const size_t S = sizeof(T);
-    if(S > buffer.size())
-    {
-      throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
-    }
+    uint8_t* out = buffer.data();
+    buffer.trimFront(S);  // the one bounds check: throws before anything is written
 #if SERIALIZE_LITTLEENDIAN == 0
     T swapped = EndianSwap<T>(value);
-    std::memcpy(buffer.data(), &swapped, S);
+    std::memcpy(out, &swapped, S);
 #else
-    std::memcpy(buffer.data(), &value, S);
+    std::memcpy(out, &value, S);
 #endif
-    buffer.trimFront(S);  // NOLINT
   }
   else
   {
@@ -650,36 +670,38 @@ inline void SerializeIntoBuffer(SpanBytes& buffer, T const& value)
   }
 }
 
+/// Writes the uint32 count that precedes the characters of a string and the elements of
+/// a vector (docs/wire_format.md). Throws std::runtime_error, writing nothing, if `count`
+/// does not fit in 32 bits.
+inline void SerializeCount(SpanBytes& buffer, size_t count)
+{
+  if constexpr(sizeof(size_t) > sizeof(uint32_t))
+  {
+    if(count > std::numeric_limits<uint32_t>::max())
+    {
+      throw std::runtime_error("SerializeIntoBuffer: count exceeds the uint32 range");
+    }
+  }
+  SerializeIntoBuffer(buffer, static_cast<uint32_t>(count));
+}
+
 template <>
 inline void SerializeIntoBuffer(SpanBytes& buffer, std::string const& str)
 {
-  if(str.size() > std::numeric_limits<StringSize>::max())
-  {
-    throw std::runtime_error("SerializeIntoBuffer: string exceeds maximum size");
-  }
-
   if((str.size() + sizeof(StringSize)) > buffer.size())
   {
     throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
   }
-
-  const auto size = static_cast<StringSize>(str.size());
-  SerializeIntoBuffer(buffer, size);
-
-  memcpy(buffer.data(), str.data(), size);
-  buffer.trimFront(size);
+  SerializeCount(buffer, str.size());
+  std::memcpy(buffer.data(), str.data(), str.size());
+  buffer.trimFront(str.size());
 }
 
 template <typename T, size_t N,
           std::enable_if_t<!has_TypeDefinition<std::array<T, N>>::value, bool>>
 inline void SerializeIntoBuffer(SpanBytes& buffer, std::array<T, N> const& vect)
 {
-  if(N > std::numeric_limits<uint32_t>::max())
-  {
-    throw std::runtime_error("SerializeIntoBuffer: array exceeds maximum size");
-  }
-
-  if constexpr(std::is_arithmetic_v<T> || std::is_same_v<T, std::byte>)
+  if constexpr(is_number<T>() || sizeof(T) == 1)
   {
     if(N * sizeof(T) > buffer.size())
     {
@@ -705,18 +727,17 @@ template <template <class, class> class Container, class T, class... TArgs,
           std::enable_if_t<!has_TypeDefinition<Container<T, TArgs...>>::value, bool>>
 inline void SerializeIntoBuffer(SpanBytes& buffer, Container<T, TArgs...> const& vect)
 {
-  const auto num_values = static_cast<uint32_t>(vect.size());
-  SerializeIntoBuffer(buffer, num_values);
+  SerializeCount(buffer, vect.size());
 
-  // can use memcpy if the size of T is 1
+  // contiguous 1-byte elements: one memcpy
   if constexpr(sizeof(T) == 1 && is_vector<Container<T, TArgs...>>())
   {
-    const size_t size = num_values;
+    const size_t size = vect.size();
     if(size > buffer.size())
     {
       throw std::runtime_error("SerializeIntoBuffer: buffer overflow");
     }
-    memcpy(buffer.data(), vect.data(), size);
+    std::memcpy(buffer.data(), vect.data(), size);
     buffer.trimFront(size);
   }
   else

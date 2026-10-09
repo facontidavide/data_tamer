@@ -23,52 +23,39 @@ using PublisherNodeInterfaces =
 
 struct ROS2PublisherOptions
 {
-  /// false (default): every snapshot is published as one
-  /// data_tamer_msgs/Snapshot on `<topic_prefix>/data`.
-  /// true: snapshots are aggregated into data_tamer_msgs/SnapshotBatch messages
-  /// on `<topic_prefix>/data_batch`, and `<topic_prefix>/data` is not created.
+  /// false: one data_tamer_msgs/Snapshot per snapshot on `<topic_prefix>/data`.
+  /// true: data_tamer_msgs/SnapshotBatch messages on `<topic_prefix>/data_batch`
+  /// instead.
   bool aggregate = false;
-  /// Aggregation only: a batch is published as soon as it holds this many
-  /// snapshots. 0 is treated as 1.
+  /// Aggregation only: publish a batch once it holds this many snapshots (0 means 1).
   size_t max_batch_size = 100;
-  /// Aggregation only: a batch is also published when a snapshot arrives and
-  /// at least this much time has passed since the first snapshot of the batch
-  /// was added. Zero disables the time limit. There is no timer: a partial
-  /// batch waits for the next snapshot, flush() or SinkWorker::stop().
+  /// Aggregation only: also publish when a snapshot arrives and the batch's first
+  /// snapshot is at least this old (steady clock). 0 disables the limit. There is no
+  /// timer: a partial batch waits for the next snapshot, flush() or SinkWorker::stop().
   std::chrono::milliseconds max_batch_delay{ 100 };
-  /// Aggregation only: copy into each batch the schemas of the snapshots it
-  /// contains, so that a batch can be decoded on its own, without
-  /// `<topic_prefix>/schemas` (which is published anyway).
+  /// Aggregation only: put the schemas of a batch's snapshots into the batch, so that
+  /// it decodes on its own.
   bool embed_schemas = true;
-  /// Rendering of every `schema_text`, on `<topic_prefix>/schemas` and in
-  /// embedded schemas. SchemaFormat::Yaml is shorter when field names are
-  /// "/"-separated paths, but readers that predate it (e.g. older PlotJuggler
-  /// releases) only understand SchemaFormat::Text.
+  /// Rendering of every `schema_text`. SchemaFormat::Yaml is shorter, but older readers
+  /// (e.g. older PlotJuggler releases) only understand SchemaFormat::Text.
   SchemaFormat schema_format = SchemaFormat::Text;
-  /// QoS of `<topic_prefix>/data` (or `<topic_prefix>/data_batch`). The default
-  /// is reliable with a history of the last 100 messages: a slow or stalled
-  /// subscriber loses the oldest messages instead of making the publishing
-  /// process queue messages without limit. Keep it reliable so that both
-  /// reliable and best-effort subscribers match. With aggregation each message
-  /// is a batch: size the depth accordingly. For a lossless stream, at the
-  /// price of unbounded memory behind a slow subscriber, use
-  /// `rclcpp::QoS(rclcpp::KeepAll()).reliable()`.
-  /// `<topic_prefix>/schemas` is not affected: it is always reliable,
-  /// transient-local, KeepLast(1).
+  /// QoS of the data topic. The default, reliable KeepLast(100), bounds the publisher's
+  /// memory: a slow subscriber loses the oldest messages. Keep it reliable so that
+  /// reliable and best-effort subscribers both match, and size the depth in batches when
+  /// aggregating. KeepAll is lossless but grows without bound behind a slow subscriber.
+  /// It does not apply to the `schemas` topic.
   rclcpp::QoS data_qos = rclcpp::QoS(rclcpp::KeepLast(100)).reliable();
 };
 
-/// Publishes schemas and snapshots on `<topic_prefix>/schemas` and
+/// Publishes the schemas on `<topic_prefix>/schemas` and the snapshots on
 /// `<topic_prefix>/data` (or `<topic_prefix>/data_batch`, see
-/// ROS2PublisherOptions::aggregate). Create it with ROS2PublisherSink::create()
-/// and pass the returned worker to LogChannel::addDataSink().
+/// ROS2PublisherOptions::aggregate). Create it with ROS2PublisherSink::create() and
+/// attach the returned worker with LogChannel::addDataSink().
 ///
-/// Every message on `<topic_prefix>/schemas` holds the complete catalog of the
-/// schemas the sink knows (reliable, transient-local, depth 1), so a late
-/// subscriber receives it. It is published when the sink learns a schema, by
-/// LogChannel::startLogging() or addDataSink(), on the calling thread: call
-/// startLogging() before the control loop. A failed publish is retried by the
-/// next snapshot and by flush().
+/// Each `schemas` message is the complete catalog (reliable, transient-local, depth 1),
+/// so late subscribers get it. It is published from the thread that calls startLogging()
+/// or addDataSink(), so call startLogging() before the control loop. A failed publish is
+/// retried by the next snapshot and by flush().
 class ROS2PublisherSink : public DataSink
 {
 public:
@@ -88,13 +75,10 @@ public:
                                                  topic_prefix, options);
   }
 
-  /// Publishes the pending batch, if any, and the schema catalog if its last
-  /// publication failed (also without aggregation). Throws if a publication
-  /// fails. SinkWorker::stop() calls it after the last delivery (a failure is
-  /// then counted by SinkWorker::errors()); the destructor calls it too, as
-  /// the fallback for a sink used without a worker.
-  /// Thread-safe: may be called from any thread, e.g.
-  /// `worker->as<ROS2PublisherSink>().flush()` after `worker->drain()`.
+  /// Publish the pending batch, if any, and the schema catalog if its last publication
+  /// failed. Throws if a publication fails. SinkWorker::stop() calls it after the last
+  /// delivery (a throw is then counted in SinkWorker::errors()). Callable from any
+  /// thread, e.g. `worker->as<ROS2PublisherSink>().flush()` after `worker->drain()`.
   void flush();
 
   ~ROS2PublisherSink() override;

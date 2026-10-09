@@ -1,17 +1,22 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <functional>
 #include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -19,7 +24,7 @@ namespace DataTamerParser
 {
 
 constexpr int SCHEMA_VERSION = 5;
-/// The YAML rendering of a schema (wire format, section 2.1).
+/// Version of the YAML rendering of a schema (docs/wire_format.md, section 2.1).
 constexpr int SCHEMA_YAML_VERSION = 6;
 
 enum class BasicType : uint8_t
@@ -45,14 +50,25 @@ enum class BasicType : uint8_t
 
 constexpr size_t TypesCount = 13;
 
+namespace detail
+{
+/// A custom type section of the line format starts with a line of '=' (section 2 of
+/// docs/wire_format.md): the writer emits kSeparatorWidth of them, the reader accepts
+/// kMinSeparatorWidth or more.
+constexpr size_t kSeparatorWidth = 59;
+constexpr size_t kMinSeparatorWidth = 30;
+}  // namespace detail
+
 using VarNumber = std::variant<bool, char, int8_t, uint8_t, int16_t, uint16_t, int32_t,
                                uint32_t, int64_t, uint64_t, float, double>;
 
+/// Non-owning view of bytes: the owner must keep them alive while the view is in use.
 struct BufferSpan
 {
   const uint8_t* data = nullptr;
   size_t size = 0;
 
+  /// Drops the first `n` bytes; throws std::runtime_error if there are fewer.
   void trimFront(size_t n)
   {
     if(n > size)
@@ -67,12 +83,14 @@ struct BufferSpan
 VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer);
 
 //---------------------------------------------------------
+/// A schema field. `is_vector` covers `T[]` (array_size 0, a uint32 count precedes the
+/// elements) and `T[N]` (array_size N, no count). `type` is OTHER for a custom type.
 struct TypeField
 {
   std::string field_name;
   BasicType type = BasicType::OTHER;
   std::string type_name;
-  bool is_vector = 0;
+  bool is_vector = false;
   uint32_t array_size = 0;
 
   bool operator==(const TypeField& other) const;
@@ -89,7 +107,8 @@ struct CustomSchema
 };
 
 /**
- * @brief DataTamer uses a simple "flat" schema of key/value pairs (each pair is a "field").
+ * @brief A parsed schema (docs/wire_format.md, section 2). `fields[i]` is bit i of the
+ * active mask.
  */
 struct Schema
 {
@@ -104,45 +123,47 @@ struct Schema
 
 struct SnapshotView
 {
-  /// Unique identifier of the schema
-  uint64_t schema_hash;
+  /// Hash of the schema that decodes this snapshot.
+  uint64_t schema_hash = 0;
 
-  /// snapshot timestamp
-  uint64_t timestamp;
+  /// Timestamp in nanoseconds, unused by the parser.
+  uint64_t timestamp = 0;
 
-  /// Vector that tell us if a field of the schema is
-  /// active or not. It is basically an optimized vector
-  /// of bools, where each byte contains 8 boolean flags.
+  /// One bit per top-level field, least significant bit first (docs/wire_format.md,
+  /// section 3.1).
   BufferSpan active_mask;
 
-  /// serialized data containing all the values, ordered as in the schema
+  /// Values of the active fields, in schema order (docs/wire_format.md, section 3.2).
   BufferSpan payload;
 };
 
-bool GetBit(BufferSpan mask, size_t index);
+[[nodiscard]] bool GetBit(BufferSpan mask, size_t index);
 
-constexpr auto NullCustomCallback = [](const std::string&, const BufferSpan,
-                                       const std::string&) {};
+/// Splits the body of an MCAP message (docs/wire_format.md, section 4.1) into the active
+/// mask and the payload of a SnapshotView, whose schema hash and timestamp stay 0 for
+/// the caller to fill in. Throws std::runtime_error if the body is shorter than the
+/// lengths it declares or holds bytes after the payload.
+[[nodiscard]] SnapshotView SplitMcapMessage(BufferSpan body);
 
-// Callback must be a std::function or lambda with signature:
-//
-// void(const std::string& name_field, const VarNumber& value)
-//
-// void(const std::string& name_field, const BufferSpan payload, const std::string& type_name)
-//
-template <typename NumberCallback, typename CustomCallback = decltype(NullCustomCallback)>
-bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                   const NumberCallback& callback_number,
-                   const CustomCallback& callback_custom = NullCustomCallback);
+/// Decodes `snapshot` with `schema`, calling
+///   callback_number(const std::string& name, const VarNumber& value)
+/// for each value of each active field, in schema order. Names join nested fields with
+/// '/' and index container elements: "pose/position/x", "points[1]/z".
+/// Returns false if the hash is not the schema's (nothing is decoded) or if bytes are
+/// left after the last field (the callback has already run). Throws std::runtime_error
+/// on malformed data, and for an active field of a type the schema does not define or
+/// describes as opaque, but an empty vector of an opaque type decodes as empty.
+template <typename NumberCallback>
+[[nodiscard]] bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
+                                 const NumberCallback& callback_number);
 
 //---------------------------------------------------------
-// Helpers for the data_tamer_msgs messages published by ROS2PublisherSink.
-// They are templates on the message type, so this header does not depend on
-// ROS: any type with the same field names works.
+// Helpers for the data_tamer_msgs messages of ROS2PublisherSink. They are templates on
+// the message type, so this header needs no ROS: any type with the same fields works.
 
 /**
- * @brief Schemas by hash. Fill it from the `<prefix>/schemas` topic and/or from
- * batches with embedded schemas, then look up the schema of each snapshot.
+ * @brief Schemas by hash, filled from the `<prefix>/schemas` topic and/or from the
+ * schemas embedded in batches.
  */
 class SchemaRegistry
 {
@@ -171,15 +192,13 @@ template <typename SnapshotMsgT>
 SnapshotView ToSnapshotView(const SnapshotMsgT& msg);
 
 /**
- * @brief Visits every snapshot of a data_tamer_msgs SnapshotBatch, in order.
- * The schemas embedded in the batch are added to `registry` first (a malformed
- * one throws, see SchemaRegistry::add, before any snapshot is visited).
- * Snapshots whose schema is not in the registry are skipped.
+ * @brief Calls `callback(const Schema&, const SnapshotView&)` for each snapshot of a
+ * data_tamer_msgs SnapshotBatch, in order.
+ * The schemas embedded in the batch are added to `registry` first; a malformed one
+ * throws (see SchemaRegistry::add) before any snapshot is visited. Snapshots whose
+ * schema is not in the registry are skipped.
  *
- * Callback signature: void(const Schema& schema, const SnapshotView& snapshot),
- * typically calling ParseSnapshot(schema, snapshot, ...).
- *
- * @return the number of snapshots visited (skipped ones excluded).
+ * @return the number of snapshots visited.
  */
 template <typename BatchMsgT, typename SnapshotCallback>
 size_t ForEachSnapshotInBatch(SchemaRegistry& registry, const BatchMsgT& batch,
@@ -189,6 +208,12 @@ size_t ForEachSnapshotInBatch(SchemaRegistry& registry, const BatchMsgT& batch,
 //---------------------------------------------------------
 //---------------------------------------------------------
 
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "needs a little endian host");
+#endif
+
+/// Reads a T from the front of `buffer` and advances it; throws std::runtime_error if
+/// it is too short. Copies the bytes as they are, so the host must be little endian.
 template <typename T>
 inline T Deserialize(BufferSpan& buffer)
 {
@@ -198,10 +223,35 @@ inline T Deserialize(BufferSpan& buffer)
   {
     throw std::runtime_error("DataTamerParser: payload truncated");
   }
-  std::memcpy(&var, buffer.data, N);
+  if constexpr(std::is_same_v<T, bool>)
+  {
+    var = buffer.data[0] != 0;  // another byte value is not a valid bool
+  }
+  else
+  {
+    std::memcpy(&var, buffer.data, N);
+  }
   buffer.data += N;
   buffer.size -= N;
   return var;
+}
+
+[[nodiscard]] inline SnapshotView SplitMcapMessage(BufferSpan body)
+{
+  SnapshotView view{};
+  const uint32_t mask_size = Deserialize<uint32_t>(body);
+  view.active_mask.data = body.data;
+  body.trimFront(mask_size);
+  view.active_mask.size = mask_size;
+  const uint32_t payload_size = Deserialize<uint32_t>(body);
+  view.payload.data = body.data;
+  body.trimFront(payload_size);
+  view.payload.size = payload_size;
+  if(body.size != 0)
+  {
+    throw std::runtime_error("DataTamerParser: MCAP message body has trailing bytes");
+  }
+  return view;
 }
 
 inline VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer)
@@ -244,7 +294,7 @@ inline VarNumber DeserializeToVarNumber(BasicType type, BufferSpan& buffer)
   return {};
 }
 
-inline bool GetBit(BufferSpan mask, size_t index)
+[[nodiscard]] inline bool GetBit(BufferSpan mask, size_t index)
 {
   if((index >> 3) >= mask.size)
   {
@@ -254,9 +304,8 @@ inline bool GetBit(BufferSpan mask, size_t index)
   return 0 != (byte & uint8_t(1 << (index % 8)));
 }
 
-/// Hash recipe of schema version 4 (std::hash based, so only reproducible on the
-/// writer's platform). Kept so that version 4 texts are read and verified exactly
-/// as before.
+/// Folds `field` into a running schema hash with the version 4 recipe. It is std::hash
+/// based, so it only reproduces the hash on the writer's platform.
 [[nodiscard]] inline uint64_t AddFieldToHash(const TypeField& field, uint64_t hash)
 {
   // https://stackoverflow.com/questions/2590677/how-do-i-combine-hash-values-in-c0x
@@ -281,7 +330,7 @@ inline bool GetBit(BufferSpan mask, size_t index)
 }
 
 /// Hash recipe of schema version 5: FNV-1a 64 of the schema text without its
-/// "### hash:" line (wire format, section 5). Platform independent.
+/// "### hash:" line (docs/wire_format.md, section 5). Platform independent.
 [[nodiscard]] inline uint64_t SchemaTextHash(const std::string& text)
 {
   uint64_t hash = 0xcbf29ce484222325ULL;
@@ -321,7 +370,7 @@ inline bool TypeField::operator!=(const TypeField& other) const
 
 /// Renders a schema in the version 5 line format, byte for byte as the
 /// DataTamer writer does: SchemaTextHash() of the result is the schema hash.
-inline std::string ToText(const Schema& schema)
+[[nodiscard]] inline std::string ToText(const Schema& schema)
 {
   auto fieldLine = [](const TypeField& field) {
     std::string line = field.type_name;
@@ -331,7 +380,7 @@ inline std::string ToText(const Schema& schema)
     }
     return line + " " + field.field_name + "\n";
   };
-  const std::string separator(59, '=');
+  const std::string separator(detail::kSeparatorWidth, '=');
   std::string out = "### version: " + std::to_string(SCHEMA_VERSION) +
                     "\n### hash: " + std::to_string(schema.hash) +
                     "\n### channel_name: " + schema.channel_name + "\n\n";
@@ -398,8 +447,7 @@ inline void AppendUtf8(std::string& out, uint32_t cp)
   }
 }
 
-/// Decodes the double-quoted scalar starting at s[pos] == '"'; returns the
-/// index just past the closing quote.
+/// Decodes the double-quoted scalar at s[pos] == '"'; returns the index past its end.
 inline size_t ReadQuoted(const std::string& s, size_t pos, std::string& out,
                          const std::string& line)
 {
@@ -558,8 +606,7 @@ inline BasicType BasicTypeFromName(const std::string& name)
   return BasicType::OTHER;
 }
 
-/// Strict unsigned decimal: digits only, no sign or spaces. nullopt if invalid
-/// or if it does not fit in 64 bits.
+/// Unsigned decimal, digits only. nullopt if invalid or above 2^64 - 1.
 inline std::optional<uint64_t> ParseUnsigned(const std::string& value)
 {
   if(value.empty() || value.size() > 20 ||
@@ -689,6 +736,16 @@ inline TypeField ParseYamlTypeSpec(const std::string& spec)
   return field;
 }
 
+/// True if `name` can name a field (docs/wire_format.md section 2): not empty, and no
+/// byte up to the space or 0x7f. Bytes above 0x7f, as in UTF-8, are fine.
+inline bool IsValidFieldName(std::string_view name)
+{
+  return !name.empty() && std::none_of(name.begin(), name.end(), [](char c) {
+    const auto byte = static_cast<unsigned char>(c);
+    return byte <= 0x20 || byte == 0x7f;
+  });
+}
+
 inline void FlattenYamlFields(const std::vector<YamlNode>& nodes,
                               const std::string& prefix, FieldsVector& out)
 {
@@ -698,6 +755,11 @@ inline void FlattenYamlFields(const std::vector<YamlNode>& nodes,
     {
       TypeField field = ParseYamlTypeSpec(*node.scalar);
       field.field_name = prefix + node.key;
+      if(!IsValidFieldName(field.field_name))
+      {
+        throw std::runtime_error("DataTamerParser: YAML schema: invalid field name " +
+                                 field.field_name);
+      }
       out.push_back(std::move(field));
     }
     else
@@ -719,11 +781,192 @@ inline const YamlNode* FindYamlKey(const std::vector<YamlNode>& nodes,
   }
   return nullptr;
 }
+
+/// Type names of schema texts from before version 4: upper case, indexed by BasicType.
+inline const std::array<std::string, TypesCount>& LegacyTypeNames()
+{
+  static const std::array<std::string, TypesCount> kNames = {
+    "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
+    "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
+  };
+  return kNames;
+}
+
+/// Removes the spaces and carriage returns at both ends of `str`.
+inline void Trim(std::string& str)
+{
+  const auto last = str.find_last_not_of(" \r");
+  if(last == std::string::npos)
+  {
+    str.clear();
+    return;
+  }
+  str.erase(last + 1);
+  str.erase(0, str.find_first_not_of(" \r"));
+}
+
+/// Reads the line of `txt` that starts at `offset` into `line`, without its '\n', and
+/// moves `offset` to the start of the next one. Returns false at the end of the text.
+inline bool ReadLine(const std::string& txt, size_t& offset, std::string& line)
+{
+  if(offset >= txt.size())
+  {
+    return false;
+  }
+  const size_t end = std::min(txt.find('\n', offset), txt.size());
+  line.assign(txt, offset, end - offset);
+  offset = std::min(end + 1, txt.size());
+  return true;
+}
+
+/// Reads the next line of `txt` that is not blank, trimmed. Returns false, with `line`
+/// empty, if there is none.
+inline bool ReadNonBlankLine(const std::string& txt, size_t& offset, std::string& line)
+{
+  while(ReadLine(txt, offset, line))
+  {
+    Trim(line);
+    if(!line.empty())
+    {
+      return true;
+    }
+  }
+  line.clear();
+  return false;
+}
+
+/// True for the YAML rendering (version 6): its first line that is not a comment starts
+/// with "version:", where the line format starts with a "###" header.
+inline bool IsYamlSchema(const std::string& txt)
+{
+  size_t offset = 0;
+  std::string line;
+  while(ReadNonBlankLine(txt, offset, line))
+  {
+    if(line.front() != '#' || line.rfind("###", 0) == 0)
+    {
+      return line.rfind("version:", 0) == 0;
+    }
+  }
+  return false;
+}
+
+/// If `line` starts with `prefix` (such as "### hash:"), puts the rest of it, trimmed, in
+/// `value`.
+inline bool ReadHeaderValue(const std::string& line, const char* prefix,
+                            std::string& value)
+{
+  const size_t size = std::strlen(prefix);
+  if(line.compare(0, size, prefix) != 0)
+  {
+    return false;
+  }
+  value.assign(line, size, std::string::npos);
+  Trim(value);
+  return true;
+}
+
+/// The array size of the type spec `spec`, whose '[' is at `open` and whose ']' ends it:
+/// 0 for "[]" (a dynamic vector), N for "[N]". `line` is the field line, for the error
+/// messages.
+inline uint32_t ParseArraySize(const std::string& spec, size_t open,
+                               const std::string& line)
+{
+  const auto close = spec.find(']', open);
+  if(close == std::string::npos)
+  {
+    throw std::runtime_error("Unterminated array size in: " + line);
+  }
+  if(close + 1 != spec.size())
+  {
+    throw std::runtime_error("Unexpected text after the array size in: " + line);
+  }
+  if(close == open + 1)
+  {
+    return 0;
+  }
+  const std::string digits = spec.substr(open + 1, close - open - 1);
+  if(digits.find_first_not_of("0123456789") != std::string::npos)
+  {
+    throw std::runtime_error("Invalid array size in: " + line);
+  }
+  const auto extent = ParseArrayExtent(digits);
+  if(!extent)
+  {
+    throw std::runtime_error("Array size out of range (1..65535) in: " + line);
+  }
+  return *extent;
+}
+
+/// Parses a field line, "<type> <name>", the type being "T", "T[]" or "T[N]". A text
+/// without a version line comes from before version 4 (`legacy`): its type names are
+/// upper case and the type follows the name.
+inline TypeField ParseFieldLine(const std::string& line, bool legacy)
+{
+  // Split at the first space.
+  const auto space_pos = line.find(' ');
+  if(space_pos == std::string::npos)
+  {
+    throw std::runtime_error("Unexpected line: " + line);
+  }
+  std::string left = line.substr(0, space_pos);
+  std::string right = line.substr(space_pos + 1);
+  Trim(left);
+  Trim(right);
+
+  // A type name is the whole token before any "[...]": "float64Pose" is a custom type.
+  auto typeToken = [](const std::string& spec) {
+    return std::string_view(spec).substr(0, spec.find('['));
+  };
+  const std::string_view left_token = typeToken(left);
+  const std::string_view right_token = legacy ? typeToken(right) : std::string_view();
+
+  std::string* type_spec = &left;
+  std::string* name = &right;
+  const auto& names = BasicTypeNames();
+  const auto& legacy_names = LegacyTypeNames();
+  TypeField field;
+  for(size_t i = 0; i < TypesCount; i++)
+  {
+    if(left_token == names[i])
+    {
+      field.type = static_cast<BasicType>(i);
+      break;
+    }
+    if(legacy && right_token == legacy_names[i])
+    {
+      field.type = static_cast<BasicType>(i);
+      std::swap(type_spec, name);
+      break;
+    }
+  }
+
+  const auto open = type_spec->find_first_of(" [");
+  if(type_spec->empty() || open == 0)
+  {
+    throw std::runtime_error("Empty type name in: " + line);
+  }
+  field.type_name = field.type != BasicType::OTHER ?
+                        names[static_cast<size_t>(field.type)] :
+                        type_spec->substr(0, open);
+  if(open != std::string::npos && (*type_spec)[open] == '[')
+  {
+    field.is_vector = true;
+    field.array_size = ParseArraySize(*type_spec, open, line);
+  }
+  if(!IsValidFieldName(*name))
+  {
+    throw std::runtime_error("Invalid field name in: " + line);
+  }
+  field.field_name = std::move(*name);
+  return field;
+}
 }  // namespace detail
 
-/// Parses a YAML schema (version 6, wire format section 2.1). BuildSchemaFromText()
-/// calls it when the text starts with "version:".
-inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = false)
+/// Parses a YAML schema (version 6, docs/wire_format.md section 2.1).
+/// BuildSchemaFromText() calls it when the text starts with "version:".
+[[nodiscard]] inline Schema BuildSchemaFromYaml(const std::string& txt,
+                                                bool check_hash = false)
 {
   using detail::FindYamlKey;
   const auto root = detail::ParseYamlTree(txt);
@@ -799,192 +1042,124 @@ inline Schema BuildSchemaFromYaml(const std::string& txt, bool check_hash = fals
   return schema;
 }
 
-inline Schema BuildSchemaFromText(const std::string& txt, bool check_hash = false)
+/// Parses a schema text in the line format (versions 4 and 5) or YAML (version 6), see
+/// docs/wire_format.md section 2. Throws std::runtime_error on a malformed text or
+/// another version; `check_hash` also throws if the declared hash is wrong.
+[[nodiscard]] inline Schema BuildSchemaFromText(const std::string& txt,
+                                                bool check_hash = false)
 {
-  auto trimString = [](std::string& str) {
-    while(!str.empty() && (str.back() == ' ' || str.back() == '\r'))
-    {
-      str.pop_back();
-    }
-    while(!str.empty() && (str.front() == ' ' || str.front() == '\r'))
-    {
-      str.erase(0, 1);
-    }
-  };
-
+  if(detail::IsYamlSchema(txt))
   {
-    // The YAML rendering (version 6) starts with "version:"; the line format with "###".
-    std::istringstream probe(txt);
-    std::string first;
-    while(std::getline(probe, first))
-    {
-      trimString(first);
-      if(!first.empty() && first.front() != '#')
-      {
-        break;
-      }
-      if(first.rfind("###", 0) == 0)
-      {
-        break;
-      }
-    }
-    if(first.rfind("version:", 0) == 0)
-    {
-      return BuildSchemaFromYaml(txt, check_hash);
-    }
+    return BuildSchemaFromYaml(txt, check_hash);
   }
 
-  std::istringstream ss(txt);
-  std::string line;
   Schema schema;
   uint64_t declared_schema = 0;
-  int version = SCHEMA_VERSION;
+  int version = 0;           // 0 until a version line: a text from before version 4
   uint64_t legacy_hash = 0;  // version 4 recomputation, field by field
 
   std::vector<TypeField>* field_vector = &schema.fields;
+  bool any_line = false;
+  std::string section_name;     // the type of the last "MSG:" line
+  bool section_starts = false;  // the line being read follows that "MSG:" line
 
-  while(std::getline(ss, line))
+  size_t offset = 0;  // where the next line of txt starts
+  std::string line;
+  while(detail::ReadNonBlankLine(txt, offset, line))
   {
-    trimString(line);
-    if(line.empty())
+    any_line = true;
+    const bool opens_section = std::exchange(section_starts, false);
+    if(line.size() >= detail::kMinSeparatorWidth &&
+       line.find_first_not_of('=') == std::string::npos)
     {
-      continue;
-    }
-    if(line.find("==============================") != std::string::npos)
-    {
-      // get "MSG:" in the next line
-      std::getline(ss, line);
-      auto msg_pos = line.find("MSG: ");
-      if(msg_pos == std::string::npos)
+      // a separator: the next line that is not blank is "MSG: <type name>"
+      if(!detail::ReadNonBlankLine(txt, offset, line) || line.rfind("MSG: ", 0) != 0)
       {
         throw std::runtime_error("Expecting \"MSG: \" at the beginning of line: " + line);
       }
       line.erase(0, 5);
-      trimString(line);
-      field_vector = &schema.custom_types[line];
+      detail::Trim(line);
+      section_name = line;
+      section_starts = true;
+      field_vector = &schema.custom_types[section_name];
       continue;
     }
-
-    // a single space is expected
-    auto space_pos = line.find(' ');
-    if(space_pos == std::string::npos)
+    if(line.rfind("MSG: ", 0) == 0)
     {
-      throw std::runtime_error("Unexpected line: " + line);
-    }
-    if(line.find("### ") == 0)
-    {
-      space_pos = line.find(' ', 5);
+      throw std::runtime_error("\"MSG: \" not right after a separator, in: " + line);
     }
 
-    std::string str_left = line.substr(0, space_pos);
-    std::string str_right = line.substr(space_pos + 1, line.size() - (space_pos + 1));
-    trimString(str_left);
-    trimString(str_right);
-
-    const std::string* str_type = &str_left;
-    const std::string* str_name = &str_right;
-
-    if(str_left == "### version:")
+    if(line.rfind("ENCODING: ", 0) == 0)
     {
-      // Version 4 differs only in how the hash was computed.
-      version = std::stoi(str_right);
-      if(version != SCHEMA_VERSION && version != 4)
+      // an opaque type: the foreign schema is the rest of the text, one final newline
+      // (which the writer adds) apart
+      if(!opens_section)
       {
-        throw std::runtime_error("Wrong SCHEMA_VERSION");
+        throw std::runtime_error("ENCODING: outside the start of a section, in: " + line);
       }
-      continue;
-    }
-    if(str_left == "### hash:")
-    {
-      // check compatibility
-      declared_schema = std::stoull(str_right);
-      continue;
-    }
-
-    if(str_left == "### channel_name:")
-    {
-      // check compatibility
-      schema.channel_name = str_right;
-      legacy_hash = std::hash<std::string>()(schema.channel_name);
-      continue;
-    }
-
-    TypeField field;
-
-    const auto& kNamesNew = detail::BasicTypeNames();
-    // backcompatibility to old format
-    static const std::array<std::string, TypesCount> kNamesOld = {
-      "BOOL",   "CHAR",  "INT8",   "UINT8", "INT16",  "UINT16", "INT32",
-      "UINT32", "INT64", "UINT64", "FLOAT", "DOUBLE", "OTHER"
-    };
-
-    // The type token is everything before an optional "[...]": compare it exactly,
-    // otherwise a custom type named e.g. "float64Pose" would parse as float64.
-    auto typeToken = [](const std::string& spec) {
-      return spec.substr(0, spec.find('['));
-    };
-    for(size_t i = 0; i < TypesCount; i++)
-    {
-      if(typeToken(str_left) == kNamesNew[i])
+      std::string encoding = line.substr(10);
+      detail::Trim(encoding);
+      std::string foreign = txt.substr(offset);
+      if(!foreign.empty() && foreign.back() == '\n')
       {
-        field.type = static_cast<BasicType>(i);
-        break;
+        foreign.pop_back();
       }
-      if(typeToken(str_right) == kNamesOld[i])
-      {
-        field.type = static_cast<BasicType>(i);
-        std::swap(str_type, str_name);
-        break;
-      }
+      schema.custom_types.erase(section_name);
+      schema.custom_schemas[section_name] = { encoding, foreign };
+      break;
     }
 
-    auto offset = str_type->find_first_of(" [");
-    if(field.type != BasicType::OTHER)
+    // Headers: "### key: value", the value being what follows the colon. Only a line
+    // that starts with "### " can be one, which spares the other lines the key tests.
+    if(line.rfind("### ", 0) == 0)
     {
-      field.type_name = kNamesNew[static_cast<size_t>(field.type)];
-    }
-    else
-    {
-      field.type_name = str_type->substr(0, offset);
-    }
-
-    if(offset != std::string::npos && str_type->at(offset) == '[')
-    {
-      field.is_vector = true;
-      auto pos = str_type->find(']', offset);
-      if(pos == std::string::npos)
+      std::string value;
+      if(detail::ReadHeaderValue(line, "### version:", value))
       {
-        throw std::runtime_error("Unterminated array size in: " + line);
-      }
-      if(pos != offset + 1)
-      {
-        const std::string number_string = str_type->substr(offset + 1, pos - offset - 1);
-        if(number_string.empty() ||
-           number_string.find_first_not_of("0123456789") != std::string::npos)
+        const auto number = detail::ParseUnsigned(value);
+        if(!number)
         {
-          throw std::runtime_error("Invalid array size in: " + line);
+          throw std::runtime_error("DataTamerParser: invalid version in: " + line);
         }
-        const auto extent = detail::ParseArrayExtent(number_string);
-        if(!extent)
+        // Version 4 differs only in how the hash was computed.
+        if(*number != uint64_t(SCHEMA_VERSION) && *number != 4)
         {
-          throw std::runtime_error("Array size out of range (1..65535) in: " + line);
+          throw std::runtime_error("Wrong SCHEMA_VERSION");
         }
-        field.array_size = *extent;
+        version = int(*number);
+        continue;
+      }
+      if(detail::ReadHeaderValue(line, "### hash:", value))
+      {
+        const auto number = detail::ParseUnsigned(value);
+        if(!number)
+        {
+          throw std::runtime_error("DataTamerParser: invalid hash in: " + line);
+        }
+        declared_schema = *number;
+        continue;
+      }
+      if(detail::ReadHeaderValue(line, "### channel_name:", value))
+      {
+        schema.channel_name = value;
+        legacy_hash = std::hash<std::string>()(schema.channel_name);
+        continue;
       }
     }
 
-    field.field_name = *str_name;
-    trimString(field.field_name);
-
+    TypeField field = detail::ParseFieldLine(line, version == 0);
     if(version == 4 && field_vector == &schema.fields)
     {
       legacy_hash = AddFieldToHash(field, legacy_hash);
     }
-    field_vector->push_back(field);
+    field_vector->push_back(std::move(field));
   }
-  // Snapshots carry the writer's declared hash: that is what to match against.
-  // check_hash verifies it against the recomputation of the text's own version
-  // (version 4's std::hash recipe only agrees on the writer's platform).
+  if(!any_line)
+  {
+    throw std::runtime_error("DataTamerParser: empty schema text");
+  }
+  // The declared hash is the one snapshots carry. check_hash recomputes it with the
+  // recipe of the text's version.
   const uint64_t computed = version == 4 ? legacy_hash : SchemaTextHash(txt);
   if(check_hash && declared_schema != 0 && declared_schema != computed)
   {
@@ -1001,6 +1176,8 @@ BuilSchemaFromText(const std::string& txt, bool check_hash = false)
   return BuildSchemaFromText(txt, check_hash);
 }
 
+namespace detail
+{
 /// Wire size in bytes of a basic type (0 for OTHER).
 inline size_t SizeOf(BasicType type)
 {
@@ -1030,30 +1207,178 @@ inline size_t SizeOf(BasicType type)
 /// Nested custom types deeper than this are treated as a malformed (cyclic) schema.
 constexpr int kMaxSchemaDepth = 64;
 
-template <typename NumberCallback>
-bool ParseSnapshotRecursive(const TypeField& field,
-                            const std::map<std::string, FieldsVector>& types_list,
-                            BufferSpan& buffer, const NumberCallback& callback_number,
-                            const std::string& prefix, int depth = 0)
+/// Fewest payload bytes one value of a custom type takes, by type name, for the types a
+/// decode has met so far. A schema has few custom types: the first ones are kept in the
+/// object, so that a decode allocates nothing for them. The names are the schema's own
+/// strings, which must outlive the object.
+class MinSizes
+{
+public:
+  /// The size stored for `type_name`, or nullptr.
+  const size_t* find(const std::string& type_name) const
+  {
+    for(size_t i = 0; i < in_place_; i++)
+    {
+      if(*names_[i] == type_name)
+      {
+        return &sizes_[i];
+      }
+    }
+    const auto it = more_.find(type_name);
+    return it == more_.end() ? nullptr : &it->second;
+  }
+
+  void insert(const std::string& type_name, size_t size)
+  {
+    if(in_place_ < kInPlace)
+    {
+      names_[in_place_] = &type_name;
+      sizes_[in_place_++] = size;
+    }
+    else
+    {
+      more_.emplace(type_name, size);
+    }
+  }
+
+private:
+  static constexpr size_t kInPlace = 4;
+  std::array<const std::string*, kInPlace> names_{};
+  std::array<size_t, kInPlace> sizes_{};
+  size_t in_place_ = 0;
+  std::map<std::string, size_t> more_;
+};
+
+/// Larger sizes saturate here, so that products of array extents cannot overflow.
+constexpr size_t kHugeSize = std::numeric_limits<size_t>::max() / 2;
+
+inline size_t MinFieldSize(const TypeField& field, const Schema& schema,
+                           MinSizes& min_sizes, int depth);
+
+/// The error of CheckDepth(), kept out of the line that tests the depth.
+[[noreturn]] inline void NestedTooDeeply()
+{
+  throw std::runtime_error("DataTamerParser: custom types nested too deeply (cycle?)");
+}
+
+/// Throws if a field sits more than kMaxSchemaDepth custom types deep, which only a
+/// malformed or cyclic schema does.
+inline void CheckDepth(int depth)
 {
   if(depth > kMaxSchemaDepth)
   {
-    throw std::runtime_error("DataTamerParser: custom types nested too deeply (cycle?)");
+    NestedTooDeeply();
   }
+}
+
+/// The error for a custom type the schema does not describe field by field.
+[[noreturn]] inline void UndecodableType(const Schema& schema, const std::string& name)
+{
+  if(schema.custom_schemas.count(name) != 0)
+  {
+    throw std::runtime_error("DataTamerParser: type " + name +
+                             " has an opaque encoding; cannot continue");
+  }
+  throw std::runtime_error("DataTamerParser: unknown type " + name);
+}
+
+/// The fields of the custom type `name`. Throws if the schema does not describe the type
+/// field by field: it is opaque or not defined.
+inline const FieldsVector& CustomFields(const Schema& schema, const std::string& name)
+{
+  const auto it = schema.custom_types.find(name);
+  if(it == schema.custom_types.end())
+  {
+    UndecodableType(schema, name);
+  }
+  return it->second;
+}
+
+/// Fewest payload bytes one element of `field` takes: a basic type's size, or the sum
+/// of the fewest bytes of each field of the custom type.
+inline size_t MinElementSize(const TypeField& field, const Schema& schema,
+                             MinSizes& min_sizes, int depth)
+{
+  if(field.type != BasicType::OTHER)
+  {
+    return SizeOf(field.type);
+  }
+  if(const size_t* known = min_sizes.find(field.type_name))
+  {
+    return *known;
+  }
+  CheckDepth(depth);
+  size_t total = 0;
+  for(const auto& sub_field : CustomFields(schema, field.type_name))
+  {
+    const size_t size = MinFieldSize(sub_field, schema, min_sizes, depth + 1);
+    total = size > kHugeSize - total ? kHugeSize : total + size;
+  }
+  min_sizes.insert(field.type_name, total);
+  return total;
+}
+
+/// Fewest payload bytes `field` takes: its elements at their fewest bytes, or only the
+/// 4 byte count for a dynamic vector.
+inline size_t MinFieldSize(const TypeField& field, const Schema& schema,
+                           MinSizes& min_sizes, int depth)
+{
+  if(field.is_vector && field.array_size == 0)
+  {
+    return sizeof(uint32_t);
+  }
+  const size_t element = MinElementSize(field, schema, min_sizes, depth);
+  const size_t count = field.is_vector ? field.array_size : 1;
+  return (element != 0 && count > kHugeSize / element) ? kHugeSize : element * count;
+}
+
+template <typename NumberCallback>
+void ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
+                            BufferSpan& buffer, const NumberCallback& callback_number,
+                            const std::string& prefix, MinSizes& min_sizes, int depth = 0)
+{
+  CheckDepth(depth);
   uint32_t vect_size = field.array_size;
   if(field.is_vector && field.array_size == 0)
   {
-    // dynamic vector: the count cannot exceed what the payload can hold
     vect_size = Deserialize<uint32_t>(buffer);
-    if(field.type != BasicType::OTHER &&
-       size_t(vect_size) * SizeOf(field.type) > buffer.size)
+  }
+  if(field.is_vector)
+  {
+    if(vect_size == 0)
+    {
+      // Nothing to read: an opaque type has nothing to skip, but a type the schema does
+      // not define at all makes it malformed, whatever the count.
+      if(field.type == BasicType::OTHER &&
+         schema.custom_types.count(field.type_name) == 0 &&
+         schema.custom_schemas.count(field.type_name) == 0)
+      {
+        UndecodableType(schema, field.type_name);
+      }
+      return;
+    }
+    // An element takes at least min_size bytes: a count the payload cannot hold is
+    // rejected. Elements of no byte hold no value, however many there are.
+    const size_t min_size = MinElementSize(field, schema, min_sizes, depth);
+    if(min_size == 0)
+    {
+      return;
+    }
+    if(vect_size > buffer.size / min_size)
     {
       throw std::runtime_error("DataTamerParser: payload truncated");
     }
   }
 
-  auto new_prefix =
-      (prefix.empty()) ? field.field_name : (prefix + "/" + field.field_name);
+  // A top-level field is named as it is, without a copy; a nested one is appended to the
+  // name of its parent.
+  std::string joined;
+  if(!prefix.empty())
+  {
+    joined.reserve(prefix.size() + 1 + field.field_name.size());
+    joined.append(prefix).append(1, '/').append(field.field_name);
+  }
+  const std::string& new_prefix = prefix.empty() ? field.field_name : joined;
 
   auto doParse = [&](const std::string& var_name) {
     if(field.type != BasicType::OTHER)
@@ -1063,15 +1388,17 @@ bool ParseSnapshotRecursive(const TypeField& field,
     }
     else
     {
-      const auto type_it = types_list.find(field.type_name);
-      if(type_it == types_list.end())
+      // Not CustomFields(): called from here it slows the flat scalar path by up to 17%
+      // (GCC 13, -O3), through the code it makes the compiler generate for the function.
+      const auto type_it = schema.custom_types.find(field.type_name);
+      if(type_it == schema.custom_types.end())
       {
-        throw std::runtime_error("DataTamerParser: unknown type " + field.type_name);
+        UndecodableType(schema, field.type_name);
       }
       for(const auto& sub_field : type_it->second)
       {
-        ParseSnapshotRecursive(sub_field, types_list, buffer, callback_number, var_name,
-                               depth + 1);
+        ParseSnapshotRecursive(sub_field, schema, buffer, callback_number, var_name,
+                               min_sizes, depth + 1);
       }
     }
   };
@@ -1088,19 +1415,20 @@ bool ParseSnapshotRecursive(const TypeField& field,
       doParse(name);
     }
   }
-  return true;
 }
+}  // namespace detail
 
-template <typename NumberCallback, typename CustomCallback>
-inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
-                          const NumberCallback& callback_number,
-                          const CustomCallback& callback_custom)
+template <typename NumberCallback>
+[[nodiscard]] inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
+                                        const NumberCallback& callback_number)
 {
   if(schema.hash != snapshot.schema_hash)
   {
     return false;
   }
   BufferSpan buffer = snapshot.payload;
+  detail::MinSizes min_sizes;
+  const std::string no_prefix;  // one for all top-level fields: "" would build one each
   if(snapshot.active_mask.size * 8 < schema.fields.size())
   {
     throw std::runtime_error("DataTamerParser: active mask shorter than the schema");
@@ -1111,10 +1439,11 @@ inline bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
     const auto& field = schema.fields[i];
     if(GetBit(snapshot.active_mask, i))
     {
-      ParseSnapshotRecursive(field, schema.custom_types, buffer, callback_number, "");
+      detail::ParseSnapshotRecursive(field, schema, buffer, callback_number, no_prefix,
+                                     min_sizes);
     }
   }
-  // every enabled field consumed exactly its bytes; leftovers mean schema/payload mismatch
+  // leftover bytes: the schema and the payload do not belong together
   return buffer.size == 0;
 }
 

@@ -2,6 +2,7 @@
 
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_sink.hpp"
+#include "data_tamer/sinks/dummy_sink.hpp"
 
 #include <gtest/gtest.h>
 
@@ -65,6 +66,33 @@ channelWith(const std::shared_ptr<DataTamer::SinkWorker>& sink, T* value,
   return channel;
 }
 
+/// A channel named "chan" with a DummySink attached, for the tests of what registered
+/// values record. The delivery is manual: snapshot() delivers what it takes.
+struct Recording
+{
+  Attached<DataTamer::DummySink> sink = manual<DataTamer::DummySink>();
+  std::shared_ptr<DataTamer::LogChannel> channel = DataTamer::LogChannel::create("chan");
+
+  Recording() { channel->addDataSink(sink); }
+
+  /// A field of the schema, counted in the order of registration.
+  DataTamer::TypeField field(size_t index = 0) const
+  {
+    return channel->getSchema().fields.at(index);
+  }
+
+  /// Takes a snapshot, delivers it and returns it as the sink received it.
+  DataTamer::Snapshot snapshot()
+  {
+    EXPECT_EQ(channel->takeSnapshot(), DataTamer::SnapshotResult::ok);
+    sink.drain();
+    return sink->latestSnapshot();
+  }
+
+  DataTamer::PayloadVector payload() { return snapshot().payload; }
+  size_t payloadSize() { return snapshot().payload.size(); }
+};
+
 /// Snapshots a started channel accepts until its pool is exhausted. With
 /// nothing delivered meanwhile, that is the pool capacity.
 inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
@@ -80,6 +108,28 @@ inline size_t acceptedUntilExhausted(DataTamer::LogChannel& channel)
     }
     ++accepted;
   }
+}
+
+/// Publications `sink` refused, from stats.dropped_by_sink (0 if the sink is not in it).
+inline uint64_t droppedBy(const DataTamer::LogChannel::Stats& stats,
+                          const std::shared_ptr<DataTamer::SinkWorker>& sink)
+{
+  for(const auto& entry : stats.dropped_by_sink)
+  {
+    if(entry.sink == sink.get())
+    {
+      return entry.dropped;
+    }
+  }
+  return 0;
+}
+
+/// Publications `sink` refused on `channel`, from stats().dropped_by_sink (0 if the
+/// sink is not attached).
+inline uint64_t droppedBy(const DataTamer::LogChannel& channel,
+                          const std::shared_ptr<DataTamer::SinkWorker>& sink)
+{
+  return droppedBy(channel.stats(), sink);
 }
 
 /// True while the calling thread (or any other) holds the channel's write mutex:

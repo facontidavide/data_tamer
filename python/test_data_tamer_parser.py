@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import data_tamer_parser as dt
 
 VECTORS = pathlib.Path(__file__).resolve().parent.parent / "docs" / "wire_format" / "vectors"
+SEPARATOR = "=" * 59  # the line that starts a custom type section
 
 
 def read(name: str) -> bytes:
@@ -81,16 +82,17 @@ class FieldNames(unittest.TestCase):
     def test_nested_containers_and_opaque_types(self):
         text = ("### version: 5\n### hash: 0\n### channel_name: c\n\n"
                 "Leg[2] legs\nBlob blob\nBlob[] blobs\n"
-                "=====\nMSG: Leg\nfloat32[] q\nint8[2] mode\n"
-                "=====\nMSG: Blob\nENCODING: proto\nmessage Blob {}\n")
+                f"{SEPARATOR}\nMSG: Leg\nfloat32[] q\nint8[2] mode\n"
+                f"{SEPARATOR}\nMSG: Blob\nENCODING: proto\nmessage Blob {{}}\n")
         self.assertEqual(dt.parse_schema(text).field_names(), [
             "legs[0]/q[]", "legs[0]/mode[0]", "legs[0]/mode[1]",
             "legs[1]/q[]", "legs[1]/mode[0]", "legs[1]/mode[1]", "blob", "blobs[]"])
 
     def test_rejects_undefined_and_cyclic_types(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "unknown type 'Foo'"):
             dt.parse_schema("### version: 5\n### hash: 0\n### channel_name: c\n\nFoo x\n").field_names()
-        cyclic = "### version: 5\n### hash: 0\n### channel_name: c\n\nA a\n=====\nMSG: A\nA a\n"
+        cyclic = ("### version: 5\n### hash: 0\n### channel_name: c\n\nA a\n"
+                  + SEPARATOR + "\nMSG: A\nA a\n")
         for text in (cyclic, cyclic.replace("A a\n", "A[60000] a\n")):  # no blowup
             with self.subTest(text=text), self.assertRaises(ValueError):
                 dt.parse_schema(text).field_names()
@@ -98,9 +100,9 @@ class FieldNames(unittest.TestCase):
     @staticmethod
     def chain(depth: int, leaf: str = "float32 x") -> str:
         """Top field of type T1, T1 holds a T2, ..., T<depth> holds `leaf`."""
-        types = "".join(f"=====\nMSG: T{i}\nT{i + 1} t\n" for i in range(1, depth))
+        types = "".join(f"{SEPARATOR}\nMSG: T{i}\nT{i + 1} t\n" for i in range(1, depth))
         return (f"### version: 5\n### hash: 0\n### channel_name: c\n\nT1 t\n{types}"
-                f"=====\nMSG: T{depth}\n{leaf}\n")
+                f"{SEPARATOR}\nMSG: T{depth}\n{leaf}\n")
 
     def test_depth_limit_matches_the_decoder(self):
         ok = dt.parse_schema(self.chain(dt.MAX_SCHEMA_DEPTH))
@@ -108,23 +110,24 @@ class FieldNames(unittest.TestCase):
         self.assertEqual(dt.parse_snapshot(ok, b"\x01", b"\0" * 4), {"t/" * 64 + "x": 0.0})
         for depth in (dt.MAX_SCHEMA_DEPTH + 1, 80, 1200):  # 1200: no RecursionError
             schema = dt.parse_schema(self.chain(depth))
-            with self.subTest(depth=depth), self.assertRaises(ValueError):
+            with self.subTest(depth=depth), self.assertRaisesRegex(ValueError, "nested too deeply"):
                 schema.field_names()
-            with self.subTest(depth=depth), self.assertRaises(ValueError):
+            with self.subTest(depth=depth), self.assertRaisesRegex(ValueError, "nested too deeply"):
                 dt.parse_snapshot(schema, b"\x01", b"\0" * 4)
         # a deep type reached again, deeper, through the memo
         text = ("### version: 5\n### hash: 0\n### channel_name: c\n\nT1 a\nW w\n"
-                "=====\nMSG: W\nT1 b\n" + self.chain(dt.MAX_SCHEMA_DEPTH).split("T1 t\n", 1)[1])
-        with self.assertRaises(ValueError):
+                f"{SEPARATOR}\nMSG: W\nT1 b\n"
+                + self.chain(dt.MAX_SCHEMA_DEPTH).split("T1 t\n", 1)[1])
+        with self.assertRaisesRegex(ValueError, "nested too deeply"):
             dt.parse_schema(text).field_names()
 
     def test_size_limit(self):
         text = ("### version: 5\n### hash: 0\n### channel_name: c\n\nA[65535] a\n"
-                "=====\nMSG: A\nB[65535] b\n=====\nMSG: B\nfloat32[65535] x\n")
+                f"{SEPARATOR}\nMSG: A\nB[65535] b\n{SEPARATOR}\nMSG: B\nfloat32[65535] x\n")
         with self.assertRaisesRegex(ValueError, "more than"):
             dt.parse_schema(text).field_names()  # 65535**3 names: refused, not listed
         wide = ("### version: 5\n### hash: 0\n### channel_name: c\n\nA[1000] a\n"
-                "=====\nMSG: A\nfloat32[1000] x\n")
+                f"{SEPARATOR}\nMSG: A\nfloat32[1000] x\n")
         self.assertEqual(len(dt.parse_schema(wide).field_names()), dt.MAX_FIELD_NAMES)
 
 
@@ -158,11 +161,11 @@ class YamlSchema(unittest.TestCase):
 
     def test_quoted_scalars_and_opaque_types(self):
         text = ('version: 6\nhash: 0\nchannel_name: "a \\"b\\""\nfields:\n'
-                '  "x y":\n    "1": "Blob[2]"\n'
+                '  "x+y":\n    "1": "Blob[2]"\n'
                 'opaque_types:\n  Blob:\n    encoding: proto\n    schema: "l1\\n\\tl2\\x01\\u00e9"\n')
         schema = dt.parse_schema(text)
         self.assertEqual(schema.channel_name, 'a "b"')
-        self.assertEqual(schema.fields, [dt.Field("x y/1", "Blob", True, 2)])
+        self.assertEqual(schema.fields, [dt.Field("x+y/1", "Blob", True, 2)])
         self.assertEqual(schema.custom_schemas, {"Blob": ("proto", "l1\n\tl2\x01\u00e9")})
 
     def test_rejects_malformed_yaml(self):

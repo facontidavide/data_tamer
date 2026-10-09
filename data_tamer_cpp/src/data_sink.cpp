@@ -1,6 +1,7 @@
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
 #include "data_tamer/details/spin_pause.hpp"
+#include "waiter_count.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <semaphore>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -23,8 +25,8 @@ constexpr uint64_t kClosed = uint64_t{ 1 } << 63;
 constexpr size_t kRoundsPerPass = 64;
 
 // How long an idle worker keeps polling for a push before it marks itself
-// asleep. While it polls, post() on the snapshot thread is an increment and a
-// load; once it sleeps, the next post() releases the semaphore, a futex wake on
+// asleep. While it polls, a push costs the snapshot thread an increment and a
+// load; once it sleeps, the next push also releases the semaphore, a futex wake on
 // the snapshot thread. 20 us covers the snapshots one control tick takes of
 // several channels (each a few microseconds of serialization apart), so such a
 // burst costs at most one wake. The price is up to 20 us of one core per idle
@@ -48,23 +50,36 @@ class WorkerWake
 public:
   void post()
   {
-    // seq_cst on both sides: either sleep() sees this increment, or this load
-    // sees `sleeping` set and the release below wakes it.
-    sequence_.fetch_add(1, std::memory_order_seq_cst);
-    if(sleeping_.load(std::memory_order_seq_cst) &&
-       sleeping_.exchange(false, std::memory_order_seq_cst))
+    if(signal())
     {
-      semaphore_.release();
+      release();
     }
   }
+
+  // post() up to the system call: true if it found the worker asleep and took its
+  // sleep, whose release() the caller then owes. The worker stays in acquire() until
+  // that release(), so its thread cannot be joined before it.
+  [[nodiscard]] bool signal()
+  {
+    // seq_cst on both sides: either sleep() sees this increment, or this load
+    // sees `sleeping` set and the release wakes it.
+    sequence_.fetch_add(1, std::memory_order_seq_cst);
+    return sleeping_.load(std::memory_order_seq_cst) &&
+           sleeping_.exchange(false, std::memory_order_seq_cst);
+  }
+
+  // Wakes the worker whose sleep signal() took: one futex wake. Once its counter
+  // increment lets the worker go, libstdc++'s release() touches the semaphore only by
+  // address (the futex call), so a stop() that joins the worker can free it meanwhile.
+  void release() { semaphore_.release(); }
 
   [[nodiscard]] uint32_t observe() const
   {
     return sequence_.load(std::memory_order_seq_cst);
   }
 
-  // Worker only: polls for kSpinBeforeSleep. True if post() was called after
-  // observe() returned `observed`.
+  // Worker only: polls for kSpinBeforeSleep. True if signal() (or post()) ran
+  // after observe() returned `observed`.
   [[nodiscard]] bool spin(uint32_t observed) const
   {
     const auto deadline = std::chrono::steady_clock::now() + kSpinBeforeSleep;
@@ -83,17 +98,18 @@ public:
     }
   }
 
-  // Blocks unless post() was called after observe() returned `observed`.
+  // Blocks unless signal() (or post()) ran after observe() returned `observed`.
   void sleep(uint32_t observed)
   {
     sleeping_.store(true, std::memory_order_seq_cst);
     if(sequence_.load(std::memory_order_seq_cst) != observed &&
        sleeping_.exchange(false, std::memory_order_seq_cst))
     {
-      return;  // withdrawn before any post() saw it
+      return;  // withdrawn before any signal() saw it
     }
-    // Either nothing was posted since `observed`, or a post() took `sleeping`
-    // and releases (or released) the semaphore: one release per sleep.
+    // Either nothing was signalled since `observed`, or a signal() took
+    // `sleeping`, and its caller releases (or released) the semaphore: one release
+    // per sleep.
     semaphore_.acquire();
   }
 
@@ -165,8 +181,9 @@ const Snapshot* SnapshotRef::operator->() const
 //---------------- SinkWorker ----------------
 
 /// Single-producer single-consumer ring of one channel on one worker. The
-/// producer is the channel's snapshot thread (tryPush), the consumer whoever
-/// holds store_mutex (the worker thread or drain()).
+/// producer is the thread taking a snapshot of the channel (tryPush), one at a time
+/// under the channel's write mutex; the consumer is whoever holds store_mutex (the
+/// worker thread or drain()).
 struct SinkWorker::Attachment
 {
   // One entry more than the pool: an empty entry tells a full ring from an
@@ -242,16 +259,49 @@ struct SinkWorker::Pimpl
 {
   explicit Pimpl(std::unique_ptr<DataSink> owned) : sink(std::move(owned)) {}
 
+  // Names the calling thread as the deliverer while it holds store_mutex, the only
+  // thread that runs sink callbacks.
+  struct DelivererMark
+  {
+    explicit DelivererMark(Pimpl& p) : id(p.deliverer)
+    {
+      id.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    }
+    ~DelivererMark() { id.store(std::thread::id{}, std::memory_order_relaxed); }
+    DelivererMark(const DelivererMark&) = delete;
+    DelivererMark& operator=(const DelivererMark&) = delete;
+    std::atomic<std::thread::id>& id;
+  };
+
   // handoff_mutex, then store_mutex: how every caller other than the worker
   // thread enters the store. Holding handoff while it waits for store_mutex
   // keeps the worker, which releases handoff once it holds store_mutex, from
   // barging back in after its current pass.
   struct StoreLock
   {
-    explicit StoreLock(Pimpl& p) : handoff(p.handoff_mutex), store(p.store_mutex) {}
+    explicit StoreLock(Pimpl& p) : handoff(p.handoff_mutex), store(p.store_mutex), mark(p)
+    {}
     std::lock_guard<std::mutex> handoff;
     std::lock_guard<std::mutex> store;
+    DelivererMark mark;
   };
+
+  // True on the thread that runs this worker's callbacks right now: only the
+  // deliverer itself can read its own id here.
+  [[nodiscard]] bool isDeliverer() const
+  {
+    return deliverer.load(std::memory_order_relaxed) == std::this_thread::get_id();
+  }
+
+  // stop(), start() and drain() called from a callback would wait for that callback.
+  void throwIfDeliverer(const char* function) const
+  {
+    if(isDeliverer())
+    {
+      throw std::logic_error(std::string("SinkWorker::") + function +
+                             " called from a callback of its own sink");
+    }
+  }
 
   // What one delivery pass reports to its caller.
   struct Pass
@@ -357,7 +407,7 @@ struct SinkWorker::Pimpl
     }
     // Round robin, one entry per queue and round, until a round finds every
     // queue empty. Each round reads the wake sequence first. A push stores its
-    // tail (release) before its post() increments the sequence (seq_cst), so
+    // tail (release) before its signal() increments the sequence (seq_cst), so
     // a round whose read saw that increment also sees the entry: a push that
     // the last, empty round missed posted after `observed`, and spin() or
     // sleep() return at once instead of a second pass checking for it.
@@ -401,6 +451,7 @@ struct SinkWorker::Pimpl
           std::unique_lock handoff(handoff_mutex);
           std::unique_lock lock(store_mutex);
           handoff.unlock();
+          DelivererMark mark(*this);
           pass = deliverPass();
         }
         // An incomplete pass runs again at once. joinThread() requests the
@@ -424,12 +475,43 @@ struct SinkWorker::Pimpl
     }
   }
 
+  // stop() past its checks; the caller holds lifecycle_mutex.
+  void stopDelivery()
+  {
+    admission.fetch_or(kClosed, std::memory_order_acq_rel);
+    {
+      // Wait until every admitted push has finished: block on the counter instead
+      // of spinning, registered before the first read.
+      details::WaiterCount::Scope waiting(stoppers);
+      for(auto state = admission.load(std::memory_order_seq_cst); (state & ~kClosed) != 0;
+          state = admission.load(std::memory_order_seq_cst))
+      {
+        admission.wait(state, std::memory_order_seq_cst);
+      }
+    }
+    joinThread();
+    drainQueues();
+    finishSink();
+  }
+
+  // drain() past its check.
+  void drainQueues()
+  {
+    StoreLock lock(*this);
+    // A complete pass ends with a round that found every queue empty, so what
+    // was pushed before the call has been delivered.
+    while(!deliverPass().complete)
+    {
+    }
+  }
+
   // First member, destroyed last: after the thread and every queued snapshot.
   std::unique_ptr<DataSink> sink;
   // Worker side: written by whoever delivers.
   std::mutex handoff_mutex;
   std::mutex store_mutex;
-  SnapshotRef current_ref;  // store_mutex
+  std::atomic<std::thread::id> deliverer{};  // see DelivererMark
+  SnapshotRef current_ref;                   // store_mutex
   // store_mutex: false from onStop() until start().
   bool sink_running = true;
   // The owned queues, attached and detached-but-not-yet-drained, oldest first.
@@ -445,12 +527,14 @@ struct SinkWorker::Pimpl
   std::atomic<uint64_t> errors{ 0 };
   std::mutex error_mutex;
   std::string last_error;
-  std::jthread thread;  // its stop token replaces a run flag
+  std::mutex lifecycle_mutex;  // serializes stop() and start()
+  std::jthread thread;         // its stop token replaces a run flag
   Delivery delivery = Delivery::Threaded;
   // Written by every push, each on a line of its own (the alignment pads the
-  // struct to whole lines). Posted after every push, and by detach() and stop().
+  // struct to whole lines). Signalled by every push, posted by detach() and stop().
   alignas(64) WorkerWake wake;
   alignas(64) std::atomic<uint64_t> admission{ 0 };
+  details::WaiterCount stoppers;  // stop() calls waiting for admitted pushes
 };
 
 SinkWorker::SinkWorker(std::unique_ptr<DataSink> sink, Delivery delivery)
@@ -469,7 +553,29 @@ SinkWorker::SinkWorker(std::unique_ptr<DataSink> sink, Delivery delivery)
 
 SinkWorker::~SinkWorker()
 {
-  stop();
+  if(!_p->isDeliverer())
+  {
+    stop();
+    return;
+  }
+  // The last reference was dropped inside a callback of the sink, which stop() would
+  // wait for. A thread of its own finishes the stop once the callback has returned,
+  // then frees the state and the sink.
+  Pimpl* p = _p.release();
+  try
+  {
+    std::thread([p] {
+      {
+        std::lock_guard lifecycle(p->lifecycle_mutex);
+        p->stopDelivery();
+      }
+      delete p;
+    }).detach();
+  }
+  catch(...)
+  {
+    // No thread could be started: keep the state allocated rather than deadlock.
+  }
 }
 
 DataSink& SinkWorker::sink()
@@ -497,36 +603,41 @@ void SinkWorker::detach(Attachment* attachment) noexcept
   _p->wake.post();  // the worker delivers what is left and frees the queue
 }
 
-bool SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
+SinkWorker::Push SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snapshot)
 {
   // Announce first, check second: a transient increment on a closed sink is
   // withdrawn at once, and stop() waits for it like any other.
   struct AdmissionGuard
   {
     std::atomic<uint64_t>& admission;
+    details::WaiterCount& stoppers;
     ~AdmissionGuard()
     {
       // stop() waits only after its fetch_or(kClosed). A decrement that reads
       // kClosed clear precedes that fetch_or in the counter's modification
       // order, so the loads stop() makes afterwards see it already: only a
       // decrement that reads kClosed set can have a waiter to wake.
-      if(admission.fetch_sub(1, std::memory_order_release) & kClosed)
+      if(admission.fetch_sub(1, std::memory_order_seq_cst) & kClosed)
       {
-        admission.notify_all();
+        stoppers.notifyIfWaiting(admission);  // no futex call unless a stop() waits
       }
     }
-  } guard{ _p->admission };
+  } guard{ _p->admission, _p->stoppers };
   if(_p->admission.fetch_add(1, std::memory_order_acq_rel) & kClosed)
   {
-    return false;
+    return Push::refused;
   }
   // A failed push leaves snapshot intact; its owner releases it once.
   if(!attachment.push(std::move(snapshot)))
   {
-    return false;
+    return Push::refused;
   }
-  _p->wake.post();
-  return true;
+  return _p->wake.signal() ? Push::wake_owed : Push::queued;
+}
+
+void SinkWorker::wake(Pimpl& target) noexcept
+{
+  target.wake.release();
 }
 
 void SinkWorker::addSchema(const Schema& schema)
@@ -537,57 +648,50 @@ void SinkWorker::addSchema(const Schema& schema)
 
 void SinkWorker::stop()
 {
-  _p->admission.fetch_or(kClosed, std::memory_order_acq_rel);
-  // Wait until every admitted push has finished: block on the counter instead
-  // of spinning; a release made after the close notifies.
-  for(auto state = _p->admission.load(std::memory_order_acquire); (state & ~kClosed) != 0;
-      state = _p->admission.load(std::memory_order_acquire))
-  {
-    _p->admission.wait(state, std::memory_order_acquire);
-  }
-  _p->joinThread();
-  drain();
-  _p->finishSink();
+  auto& p = *_p;  // a callback may destroy this worker meanwhile: see ~SinkWorker()
+  p.throwIfDeliverer("stop()");
+  std::lock_guard lifecycle(p.lifecycle_mutex);
+  p.stopDelivery();
 }
 
 void SinkWorker::start()
 {
+  auto& p = *_p;  // see stop()
+  p.throwIfDeliverer("start()");
+  std::lock_guard lifecycle(p.lifecycle_mutex);
   {
-    Pimpl::StoreLock lock(*_p);
-    if(!_p->sink_running)
+    Pimpl::StoreLock lock(p);
+    if(!p.sink_running)
     {
-      _p->sink_running = true;  // the next stop() calls onStop() again
-      _p->guarded([this] { _p->sink->onStart(); });
+      p.sink_running = true;  // the next stop() calls onStop() again
+      p.guarded([&p] { p.sink->onStart(); });
     }
   }
-  if(_p->delivery == Delivery::Threaded && !_p->thread.joinable())
+  if(p.delivery == Delivery::Threaded && !p.thread.joinable())
   {
-    _p->startThread();
+    p.startThread();
   }
-  _p->admission.fetch_and(~kClosed, std::memory_order_release);
+  p.admission.fetch_and(~kClosed, std::memory_order_release);
 }
 
 void SinkWorker::drain()
 {
-  Pimpl::StoreLock lock(*_p);
-  // A complete pass ends with a round that found every queue empty, so what
-  // was pushed before the call has been delivered.
-  while(!_p->deliverPass().complete)
-  {
-  }
+  auto& p = *_p;  // see stop()
+  p.throwIfDeliverer("drain()");
+  p.drainQueues();
 }
 
-uint64_t SinkWorker::delivered() const
+uint64_t SinkWorker::delivered() const noexcept
 {
   return _p->delivered.load(std::memory_order_relaxed);
 }
 
-uint64_t SinkWorker::queueHighWater() const
+uint64_t SinkWorker::queueHighWater() const noexcept
 {
   return _p->queue_high_water.load(std::memory_order_relaxed);
 }
 
-uint64_t SinkWorker::errors() const
+uint64_t SinkWorker::errors() const noexcept
 {
   return _p->errors.load(std::memory_order_relaxed);
 }

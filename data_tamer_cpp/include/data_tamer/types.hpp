@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <map>
+#include <type_traits>
 #include <vector>
 #include <variant>
 
@@ -50,52 +53,80 @@ using VarNumber = std::variant<
     float, double >;
 // clang-format on
 
-/// Reverse operation of ValuePtr::serialize
+/// Reads one scalar of `type` from `data` (the reverse of ValuePtr::serialize); NaN
+/// for BasicType::OTHER.
 [[nodiscard]] VarNumber DeserializeAsVarType(const BasicType& type, const void* data);
 
-/// Return the number of bytes needed to serialize the type
+/// Serialized size of a scalar type in bytes; 0 for BasicType::OTHER.
 [[nodiscard]] size_t SizeOf(const BasicType& type);
 
-/// Return the name of the type
+/// Name of the type in the schema, e.g. "float64".
 [[nodiscard]] const std::string& ToStr(const BasicType& type);
 
-/// Convert string to its type
+/// Inverse of ToStr(); BasicType::OTHER for an unknown name.
 [[nodiscard]] BasicType FromStr(const std::string& str);
 
+/// The wire type of T. Integers map by size and signedness, so `long long` and
+/// `wchar_t` work like `int64_t` and `int32_t`; an enum maps to its underlying type.
+/// A custom type and a numeric type without a wire type (long double) give OTHER.
 template <typename T>
 inline constexpr BasicType GetBasicType()
 {
-  if constexpr(std::is_enum_v<T>)
+  using Type = std::remove_cv_t<T>;
+  if constexpr(std::is_enum_v<Type>)
   {
-    return GetBasicType<std::underlying_type_t<T>>();
+    return GetBasicType<std::underlying_type_t<Type>>();
   }
-
-  // clang-format off
-  if constexpr (std::is_same_v<T, bool>) return BasicType::BOOL;
-  if constexpr (std::is_same_v<T, char>) return BasicType::CHAR;
-  if constexpr (std::is_same_v<T, std::int8_t>) return BasicType::INT8;
-  if constexpr (std::is_same_v<T, std::uint8_t>) return BasicType::UINT8;
-
-  if constexpr (std::is_same_v<T, std::int16_t>) return BasicType::INT16;
-  if constexpr (std::is_same_v<T, std::uint16_t>) return BasicType::UINT16;
-
-  if constexpr (std::is_same_v<T, std::int32_t>) return BasicType::INT32;
-  if constexpr (std::is_same_v<T, std::uint32_t>) return BasicType::UINT32;
-
-  if constexpr (std::is_same_v<T, std::uint64_t>) return BasicType::UINT64;
-  if constexpr (std::is_same_v<T, std::int64_t>) return BasicType::INT64;
-
-  if constexpr (std::is_same_v<T, float>) return BasicType::FLOAT32;
-  if constexpr (std::is_same_v<T, double>) return BasicType::FLOAT64;
-  // clang-format on
-  return BasicType::OTHER;
+  else if constexpr(std::is_same_v<Type, bool>)
+  {
+    return BasicType::BOOL;
+  }
+  else if constexpr(std::is_same_v<Type, char>)
+  {
+    return BasicType::CHAR;
+  }
+  else if constexpr(std::is_integral_v<Type>)
+  {
+    constexpr bool is_signed = std::is_signed_v<Type>;
+    if constexpr(sizeof(Type) == 1)
+    {
+      return is_signed ? BasicType::INT8 : BasicType::UINT8;
+    }
+    else if constexpr(sizeof(Type) == 2)
+    {
+      return is_signed ? BasicType::INT16 : BasicType::UINT16;
+    }
+    else if constexpr(sizeof(Type) == 4)
+    {
+      return is_signed ? BasicType::INT32 : BasicType::UINT32;
+    }
+    else if constexpr(sizeof(Type) == 8)
+    {
+      return is_signed ? BasicType::INT64 : BasicType::UINT64;
+    }
+    else
+    {
+      return BasicType::OTHER;
+    }
+  }
+  else if constexpr(std::is_same_v<Type, float>)
+  {
+    return BasicType::FLOAT32;
+  }
+  else if constexpr(std::is_same_v<Type, double>)
+  {
+    return BasicType::FLOAT64;
+  }
+  else
+  {
+    return BasicType::OTHER;
+  }
 }
 
 template <typename T>
 inline constexpr bool IsNumericType()
 {
-  return std::is_arithmetic_v<T> || std::is_same_v<T, bool> || std::is_same_v<T, char> ||
-         std::is_enum_v<T>;
+  return std::is_arithmetic_v<T> || std::is_enum_v<T>;
 }
 
 class LogChannel;
@@ -104,11 +135,10 @@ template <typename T>
 class LoggedValue;
 
 /**
- * @brief Opaque handle returned by LogChannel::registerValue and friends.
- * It denotes one registration: after unregister() and a new registration of
- * the same name, the old handle is stale and LogChannel::setEnabled/unregister
- * reject it instead of acting on the replacement. A default-constructed handle
- * is never valid. Handles from another channel are not detected.
+ * @brief Handle to one registration, returned by LogChannel::registerValue and friends.
+ * After unregister() and a new registration of the same name the old handle is stale
+ * and is rejected. A default-constructed handle is never valid. A handle from another
+ * channel is not detected.
  */
 class RegistrationID
 {
@@ -142,7 +172,7 @@ struct TypeField
   std::string field_name;
   BasicType type = BasicType::OTHER;
   std::string type_name;
-  bool is_vector = 0;
+  bool is_vector = false;
   uint32_t array_size = 0;
 
   bool operator==(const TypeField& other) const;
@@ -161,7 +191,8 @@ struct CustomSchema
 };
 
 /**
- * @brief DataTamer uses a simple "flat" schema of key/value pairs (each pair is a "field").
+ * @brief The schema of a channel: a flat list of fields plus the custom types they
+ * use. `hash` must equal ComputeSchemaHash().
  */
 struct Schema
 {
@@ -175,36 +206,30 @@ struct Schema
   friend std::ostream& operator<<(std::ostream& os, const Schema& schema);
 };
 
-std::string ToStr(const Schema& schema);
+[[nodiscard]] std::string ToStr(const Schema& schema);
 
 /**
- * @brief The same schema as ToStr(), rendered as YAML (docs/wire_format.md,
- * section 2.1). Field names that share a "/"-separated prefix are nested under
- * it, which makes the text shorter when names are paths. Schema::hash is
- * unchanged: it is always computed over the ToStr() text.
+ * @brief The schema as YAML, schema version 6 (docs/wire_format.md, section 2.1):
+ * shorter when field names are "/"-separated paths. Schema::hash is the same as for
+ * ToStr(), because it is always computed over that text.
  */
-std::string ToYaml(const Schema& schema);
+[[nodiscard]] std::string ToYaml(const Schema& schema);
 
-/// Text rendering of a schema. Both carry the same Schema::hash and are read by
-/// the parsers, which detect the format.
+/// Rendering of a schema text. Both carry the same Schema::hash; parsers detect which.
 enum class SchemaFormat
 {
   /// ToStr(): the line format, schema version 5. Every reader understands it.
   Text,
-  /// ToYaml(): schema version 6 (docs/wire_format.md, section 2.1). Shorter when
-  /// field names are "/"-separated paths; readers that predate it (e.g. older
-  /// PlotJuggler releases) cannot read it.
+  /// ToYaml(): schema version 6. Older readers (e.g. older PlotJuggler) cannot read it.
   Yaml,
 };
 
 /// ToStr(schema) or ToYaml(schema), depending on `format`.
-std::string RenderSchema(const Schema& schema, SchemaFormat format);
+[[nodiscard]] std::string RenderSchema(const Schema& schema, SchemaFormat format);
 
 /**
- * @brief Hash of a schema text (see docs/wire_format.md, section 5): FNV-1a 64 over
- * the text with its "### hash:" line removed. Defined byte for byte, so any decoder
- * can recompute it and two schemas that differ anywhere, including inside a custom
- * type, get different hashes.
+ * @brief FNV-1a 64 over a schema text without its "### hash:" line (docs/wire_format.md,
+ * section 5). Any decoder can recompute it.
  */
 [[nodiscard]] uint64_t SchemaTextHash(std::string_view schema_text);
 
@@ -218,8 +243,7 @@ struct std::hash<DataTamer::RegistrationID>
 {
   std::size_t operator()(const DataTamer::RegistrationID& id) const
   {
-    // Compute individual hash values for first, second and third
-    // http://stackoverflow.com/a/1646913/126995
+    // Combines index and generation as in http://stackoverflow.com/a/1646913/126995
     std::size_t res = 17;
     res = res * 31 + hash<uint32_t>()(id.index_);
     res = res * 31 + hash<uint32_t>()(id.generation_);

@@ -7,9 +7,8 @@
 
 #include "data_tamer/details/spin_pause.hpp"
 
-// Priority inheritance is a POSIX option, not a Linux feature: the same test
-// admits QNX and other POSIX real-time systems. Without it WriteMutex is a plain
-// std::mutex and blocking waits have no priority-inheritance mitigation.
+// Priority inheritance is a POSIX option, not a Linux feature (QNX has it too).
+// Without it WriteMutex is a plain std::mutex.
 #if defined(__has_include)
 #if __has_include(<unistd.h>)
 #include <unistd.h>
@@ -27,8 +26,8 @@ namespace DataTamer
 namespace details
 {
 #if DATA_TAMER_HAS_PI_MUTEX
-/// pthread mutex created with PTHREAD_PRIO_INHERIT. The only place that
-/// touches the platform primitive.
+/// pthread mutex with PTHREAD_PRIO_INHERIT. The constructor throws std::system_error
+/// if the platform refuses it.
 class PriorityInheritingMutex
 {
 public:
@@ -54,8 +53,8 @@ public:
   PriorityInheritingMutex& operator=(const PriorityInheritingMutex&) = delete;
 
   void lock() { pthread_mutex_lock(&mutex_); }
-  bool try_lock() { return pthread_mutex_trylock(&mutex_) == 0; }
-  void unlock() { pthread_mutex_unlock(&mutex_); }
+  bool try_lock() noexcept { return pthread_mutex_trylock(&mutex_) == 0; }
+  void unlock() noexcept { pthread_mutex_unlock(&mutex_); }
 
 private:
   pthread_mutex_t mutex_;
@@ -67,20 +66,14 @@ using PlatformWriteMutex = std::mutex;
 }  // namespace details
 
 /**
- * @brief Exclusive mutex with priority inheritance (PTHREAD_PRIO_INHERIT) where
- * the platform supports it. Satisfies the C++ Lockable requirements.
- *
- * Shared by the writer threads of a channel and by the snapshot thread. A
- * writer holding it can be boosted to the priority of a waiter, mitigating
- * priority inversion. Writer work and normal scheduling still provide no
- * universal wait deadline.
+ * @brief Non-recursive mutex (C++ Lockable) shared by the writers of a channel and its
+ * snapshot thread. Priority-inheriting where the platform supports it, which limits
+ * priority inversion but gives no wait deadline.
  */
 class WriteMutex
 {
 public:
-  static constexpr bool kPriorityInheritance = (DATA_TAMER_HAS_PI_MUTEX == 1);
-
-  /// Nominal spin budget used by lockWithSpin() before blocking acquisition.
+  /// Default spin budget of tryLockWithSpin() and lockWithSpin(), in nanoseconds.
   static constexpr std::int64_t kLockSpinNs = 2000;
 
   WriteMutex() = default;
@@ -91,25 +84,25 @@ public:
   WriteMutex& operator=(WriteMutex&&) = delete;
 
   void lock() { mutex_.lock(); }
-  bool try_lock() { return mutex_.try_lock(); }
-  void unlock() { mutex_.unlock(); }
+  /// Fails while any thread holds the mutex, the calling one included: the mutex is not
+  /// recursive (POSIX defines it so for the priority-inheriting mutex).
+  bool try_lock() noexcept { return mutex_.try_lock(); }
+  void unlock() noexcept { mutex_.unlock(); }
 
-  /// Spin on try_lock() for a nominal spin_ns budget without ever blocking.
-  /// @return true when the lock was acquired.
-  bool tryLockWithSpin(std::int64_t spin_ns = kLockSpinNs)
+  /// Spins on try_lock() for about spin_ns nanoseconds and never blocks. A budget that
+  /// outlasts the clock spins until the lock is free.
+  /// @return true if the lock was acquired.
+  bool tryLockWithSpin(std::int64_t spin_ns = kLockSpinNs) noexcept
   {
     if(try_lock())
     {
       return true;
     }
-    // The clock is read once per kTriesPerClockCheck attempts: a try_lock is a
-    // few ns, a clock read tens of ns, so checking every iteration would spend
-    // most of the budget on the clock instead of on the lock. A pause between
-    // attempts keeps the spinner from stealing the mutex's cache line from the
-    // owner it is waiting for.
+    // Read the clock every kTriesPerClockCheck attempts: it costs more than a try_lock.
     constexpr int kTriesPerClockCheck = 8;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::nanoseconds(spin_ns);
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+    const std::chrono::nanoseconds budget(spin_ns);
     do
     {
       for(int i = 0; i < kTriesPerClockCheck; i++)
@@ -120,14 +113,15 @@ public:
         }
         details::spinPause();
       }
-    } while(std::chrono::steady_clock::now() < deadline);
+    } while(Clock::now() - start < budget);
     return false;
   }
 
   /**
-   * @brief Spin on try_lock() for a nominal spin_ns budget, then call lock().
-   * @return true when the blocking acquisition path was used. This does not
-   *         guarantee that the kernel put the caller to sleep.
+   * @brief Spins like tryLockWithSpin(), then blocks in lock().
+   * @param blocked_wait_ns if not null, receives the nanoseconds spent in lock()
+   *        (0 when the spin succeeded).
+   * @return true if lock() was called; the thread may still not have slept.
    */
   bool lockWithSpin(std::int64_t spin_ns = kLockSpinNs,
                     std::uint64_t* blocked_wait_ns = nullptr)

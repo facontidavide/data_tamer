@@ -2,25 +2,23 @@
 #include "data_tamer/details/snapshot_pool.hpp"
 
 #include "alloc_counter.hpp"
+#include "gate.hpp"
+#include "paused_serializer.hpp"
 #include "test_sinks.hpp"
 
 #include <gtest/gtest.h>
-#include <condition_variable>
 #include <cstring>
 #include <functional>
-#include <optional>
 #include <future>
 #include <thread>
 
 using namespace DataTamer;
 using DataTamerTest::Attached;
+using DataTamerTest::CustomValue;
+using DataTamerTest::PausedSerializer;
 
 namespace
 {
-struct CustomValue
-{
-  uint64_t value = 42;
-};
 struct RegisteredCustom
 {
   uint64_t value = 42;
@@ -42,78 +40,7 @@ std::string_view TypeDefinition(RejectedCustom& value, AddField& add)
   return "RejectedCustom";
 }
 
-struct Gate
-{
-  std::mutex mutex;
-  std::condition_variable cv;
-  bool entered = false;
-  bool released = false;
-  void pause()
-  {
-    std::unique_lock lock(mutex);
-    entered = true;
-    cv.notify_all();
-    cv.wait(lock, [&] { return released; });
-  }
-  bool wait()
-  {
-    std::unique_lock lock(mutex);
-    return cv.wait_for(lock, std::chrono::seconds(5), [&] { return entered; });
-  }
-  void release()
-  {
-    std::lock_guard lock(mutex);
-    released = true;
-    cv.notify_all();
-  }
-};
-
-class PausedSerializer : public CustomSerializer
-{
-public:
-  mutable Gate* gate = nullptr;
-  bool throw_size = false;
-  bool throw_serialize = false;
-  bool throw_schema = false;
-  mutable size_t size_calls = 0;
-  std::optional<CustomSchema> typeSchema() const override
-  {
-    if(throw_schema)
-    {
-      throw std::runtime_error("schema");
-    }
-    return std::nullopt;
-  }
-  const std::string& typeName() const override
-  {
-    static const std::string name = "CustomValue";
-    return name;
-  }
-  bool isFixedSize() const override { return true; }
-  size_t serializedSize(const void*) const override
-  {
-    ++size_calls;
-    if(gate)
-    {
-      gate->pause();
-    }
-    if(throw_size)
-    {
-      throw std::runtime_error("size");
-    }
-    return 8;
-  }
-  void serialize(const void* source, SerializeMe::SpanBytes& bytes) const override
-  {
-    if(throw_serialize)
-    {
-      throw std::runtime_error("serialize");
-    }
-    const auto value = static_cast<const CustomValue*>(source)->value;
-    std::memcpy(bytes.data(), &value, 8);
-    bytes.trimFront(8);
-  }
-};
+using DataTamerTest::Gate;
 
 class ControlSink : public DataSink
 {
@@ -293,7 +220,7 @@ TEST(ChannelControl, UnregisterWaitsForPausedReaderBeforeValueDestruction)
   serializer->gate = &gate;
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   std::atomic<bool> returned{ false };
   auto removal = std::async(std::launch::async, [&] {
     channel->unregister(id);
@@ -331,7 +258,7 @@ TEST(ChannelControl, BlockedAddChannelDoesNotBlockExistingSnapshots)
   auto added = controlSink();
   added->add_gate = &gate;
   auto add = std::async(std::launch::async, [&] { channel->addDataSink(added); });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
   EXPECT_EQ(snapshot.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -362,7 +289,7 @@ TEST(ChannelControl, RemovalWaitsForPausedReaderAndReferencesSurvive)
   serializer->gate = &gate;
   auto snapshot = std::async(
       std::launch::async, [&] { return channel->takeSnapshot() == SnapshotResult::ok; });
-  EXPECT_TRUE(gate.wait());
+  EXPECT_TRUE(gate.waitEntered());
   auto removal = std::async(std::launch::async, [&] { channel->removeDataSink(sink); });
   EXPECT_EQ(removal.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
   gate.release();
@@ -474,7 +401,7 @@ TEST(ChannelControl, LateAttachmentAnnouncesWithoutTheControlMutex)
   Gate gate;
   sink->add_gate = &gate;
   auto add = std::async(std::launch::async, [&] { channel->addDataSink(sink); });
-  ASSERT_TRUE(gate.wait());                    // inside onSchema
+  ASSERT_TRUE(gate.waitEntered());             // inside onSchema
   EXPECT_EQ(channel->getNumberOfSinks(), 0u);  // not published yet, mutex free
   auto other = controlSink();
   channel->addDataSink(other);  // proceeds while the first callback is parked

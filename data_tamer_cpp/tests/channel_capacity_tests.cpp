@@ -187,7 +187,7 @@ TEST(ChannelCapacity, TwoSlotsExhaustBeforeSizingAndRecover)
   EXPECT_EQ(channel->poolExhausted(), 1u);
   sink.drain();
   EXPECT_EQ(channel->takeSnapshot(), SnapshotResult::ok);
-  EXPECT_EQ(channel->droppedSnapshots(sink), 0u);
+  EXPECT_EQ(DataTamerTest::droppedBy(*channel, sink), 0u);
 }
 
 TEST(ChannelCapacity, TryRejectsOversizeWhileTakeGrowsEachSlot)

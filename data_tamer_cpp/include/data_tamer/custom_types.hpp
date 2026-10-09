@@ -1,7 +1,15 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <memory>
 #include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
 
 #include "data_tamer/types.hpp"
 #include "data_tamer/contrib/SerializeMe.hpp"
@@ -11,12 +19,12 @@ namespace DataTamer
 
 /**
  * @brief Serializes a type the library does not know (registerCustomValue()).
+ * The snapshot path, tryTakeSnapshot() included, calls serializedSize(),
+ * isFixedSize() and serialize(): they must not allocate, block or throw.
  *
- * ABI: the virtual functions below are frozen for 2.x. The library calls them
- * through vtables compiled into user binaries, so adding, removing or
- * reordering one breaks every serializer built against an earlier 2.x release.
- * New behaviour arrives as a separate interface; CustomSerializer keeps no
- * data members.
+ * ABI: the virtual functions are frozen for 2.x (the library calls them through
+ * vtables compiled into user binaries) and the class keeps no data members. New
+ * behaviour goes into a separate interface.
  */
 class CustomSerializer
 {
@@ -24,31 +32,31 @@ public:
   using Ptr = std::shared_ptr<CustomSerializer>;
 
   virtual ~CustomSerializer() = default;
-  // name of the type, to be written in the schema string.
+  // Name of the type, as written in the schema: non-empty, without whitespace or
+  // control characters, or the registration throws std::runtime_error.
   virtual const std::string& typeName() const = 0;
 
-  // optional custom schema of the type
+  // Optional opaque schema (encoding name and text) stored with the type.
   virtual std::optional<CustomSchema> typeSchema() const { return std::nullopt; }
-  // size in bytes of the serialized object.
-  // Needed to pre-allocate memory in the buffer
+  // Bytes serialize() writes for this instance; the snapshot buffer is sized with it.
   virtual size_t serializedSize(const void* instance) const = 0;
 
-  // true if the method serializedSize will ALWAYS return the same value
+  // True if serializedSize() returns the same value for every instance.
   virtual bool isFixedSize() const = 0;
 
-  // serialize an object into a buffer.
+  // Writes exactly serializedSize(instance) bytes at the front of the buffer and
+  // advances it.
   virtual void serialize(const void* instance, SerializeMe::SpanBytes&) const = 0;
 };
 
 //------------------------------------------------------------------
 
-// This derived class is used automatically by all the types
-// that have a template specialization of TypeDefinition<T>
+// Serializer that TypesRegistry builds for every type with a TypeDefinition.
 template <typename T>
 class CustomSerializerT : public CustomSerializer
 {
 public:
-  CustomSerializerT(std::string type_name);
+  explicit CustomSerializerT(std::string type_name);
 
   const std::string& typeName() const override;
 
@@ -64,10 +72,10 @@ private:
   size_t _fixed_size = 0;
 };
 
+/// Serializers of custom types by type name. Thread-safe.
 class TypesRegistry
 {
 public:
-  // The state lives behind a Pimpl, which does not allow default special members.
   TypesRegistry();
   ~TypesRegistry();
 
@@ -76,27 +84,35 @@ public:
   TypesRegistry(TypesRegistry&&) = delete;
   TypesRegistry& operator=(TypesRegistry&&) = delete;
 
+  /// Stores a serializer of T under `type_name`, replacing any previous one. With
+  /// skip_if_present an existing entry is kept and nullptr is returned; throws
+  /// std::runtime_error if that entry belongs to another C++ type.
   template <typename T>
   CustomSerializer::Ptr addType(const std::string& type_name,
                                 bool skip_if_present = false);
 
+  /// The serializer stored under T's type name, created on first use. Throws
+  /// std::runtime_error if the name belongs to another C++ type.
   template <typename T>
   [[nodiscard]] CustomSerializer::Ptr getSerializer();
 
 private:
-  // Builds the CustomSerializerT<T> of a type; the registry stores the result.
+  friend class LogChannel;  // find() tells a TypeDefinition serializer from another
   using MakeSerializer = CustomSerializer::Ptr (*)(const std::string& type_name);
 
   template <typename T>
   static CustomSerializer::Ptr makeSerializer(const std::string& type_name);
 
+  template <typename T>
+  static void checkSameType(const CustomSerializer::Ptr& stored,
+                            const std::string& type_name);
+
   // Both lock the registry and call make while holding the lock.
-  // Returns the stored serializer, creating it first when missing.
   CustomSerializer::Ptr findOrCreate(const std::string& type_name, MakeSerializer make);
-  // Stores a new serializer, replacing a previous one. Returns {} without touching
-  // the registry when skip_if_present is set and the type is already there.
   CustomSerializer::Ptr replace(const std::string& type_name, MakeSerializer make,
                                 bool skip_if_present);
+  /// The serializer stored under `type_name`, null if none. Locks the registry.
+  [[nodiscard]] CustomSerializer::Ptr find(const std::string& type_name) const;
 
   struct Impl;
   std::unique_ptr<Impl> _impl;
@@ -106,18 +122,35 @@ private:
 //------------------------------------------------------------------
 //------------------------------------------------------------------
 
-// Name of a custom type, as written in the schema.
-// It comes from DataTamer::TypeDefinitionTrait<T>::name() when provided,
-// otherwise from the value returned by the definition of T.
-// A definition returning std::string_view or const char* must point to
-// storage that outlives the program (e.g. a string literal). If it returns
-// an owning string (e.g. std::string), it is evaluated once and the result is
-// cached, like name().
+namespace details
+{
+/// GetBasicType<T>() for a recorded type. The one check, at compile time, that a numeric
+/// type has a wire type (long double has none): every registration path reaches it.
 template <typename T>
+constexpr BasicType WireType()
+{
+  static_assert(!IsNumericType<T>() || GetBasicType<T>() != BasicType::OTHER, "numeric "
+                                                                              "type has "
+                                                                              "no wire "
+                                                                              "type: use "
+                                                                              "int, "
+                                                                              "float or "
+                                                                              "double");
+  return GetBasicType<T>();
+}
+}  // namespace details
+
+// Name of a custom type as written in the schema: TypeDefinitionTrait<T>::name() if
+// provided, else the value returned by the definition of T. A std::string_view or
+// const char* must outlive the program (a string literal). An owning string is cached
+// here, but serialization calls the definition again and builds it every time.
+template <typename T, typename = void>
 struct CustomTypeName
 {
   static std::string_view get()
   {
+    // Only a numeric type without a wire type gets here, and WireType() refuses it.
+    (void)details::WireType<T>();
     static_assert(SerializeMe::has_TypeDefinition<T>(), "Missing TypeDefinition");
     if constexpr(SerializeMe::has_TypeDefinitionTrait<T>::value &&
                  SerializeMe::has_TypeDefinitionTraitName<T>::value)
@@ -138,7 +171,7 @@ struct CustomTypeName
       }
       else
       {
-        // An owning result would dangle once returned as a view: keep it.
+        // An owning result would dangle as a view: cache it.
         static_assert(std::is_constructible_v<std::string, Result>, "TypeDefinition must "
                                                                     "return the type "
                                                                     "name");
@@ -153,23 +186,25 @@ struct CustomTypeName
   }
 };
 
+// A container is named after its elements, unless the type has a TypeDefinition itself.
 template <template <class, class> class Container, class T, class... TArgs>
-struct CustomTypeName<Container<T, TArgs...>>
+struct CustomTypeName<
+    Container<T, TArgs...>,
+    std::enable_if_t<!SerializeMe::has_TypeDefinition<Container<T, TArgs...>>::value>>
 {
   static std::string_view get() { return CustomTypeName<T>::get(); }
 };
 
 template <typename T, size_t N>
-struct CustomTypeName<std::array<T, N>>
+struct CustomTypeName<
+    std::array<T, N>,
+    std::enable_if_t<!SerializeMe::has_TypeDefinition<std::array<T, N>>::value>>
 {
   static std::string_view get() { return CustomTypeName<T>::get(); }
 };
 
-template <class C, typename T>
-T getPointerType(T C::*v);
-
-// Recursive function to compute if a type has fixed size (at compile time).
-// Used mainly by the CustomSerializerT constructor.
+// Adds the serialized size of T to fixed_size, and clears is_fixed_size if T contains a
+// vector. Used by the CustomSerializerT constructor.
 template <typename T>
 inline void GetFixedSize(bool& is_fixed_size, size_t& fixed_size)
 {
@@ -197,19 +232,13 @@ inline void GetFixedSize(bool& is_fixed_size, size_t& fixed_size)
     }
     else if(is_fixed_size)
     {
-      if constexpr(has_TypeDefinition<T>())
-      {
-        auto funcA = [&](const char*, auto const* member) {
-          using MemberType = std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
-          GetFixedSize<MemberType>(is_fixed_size, fixed_size);
-        };
-        T dummy;
-        InvokeTypeDefinition(dummy, funcA);
-      }
-      else
-      {
-        throw std::logic_error("Missing TypeDefinition");
-      }
+      static_assert(has_TypeDefinition<T>(), "Missing TypeDefinition");
+      auto funcA = [&](const char*, auto const* member) {
+        using MemberType = std::remove_cv_t<std::remove_reference_t<decltype(*member)>>;
+        GetFixedSize<MemberType>(is_fixed_size, fixed_size);
+      };
+      T dummy;
+      InvokeTypeDefinition(dummy, funcA);
     }
   }
 }
@@ -264,13 +293,29 @@ inline CustomSerializer::Ptr TypesRegistry::makeSerializer(const std::string& ty
 }
 
 template <typename T>
+inline void TypesRegistry::checkSameType(const CustomSerializer::Ptr& stored,
+                                         const std::string& type_name)
+{
+  // Through a reference: clang warns that `typeid(*stored)` evaluates its operand
+  // (-Wpotentially-evaluated-expression).
+  const CustomSerializer& stored_ref = *stored;
+  if(typeid(stored_ref) != typeid(CustomSerializerT<T>))
+  {
+    throw std::runtime_error("custom type name '" + type_name +
+                             "' is used by two C++ types: give each its own name");
+  }
+}
+
+template <typename T>
 inline CustomSerializer::Ptr TypesRegistry::getSerializer()
 {
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
   const std::string type_name(CustomTypeName<T>::get());
-  return findOrCreate(type_name, &makeSerializer<T>);
+  auto serializer = findOrCreate(type_name, &makeSerializer<T>);
+  checkSameType<T>(serializer, type_name);
+  return serializer;
 }
 
 template <typename T>
@@ -280,7 +325,13 @@ inline CustomSerializer::Ptr TypesRegistry::addType(const std::string& type_name
   static_assert(!IsNumericType<T>(), "You don't need to create a serializer for a "
                                      "numerical type.");
 
-  return replace(type_name, &makeSerializer<T>, skip_if_present);
+  auto serializer = replace(type_name, &makeSerializer<T>, skip_if_present);
+  if(!serializer)
+  {
+    // Skipped: the entry that holds the name must be this type's.
+    checkSameType<T>(findOrCreate(type_name, &makeSerializer<T>), type_name);
+  }
+  return serializer;
 }
 
 }  // namespace DataTamer

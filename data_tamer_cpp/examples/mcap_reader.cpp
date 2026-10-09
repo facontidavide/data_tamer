@@ -1,6 +1,13 @@
 #include "data_tamer_parser/data_tamer_parser.hpp"
 #include <mcap/reader.hpp>
 
+#include <iostream>
+#include <map>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 // Reads an MCAP file written by DataTamer (for instance test_sample.mcap from
 // T03_mcap_writer) and counts the samples of each time series.
 int main(int argc, char** argv)
@@ -41,53 +48,51 @@ int main(int argc, char** argv)
   using MessageCount = std::map<std::string, size_t>;
   std::map<std::string, MessageCount> message_counts_per_channel;
 
-  auto IncrementCounter = [&](const std::string& series_name,
-                              MessageCount& message_counts) {
-    auto it = message_counts.find(series_name);
-    if(it == message_counts.end())
-    {
-      message_counts[series_name] = 1;
-    }
-    else
-    {
-      it->second++;
-    }
-  };
-
   // parse all messages
   for(const auto& msg : reader.readMessages())
   {
-    // start updating the fields of SnapshotView
-    DataTamerParser::SnapshotView snapshot;
-    snapshot.timestamp = msg.message.logTime;
-    snapshot.schema_hash = schema_id_to_hash.at(msg.schema->id);
-    const auto& dt_schema = hash_to_schema.at(snapshot.schema_hash);
-
-    // msg_buffer contains both active_mask and payload, serialized
-    // one after the other.
-    DataTamerParser::BufferSpan msg_buffer = {
-      reinterpret_cast<const uint8_t*>(msg.message.data), msg.message.dataSize
-    };
-
-    const uint32_t mask_size = DataTamerParser::Deserialize<uint32_t>(msg_buffer);
-    snapshot.active_mask.data = msg_buffer.data;
-    snapshot.active_mask.size = mask_size;
-    msg_buffer.trimFront(mask_size);
-
-    const uint32_t payload_size = DataTamerParser::Deserialize<uint32_t>(msg_buffer);
-    snapshot.payload.data = msg_buffer.data;
-    snapshot.payload.size = payload_size;
-
-    // prepare the callback to be invoked by ParseSnapshot.
-    // Wrap IncrementCounter to add the channel_name
     const std::string& channel_name = msg.channel->topic;
-    auto& message_counts = message_counts_per_channel[channel_name];
+    const size_t schema_hash = schema_id_to_hash.at(msg.schema->id);
+    const auto& dt_schema = hash_to_schema.at(schema_hash);
+
+    // the callback invoked by ParseSnapshot for each value of the message
+    std::vector<std::string> series;
     auto callback_number = [&](const std::string& series_name,
                                const DataTamerParser::VarNumber&) {
-      IncrementCounter(series_name, message_counts);
+      series.push_back(series_name);
     };
 
-    DataTamerParser::ParseSnapshot(dt_schema, snapshot, callback_number);
+    std::string problem;  // why the message is corrupt; empty if it decoded
+    try
+    {
+      // the message body holds the active mask and the payload, one after the other
+      auto snapshot = DataTamerParser::SplitMcapMessage(
+          { reinterpret_cast<const uint8_t*>(msg.message.data), msg.message.dataSize });
+      snapshot.timestamp = msg.message.logTime;
+      snapshot.schema_hash = schema_hash;
+
+      if(!DataTamerParser::ParseSnapshot(dt_schema, snapshot, callback_number))
+      {
+        problem = "the payload does not match the schema";
+      }
+    }
+    catch(const std::runtime_error& e)
+    {
+      problem = e.what();
+    }
+    if(!problem.empty())
+    {
+      // report it and go on with the next message
+      std::cerr << channel_name << ": skipped a corrupt message: " << problem
+                << std::endl;
+      continue;
+    }
+
+    auto& message_counts = message_counts_per_channel[channel_name];
+    for(const auto& series_name : series)
+    {
+      ++message_counts[series_name];
+    }
   }
 
   // display the counted data samples

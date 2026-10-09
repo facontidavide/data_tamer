@@ -2,8 +2,10 @@
 #include "data_tamer/channel.hpp"
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/sinks/mcap_ring_sink.hpp"
+#include "data_tamer/sinks/mcap_sink.hpp"
 #include "data_tamer_parser/data_tamer_parser.hpp"
 #include "alloc_counter.hpp"
+#include "mcap_test_utils.hpp"
 #include "test_sinks.hpp"
 
 #include <mcap/reader.hpp>
@@ -17,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -28,7 +31,19 @@
 #include <unistd.h>
 
 using namespace DataTamer;
+using DataTamerTest::ringOptions;
+using DataTamerTest::Source;
 using std::chrono::nanoseconds;
+
+// requestDump() and dumpRequested() are called from real-time threads: they cannot throw.
+// A trait rather than noexcept(sink.requestDump()): that expression also builds the
+// default argument, whose std::chrono constructor is not declared noexcept.
+static_assert(std::is_nothrow_invocable_r_v<bool, decltype(&MCAPRingSink::requestDump),
+                                            MCAPRingSink&, std::chrono::nanoseconds>,
+              "requestDump() must be noexcept");
+static_assert(std::is_nothrow_invocable_r_v<bool, decltype(&MCAPRingSink::dumpRequested),
+                                            const MCAPRingSink&>,
+              "dumpRequested() must be noexcept");
 
 namespace
 {
@@ -125,41 +140,12 @@ struct TempBase
   }
 };
 
-MCAPRingOptions options(const std::string& path, int64_t window_ns,
-                        size_t capacity = 1 << 20)
-{
-  MCAPRingOptions opt;
-  opt.filepath = path;
-  opt.window = nanoseconds(window_ns);
-  opt.capacity_bytes = capacity;
-  return opt;
-}
-
-// One channel with a counter "value" equal to the timestamp.
-struct Source
-{
-  std::shared_ptr<LogChannel> channel;
-  int64_t value = 0;
-
-  explicit Source(const std::string& name, const std::shared_ptr<SinkWorker>& sink)
-    : channel(LogChannel::create(name))
-  {
-    channel->registerValue("value", &value);
-    channel->addDataSink(sink);
-    channel->startLogging();
-  }
-  void take(int64_t ts)
-  {
-    value = ts;
-    ASSERT_EQ(channel->tryTakeSnapshot(nanoseconds(ts)), SnapshotResult::ok);
-  }
-};
 }  // namespace
 
 TEST(MCAPRingSink, EvictsByAge)
 {
   TempBase base("age");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   Source source("age", sink);
   for(int64_t ts = 0; ts <= 1000; ts += 10)
   {
@@ -176,7 +162,7 @@ TEST(MCAPRingSink, EvictsByCapacity)
   TempBase base("capacity");
   size_t record = 0;
   {
-    auto probe = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1'000'000));
+    auto probe = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1'000'000));
     Source source("capacity", probe);
     source.take(0);
     probe.drain();
@@ -185,7 +171,7 @@ TEST(MCAPRingSink, EvictsByCapacity)
   ASSERT_GT(record, 0u);
   // Room for 5 records and a bit, so records wrap around the buffer end.
   auto sink = DataTamerTest::manual<MCAPRingSink>(
-      options(base.path, 1'000'000, 5 * record + record / 2));
+      ringOptions(base.path, 1'000'000, 5 * record + record / 2));
   Source source("capacity", sink);
   for(int64_t ts = 0; ts < 20; ++ts)
   {
@@ -219,7 +205,8 @@ TEST(MCAPRingSink, EvictsByCapacity)
   }
 
   // A snapshot larger than the whole ring is dropped, not stored.
-  auto tiny = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1000, record - 1));
+  auto tiny =
+      DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1000, record - 1));
   Source small("tiny", tiny);
   small.take(0);
   tiny.drain();
@@ -231,7 +218,7 @@ TEST(MCAPRingSink, EvictsByCapacity)
 TEST(MCAPRingSink, StatsReportTheStoredInterval)
 {
   TempBase base("interval");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   auto stats = sink->stats();
   EXPECT_EQ(stats.stored_snapshots, 0u);
   EXPECT_EQ(stats.oldest_timestamp, nanoseconds(0)) << "empty ring";
@@ -267,7 +254,7 @@ TEST(MCAPRingSink, StatsReportTheStoredInterval)
   // the window.
   const size_t record = stats.stored_bytes / stats.stored_snapshots;
   auto small = DataTamerTest::manual<MCAPRingSink>(
-      options(base.path, 1'000'000, 3 * record + record / 2));
+      ringOptions(base.path, 1'000'000, 3 * record + record / 2));
   Source capped("capped", small);
   for(int64_t ts = 0; ts < 10; ++ts)
   {
@@ -295,7 +282,7 @@ TEST(MCAPRingSink, StatsReportTheStoredInterval)
 TEST(MCAPRingSink, DumpCoversPreAndPostWindow)
 {
   TempBase base("window");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   std::vector<MCAPRingDump> dumps;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { dumps.push_back(dump); });
   Source source("window", sink);
@@ -348,7 +335,7 @@ TEST(MCAPRingSink, DumpCoversPreAndPostWindow)
 TEST(MCAPRingSink, DumpContainsEveryChannel)
 {
   TempBase base("channels");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 40));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 40));
   Source fast("fast", sink);
   Source slow("slow", sink);
   Source idle("idle", sink);  // schema announced, no snapshot in the window
@@ -392,7 +379,7 @@ TEST(MCAPRingSink, DumpContainsEveryChannel)
 TEST(MCAPRingSink, RequestsWhileActiveAreIgnored)
 {
   TempBase base("ignored");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1000));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1000));
   Source source("ignored", sink);
   source.take(0);
   sink.drain();
@@ -426,7 +413,7 @@ TEST(MCAPRingSink, RequestsWhileActiveAreIgnored)
 TEST(MCAPRingSink, WriterBusyRetriesOnNextSnapshot)
 {
   TempBase base("busy");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 30));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 30));
   std::promise<void> release;
   auto released = release.get_future().share();
   std::atomic<int> callbacks{ 0 };
@@ -484,7 +471,7 @@ TEST(MCAPRingSink, DumpWaitingForTheWriterReportsLaterEvictions)
   TempBase base("busy_evicted");
   size_t record = 0;
   {
-    auto probe = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1000));
+    auto probe = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1000));
     Source source("busy_evicted", probe);
     source.take(0);
     probe.drain();
@@ -492,7 +479,7 @@ TEST(MCAPRingSink, DumpWaitingForTheWriterReportsLaterEvictions)
   }
   ASSERT_GT(record, 0u);
   auto sink = DataTamerTest::manual<MCAPRingSink>(
-      options(base.path, 30, 7 * record + record / 2));  // room for 7 records
+      ringOptions(base.path, 30, 7 * record + record / 2));  // room for 7 records
   std::promise<void> release;
   auto released = release.get_future().share();
   std::mutex dumps_mutex;
@@ -557,7 +544,7 @@ TEST(MCAPRingSink, DumpWaitingForTheWriterReportsLaterEvictions)
 TEST(MCAPRingSink, StopWritesThePendingDump)
 {
   TempBase base("flush");
-  auto worker = MCAPRingSink::create(options(base.path, 100));
+  auto worker = MCAPRingSink::create(ringOptions(base.path, 100));
   auto& sink = worker->as<MCAPRingSink>();
   Source source("flush", worker);
   EXPECT_FALSE(sink.flushPendingDump()) << "nothing requested";
@@ -584,7 +571,7 @@ TEST(MCAPRingSink, StopWritesThePendingDump)
 TEST(MCAPRingSink, StopDeliversQueuedSnapshotsBeforeWritingTheDump)
 {
   TempBase base("stop_queued");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source source("stop_queued", sink);
@@ -607,7 +594,7 @@ TEST(MCAPRingSink, StopDeliversQueuedSnapshotsBeforeWritingTheDump)
 TEST(MCAPRingSink, FlushPendingDumpCutsThePostTriggerInterval)
 {
   TempBase base("flush_cut");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 20));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 20));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source source("flush_cut", sink);
@@ -633,7 +620,7 @@ TEST(MCAPRingSink, OnSnapshotDoesNotAllocate)
 {
   TempBase base("alloc");
   auto sink =
-      DataTamerTest::manual<MCAPRingSink>(options(base.path, 1'000'000'000, 4096));
+      DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1'000'000'000, 4096));
   Source source("alloc", sink);
   int64_t ts = 0;
   auto cycle = [&] {
@@ -662,7 +649,7 @@ TEST(MCAPRingSink, OnSnapshotDoesNotAllocate)
 TEST(MCAPRingSink, RequestFromAnotherThread)
 {
   TempBase base("threads");
-  auto worker = MCAPRingSink::create(options(base.path, 1000));
+  auto worker = MCAPRingSink::create(ringOptions(base.path, 1000));
   auto& sink = worker->as<MCAPRingSink>();
   std::atomic<int> callbacks{ 0 };
   std::atomic<bool> all_ok{ true };
@@ -713,7 +700,7 @@ TEST(MCAPRingSink, RequestFromAnotherThread)
 TEST(MCAPRingSink, CallbackMayQueryWhileFlushWaits)
 {
   TempBase base("callback_flush");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   std::promise<void> release;
   auto released = release.get_future().share();
   std::atomic<int> callbacks{ 0 };
@@ -775,7 +762,7 @@ TEST(MCAPRingSink, CallbackMayQueryWhileFlushWaits)
 TEST(MCAPRingSink, SnapshotsAtTheEndFromAnotherChannelAreIncluded)
 {
   TempBase base("same_time");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   Source a("a", sink);
   Source b("b", sink);
   ASSERT_TRUE(sink->requestDump());
@@ -796,7 +783,7 @@ TEST(MCAPRingSink, SnapshotsAtTheEndFromAnotherChannelAreIncluded)
 TEST(MCAPRingSink, FlushUsesTheNewestTimestamp)
 {
   TempBase base("newest");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 50));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 50));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source a("a", sink);
@@ -818,7 +805,7 @@ TEST(MCAPRingSink, FlushUsesTheNewestTimestamp)
 TEST(MCAPRingSink, FlushPendingDumpWhileWorkerRuns)
 {
   TempBase base("flush_live");
-  auto worker = MCAPRingSink::create(options(base.path, 100));
+  auto worker = MCAPRingSink::create(ringOptions(base.path, 100));
   auto& sink = worker->as<MCAPRingSink>();
   std::vector<MCAPRingDump> dumps;
   std::mutex dumps_mutex;
@@ -888,7 +875,7 @@ struct RaceFixture
 
   explicit RaceFixture(const std::string& tag)
     : base(tag)
-    , worker(MCAPRingSink::create(options(base.path, 50)))
+    , worker(MCAPRingSink::create(ringOptions(base.path, 50)))
     , sink(worker->as<MCAPRingSink>())
     , source(tag, worker)
   {
@@ -1048,7 +1035,7 @@ TEST(MCAPRingSink, SkipsExistingFileNames)
   {
     std::ofstream(base.dump(1)) << "previous run";
   }
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 100));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 100));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source source("existing", sink);
@@ -1067,7 +1054,7 @@ TEST(MCAPRingSink, SkipsExistingFileNames)
 TEST(MCAPRingSink, ReportsOpenFailure)
 {
   auto sink = DataTamerTest::manual<MCAPRingSink>(
-      options("/nonexistent_dir_data_tamer/dump.mcap", 100));
+      ringOptions("/nonexistent_dir_data_tamer/dump.mcap", 100));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source source("open_failure", sink);
@@ -1085,7 +1072,7 @@ TEST(MCAPRingSink, ReportsOpenFailure)
 TEST(MCAPRingSink, ReportsWriteFailure)
 {
   TempBase base("write_failure");
-  auto sink = DataTamerTest::manual<MCAPRingSink>(options(base.path, 1'000'000));
+  auto sink = DataTamerTest::manual<MCAPRingSink>(ringOptions(base.path, 1'000'000));
   MCAPRingDump info;
   sink->setDumpCallback([&](const MCAPRingDump& dump) { info = dump; });
   Source source("write_failure", sink);

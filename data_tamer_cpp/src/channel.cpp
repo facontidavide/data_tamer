@@ -4,14 +4,18 @@
 #include "data_tamer/data_tamer.hpp"
 #include "data_tamer/details/shared_state.hpp"
 #include "data_tamer/details/snapshot_pool.hpp"
+#include "waiter_count.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -40,6 +44,81 @@ std::string ChannelPrefix(const std::string& channel_name)
 {
   return "channel '" + channel_name + "': ";
 }
+
+// The name with the bytes it cannot hold shown as \xNN, so an error stays on one line.
+std::string Printable(std::string_view name)
+{
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string text;
+  for(const char c : name)
+  {
+    const auto byte = static_cast<unsigned char>(c);
+    if(byte != ' ' && details::IsForbiddenNameByte(byte))
+    {
+      text += "\\x";
+      text += kHex[byte >> 4];
+      text += kHex[byte & 0xF];
+    }
+    else
+    {
+      text += c;
+    }
+  }
+  return text;
+}
+
+// Why `name` cannot be written into the schema text, or nullptr if it can. The text has
+// one item per line and a field line splits at its first space, so a name is not empty
+// and holds no whitespace or control character. A channel name (`allow_space`) fills
+// its header line and can hold spaces.
+const char* NameProblem(std::string_view name, bool allow_space = false)
+{
+  if(name.empty())
+  {
+    return "it is empty";
+  }
+  const size_t bad = details::FindForbiddenNameByte(name, allow_space);
+  if(bad == std::string_view::npos)
+  {
+    return nullptr;
+  }
+  if(name[bad] == ' ')
+  {
+    return "it contains a space";
+  }
+  return allow_space ? "it contains a control character" :
+                       "it contains a whitespace or control character";
+}
+
+// Throws std::runtime_error if `name`, a `what` ("value name", ...) of the channel's
+// schema, cannot be written into the schema text. A field name also names its type.
+void CheckSchemaName(const std::string& channel_name, const char* what,
+                     std::string_view name, std::string_view in_type = {})
+{
+  const char* problem = NameProblem(name);
+  if(problem == nullptr)
+  {
+    return;
+  }
+  std::string message =
+      ChannelPrefix(channel_name) + "invalid " + what + " '" + Printable(name) + "'";
+  if(!in_type.empty())
+  {
+    message += " in custom type '" + Printable(in_type) + "'";
+  }
+  throw std::runtime_error(message + ": " + problem);
+}
+
+// A type name that a TypeDefinition type and a registerCustomValue() serializer of one
+// channel would share.
+std::runtime_error SharedTypeName(const std::string& channel_name,
+                                  const std::string& type_name)
+{
+  return std::runtime_error(ChannelPrefix(channel_name) + "custom type name '" +
+                            type_name +
+                            "' would belong to a TypeDefinition type and to a "
+                            "registerCustomValue() serializer: give each its own name");
+}
 }  // namespace
 
 struct LogChannel::Pimpl
@@ -57,7 +136,7 @@ struct LogChannel::Pimpl
   std::shared_ptr<ChannelSharedState> shared = std::make_shared<ChannelSharedState>();
   std::atomic<uint64_t> write_lock_contended{ 0 };
   std::atomic<uint64_t> write_lock_wait_max_ns{ 0 };
-  ActiveMask active_mask;  // Snapshot-thread-owned, independent of retained slots.
+  ActiveMask active_mask;  // write mutex held; independent of retained slots
   size_t payload_capacity = 0;
   size_t pool_capacity = SnapshotPool::kDefaultCapacity;
   std::atomic<uint64_t> payload_reallocations{ 0 };
@@ -76,6 +155,17 @@ struct LogChannel::Pimpl
   void invalidateAnnouncements()
   {
     forEachLink([](SinkLink& link) { link.schema_registered = false; });
+  }
+
+  // True if a registerCustomValue() serializer named a type `name`: a field has that
+  // type and no field section describes it. Caller holds control_mutex.
+  [[nodiscard]] bool customSerializerUses(const std::string& name) const
+  {
+    return !schema.custom_types.contains(name) &&
+           std::any_of(schema.fields.begin(), schema.fields.end(),
+                       [&](const TypeField& field) {
+                         return field.type == BasicType::OTHER && field.type_name == name;
+                       });
   }
 
   void rebuildMask()
@@ -182,7 +272,12 @@ struct LogChannel::Pimpl
   static constexpr size_t kMaxSinks = LogChannel::kMaxSinks;
   std::array<std::unique_ptr<SinkLink>, kMaxSinks> sinks;
   std::array<std::atomic<SinkLink*>, kMaxSinks> published_sinks{};
+  // Workers addDataSink() is announcing to with control_mutex released: another
+  // addDataSink() of one of them waits on `announced` (with control_mutex).
+  std::vector<const SinkWorker*> announcing;
+  std::condition_variable announced;
   std::atomic<uint64_t> epoch{ 0 };
+  details::WaiterCount quiescence_waiters;  // controllers in waitQuiescent()
 
   // Caller holds control_mutex (or owns the channel exclusively).
   template <typename Function>
@@ -211,6 +306,12 @@ struct LogChannel::Pimpl
     return kMaxSinks;
   }
 
+  // Caller holds control_mutex.
+  [[nodiscard]] bool isAnnouncing(const SinkWorker* worker) const
+  {
+    return std::find(announcing.begin(), announcing.end(), worker) != announcing.end();
+  }
+
   // Gives sinks[i] its queue on the worker, as many entries as the pool has
   // slots, then publishes the link to the snapshot thread. Caller holds
   // control_mutex, and startLogging() created the pool. Throws (std::bad_alloc)
@@ -228,6 +329,7 @@ struct LogChannel::Pimpl
   // readers see the new publication. Exit is release, observation is acquire.
   void waitQuiescent()
   {
+    details::WaiterCount::Scope waiting(quiescence_waiters);  // before the epoch read
     const auto observed = epoch.load(std::memory_order_seq_cst);
     if(observed & 1)
     {
@@ -235,25 +337,58 @@ struct LogChannel::Pimpl
     }
   }
 
+  // The workers whose sleep a snapshot's pushes took (SinkWorker::Push::wake_owed).
+  // Declared before the snapshot's write lock and epoch guard, so destroyed after
+  // them: the futex calls are made with the write mutex released, and writers do not
+  // wait for them. Without the epoch a worker can be removed meanwhile, and a callback
+  // that drops its last reference frees the SinkWorker at once (~SinkWorker() leaves
+  // the stop to another thread). So each entry is the worker's Pimpl, taken inside the
+  // epoch: both destructor paths free it only after joining the worker thread, which
+  // sleeps until its wake (see WorkerWake::release()).
+  struct OwedWakes
+  {
+    OwedWakes() = default;
+    OwedWakes(const OwedWakes&) = delete;
+    OwedWakes& operator=(const OwedWakes&) = delete;
+    ~OwedWakes()
+    {
+      for(size_t i = 0; i < count; ++i)
+      {
+        SinkWorker::wake(*workers[i]);
+      }
+    }
+    std::array<SinkWorker::Pimpl*, kMaxSinks> workers;
+    size_t count = 0;
+  };
+
   // Reader side of waitQuiescent(): odd epoch while a snapshot is in progress.
   struct EpochGuard
   {
-    std::atomic<uint64_t>& epoch;
-    explicit EpochGuard(std::atomic<uint64_t>& value) : epoch(value)
+    explicit EpochGuard(Pimpl& p) : epoch(p.epoch), waiters(p.quiescence_waiters)
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
     }
     ~EpochGuard()
     {
       epoch.fetch_add(1, std::memory_order_seq_cst);
-      epoch.notify_all();  // a plain load when no controller is waiting
+      waiters.notifyIfWaiting(epoch);  // no futex call unless a controller waits
     }
+    std::atomic<uint64_t>& epoch;
+    details::WaiterCount& waiters;
   };
 };
 
 RegistrationID LogChannel::registerValueImpl(const std::string& name,
                                              ValuePtr&& value_ptr,
                                              CustomSerializer::Ptr type_info)
+{
+  return registerValueWithTypes(name, std::move(value_ptr), std::move(type_info), {});
+}
+
+RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
+                                                  ValuePtr&& value_ptr,
+                                                  CustomSerializer::Ptr type_info,
+                                                  PendingTypes&& types)
 {
   // The public registration template holds control_mutex, including type
   // discovery, and has already validated the name with checkValueName().
@@ -266,35 +401,111 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
                                "can't register new value '" + name +
                                "' once recording started");
     }
+    // Whatever can throw and needs no change to the channel comes first (user code
+    // such as typeSchema() included), then spare capacity for what is appended.
     const auto type = value_ptr.type();
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
+    // The type and field names this registration writes into the schema text. A type
+    // name has a field section (a TypeDefinition) or belongs to registerCustomValue()
+    // serializers, never both: decoders would read the serializer's values with the
+    // section's fields, or find two sections. Only a TypeDefinition registration
+    // passes the registry's serializer of its type.
+    if(type_info)
+    {
+      CheckSchemaName(_p->channel_name, "custom type name", type_name);
+      if(_p->schema.custom_types.contains(type_name) &&
+         _p->type_registry.find(type_name) != type_info)
+      {
+        throw SharedTypeName(_p->channel_name, type_name);
+      }
+    }
+    for(const auto& [pending_name, pending_fields] : types)
+    {
+      CheckSchemaName(_p->channel_name, "custom type name", pending_name);
+      if(_p->customSerializerUses(pending_name))
+      {
+        throw SharedTypeName(_p->channel_name, pending_name);
+      }
+      for(const auto& pending_field : pending_fields)
+      {
+        CheckSchemaName(_p->channel_name, "field name", pending_field.field_name,
+                        pending_name);
+      }
+    }
     TypeField field{ name, type, type_name, value_ptr.isVector(),
                      value_ptr.vectorSize() };
-    // User code (typeSchema) runs before anything is published, so a throw
-    // leaves the channel exactly as it was.
     std::optional<CustomSchema> custom_schema;
-    if(type_info && !_p->schema.custom_types.contains(type_info->typeName()))
+    if(type_info && !_p->schema.custom_types.contains(type_info->typeName()) &&
+       !types.contains(type_info->typeName()))
     {
       custom_schema = type_info->typeSchema();
     }
-    _p->series.reserve(_p->series.size() + 1);
-    _p->schema.fields.reserve(_p->schema.fields.size() + 1);
-
     Pimpl::ValueHolder instance;
     instance.name = name;
     instance.holder = std::move(value_ptr);
-    _p->series.emplace_back(std::move(instance));
-    const uint32_t generation = _p->shared->addSeries();
-    const size_t index = _p->series.size() - 1;
-    _p->registered_values.insert({ name, index });
-    _p->schema.fields.emplace_back(std::move(field));
-    if(custom_schema)
+    _p->series.reserve(_p->series.size() + 1);
+    _p->schema.fields.reserve(_p->schema.fields.size() + 1);
+    std::vector<decltype(_p->schema.custom_types)::iterator> added_types;
+    added_types.reserve(types.size());
+
+    // Then the changes, each of which either completes or throws without effect, in
+    // an order that ends with the only one that cannot be undone, addSeries(). A throw
+    // undoes the earlier ones, which cannot throw.
+    const size_t index = _p->series.size();
+    std::optional<decltype(_p->registered_values)::iterator> indexed;
+    std::optional<decltype(_p->schema.custom_schemas)::iterator> added_schema;
+    bool appended = false;
+    try
     {
-      _p->schema.custom_schemas.insert({ type_info->typeName(), *custom_schema });
+      for(auto& [pending_name, pending_fields] : types)
+      {
+        const auto [entry, inserted] = _p->schema.custom_types.try_emplace(pending_name);
+        if(inserted)
+        {
+          added_types.push_back(entry);
+          entry->second = std::move(pending_fields);
+        }
+      }
+      indexed = _p->registered_values.emplace(name, index).first;
+      if(custom_schema)
+      {
+        const auto [entry, inserted] = _p->schema.custom_schemas.emplace(
+            type_info->typeName(), std::move(*custom_schema));
+        if(inserted)
+        {
+          added_schema = entry;
+        }
+      }
+      _p->series.emplace_back(std::move(instance));
+      _p->schema.fields.emplace_back(std::move(field));
+      appended = true;
+      const uint64_t hash = ComputeSchemaHash(_p->schema);
+      const uint32_t generation = _p->shared->addSeries();
+      _p->schema.hash = hash;
+      _p->invalidateAnnouncements();
+      return RegistrationID(uint32_t(index), generation);
     }
-    _p->schema.hash = ComputeSchemaHash(_p->schema);
-    _p->invalidateAnnouncements();
-    return RegistrationID(uint32_t(index), generation);
+    catch(...)
+    {
+      if(appended)
+      {
+        _p->schema.fields.pop_back();
+        _p->series.pop_back();
+      }
+      if(added_schema)
+      {
+        _p->schema.custom_schemas.erase(*added_schema);
+      }
+      if(indexed)
+      {
+        _p->registered_values.erase(*indexed);
+      }
+      for(const auto& entry : added_types)
+      {
+        _p->schema.custom_types.erase(entry);
+      }
+      throw;
+    }
   }
 
   const size_t index = it->second;
@@ -323,6 +534,11 @@ RegistrationID LogChannel::registerValueImpl(const std::string& name,
 
 LogChannel::LogChannel(std::string name) : _p(new Pimpl)
 {
+  if(const char* problem = NameProblem(name, true))
+  {
+    throw std::runtime_error("invalid channel name '" + Printable(name) +
+                             "': " + problem);
+  }
   _p->schema.channel_name = name;
   _p->channel_name = std::move(name);
   _p->schema.hash = ComputeSchemaHash(_p->schema);
@@ -366,7 +582,7 @@ bool LogChannel::trySetEnabled(const RegistrationID& id, bool enable) noexcept
   return _p->shared->setEnabled(id, enable);
 }
 
-bool LogChannel::isEnabled(const RegistrationID& id) const
+bool LogChannel::isEnabled(const RegistrationID& id) const noexcept
 {
   return _p->shared->isEnabled(id);
 }
@@ -390,6 +606,9 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
     throw std::invalid_argument("Can't add a null sink");
   }
   std::unique_lock lock(_p->control_mutex);
+  // One announcement per worker: a concurrent addDataSink() of the same worker
+  // waits for it, then finds the worker attached.
+  _p->announced.wait(lock, [&] { return !_p->isAnnouncing(sink.get()); });
   // Duplicate check and free slot; repeated after an unlocked announcement.
   const auto find_slot = [&]() -> std::optional<size_t> {
     if(_p->findLink(sink) != Pimpl::kMaxSinks)
@@ -411,13 +630,35 @@ bool LogChannel::addDataSink(std::shared_ptr<SinkWorker> sink)
   auto link = std::make_unique<Pimpl::SinkLink>(sink);
   if(_p->schema_frozen)
   {
+    _p->announcing.push_back(sink.get());
+    // Ends the announcement on every path, with control_mutex held.
+    struct Announcing
+    {
+      ~Announcing()
+      {
+        if(!lock.owns_lock())
+        {
+          lock.lock();
+        }
+        p.announcing.erase(std::find(p.announcing.begin(), p.announcing.end(), worker));
+        p.announced.notify_all();
+      }
+      Pimpl& p;
+      std::unique_lock<std::mutex>& lock;
+      const SinkWorker* worker;
+    } announcing{ *_p, lock, sink.get() };
     // Same protocol as startLogging(): the sink hears a copy of the final schema
-    // with the control mutex released, so it may query the channel.
-    const Schema schema = _p->schema;
-    lock.unlock();
-    sink->addSchema(schema);
-    lock.lock();
-    link->schema_registered = true;
+    // with the control mutex released, so it may query the channel. A failing
+    // startLogging() can reopen the schema meanwhile and a registration change it:
+    // the sink hears it again once it is frozen, else startLogging() announces it.
+    do
+    {
+      const Schema schema = _p->schema;
+      lock.unlock();
+      sink->addSchema(schema);
+      lock.lock();
+      link->schema_registered = _p->schema.hash == schema.hash;
+    } while(!link->schema_registered && _p->schema_frozen);
     free_slot = find_slot();
     if(!free_slot)
     {
@@ -503,8 +744,13 @@ uint64_t LogChannel::writeLockWaitMaxNs() const
 
 uint64_t LogChannel::poolExhausted() const
 {
-  std::lock_guard const lock(_p->control_mutex);  // pool is created under it
-  return _p->pool ? _p->pool->exhausted() : 0;
+  // startLogging() creates the pool before it sets logging_started and never replaces
+  // it afterwards; before that no snapshot can have found it exhausted.
+  if(!_p->logging_started.load(std::memory_order_acquire))
+  {
+    return 0;
+  }
+  return _p->pool->exhausted();
 }
 
 void LogChannel::setPayloadCapacity(size_t bytes)
@@ -647,11 +893,7 @@ void LogChannel::addCustomType(const std::string& custom_type_name,
 
 void LogChannel::checkValueName(const std::string& name) const
 {
-  if(name.find(' ') != std::string::npos)
-  {
-    throw std::runtime_error(ChannelPrefix(_p->channel_name) + "invalid value name '" +
-                             name + "': it contains a space");
-  }
+  CheckSchemaName(_p->channel_name, "value name", name);
 }
 
 TypesRegistry& LogChannel::typeRegistry()
@@ -679,6 +921,14 @@ bool LogChannel::isLoggingStarted() const
 
 void LogChannel::startLogging()
 {
+  if(_p->logging_started.load(std::memory_order_acquire))
+  {
+    return;
+  }
+  // Lock order: the write mutex, then start_mutex, then control_mutex, like a writer
+  // that queries the channel inside its transaction. A transaction nests in the
+  // caller's own, so startLogging() works inside scopedWrite().
+  std::optional<WriteTransaction> transaction(std::in_place, *_p->shared);
   std::lock_guard const serialize(_p->start_mutex);
   if(_p->logging_started.load(std::memory_order_relaxed))
   {
@@ -693,7 +943,6 @@ void LogChannel::startLogging()
   {
     if(!_p->pool)
     {
-      std::lock_guard<WriteMutex> write_lock(_p->shared->write_mutex);
       _p->active_mask.resize(_p->series.size() / 8 + (_p->series.size() % 8 != 0));
       _p->shared->mask_dirty.exchange(false, std::memory_order_seq_cst);
       _p->rebuildMask();
@@ -702,6 +951,7 @@ void LogChannel::startLogging()
       _p->pool = std::make_shared<SnapshotPool>(_p->pool_capacity, capacity,
                                                 _p->active_mask.size());
     }
+    transaction.reset();  // writers proceed while the sinks hear the schema
     // Announce to one sink at a time with the control mutex released: a sink
     // may query the channel from onSchema(), and other control operations
     // (including a concurrent addDataSink) proceed meanwhile.
@@ -774,7 +1024,56 @@ SnapshotResult LogChannel::tryTakeSnapshot(std::chrono::nanoseconds timestamp)
 SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
                                             bool real_time)
 {
-  Pimpl::EpochGuard guard(_p->epoch);
+  // Without sinks, return before touching the pool or the write mutex. The links
+  // are loaded again inside the epoch.
+  if(std::none_of(_p->published_sinks.begin(), _p->published_sinks.end(),
+                  [](const auto& link) { return link.load(std::memory_order_relaxed); }))
+  {
+    return SnapshotResult::no_sinks;
+  }
+
+  Pimpl::OwedWakes wakes;  // destroyed after write_lock and guard below
+  // The write mutex before the epoch: a control operation waiting for the epoch
+  // (it may run inside a transaction) never waits for a snapshot that waits for it.
+  auto& write_mutex = _p->shared->write_mutex;
+  uint64_t blocked_wait_ns = 0;
+  bool blocked = false;
+  if(!write_mutex.try_lock())
+  {
+    // A thread that holds the write mutex (scopedWrite() or a guard) fails try_lock()
+    // and would wait for itself. The check, a thread-local lookup, runs only here.
+    if(_p->shared->inTransactionOnThisThread())
+    {
+      _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+      return SnapshotResult::blocked;
+    }
+    if(real_time)
+    {
+      if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
+      {
+        _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+        return SnapshotResult::blocked;
+      }
+    }
+    else
+    {
+      blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
+    }
+  }
+  // Held until the last push: producers, when several threads take snapshots, are
+  // serialized over the pool scan, the active mask and the single-producer queues.
+  std::lock_guard<WriteMutex> write_lock(write_mutex, std::adopt_lock);
+  if(blocked)
+  {
+    _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
+    auto previous = _p->write_lock_wait_max_ns.load(std::memory_order_relaxed);
+    while(previous < blocked_wait_ns &&
+          !_p->write_lock_wait_max_ns.compare_exchange_weak(previous, blocked_wait_ns,
+                                                            std::memory_order_relaxed))
+    {
+    }
+  }
+  Pimpl::EpochGuard guard(*_p);
 
   std::array<Pimpl::SinkLink*, Pimpl::kMaxSinks> links{};
   size_t last = links.size();  // slot of the last published link
@@ -788,7 +1087,7 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   }
   if(last == links.size())
   {
-    return SnapshotResult::no_sinks;
+    return SnapshotResult::no_sinks;  // removed while this call waited for the mutex
   }
 
   auto* slot = _p->pool->tryAcquire();  // counts exhaustion itself
@@ -799,63 +1098,34 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
   SnapshotRef parent = SnapshotPool::adopt(_p->pool, slot);
   auto& snapshot = slot->snapshot;
 
+  // Under the write mutex, so enable changes made inside a scopedWrite()
+  // transaction are seen together with the values they belong to. A rebuilt
+  // active bit acquires registration's initialized holder through its SC flag
+  // load; see refreshMaskIfDirty() for the ordering argument.
+  _p->refreshMaskIfDirty();
+  // The RT path sizes against the slot: it neither throws nor allocates.
+  const auto payload_size =
+      real_time ? _p->payloadSize(snapshot.payload.capacity()) : _p->payloadSize();
+  if(payload_size > snapshot.payload.capacity())
   {
-    auto& write_mutex = _p->shared->write_mutex;
-    uint64_t blocked_wait_ns = 0;
-    bool blocked = false;
     if(real_time)
     {
-      if(!write_mutex.tryLockWithSpin(WriteMutex::kLockSpinNs))
-      {
-        _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
-        return SnapshotResult::blocked;
-      }
+      _p->dropped_oversize.fetch_add(1, std::memory_order_relaxed);
+      return SnapshotResult::oversize;
     }
-    else
-    {
-      blocked = write_mutex.lockWithSpin(WriteMutex::kLockSpinNs, &blocked_wait_ns);
-    }
-    std::lock_guard<WriteMutex> write_lock(write_mutex, std::adopt_lock);
-    // Under the write mutex, so enable changes made inside a scopedWrite()
-    // transaction are seen together with the values they belong to. A rebuilt
-    // active bit acquires registration's initialized holder through its SC flag
-    // load; see refreshMaskIfDirty() for the ordering argument.
-    _p->refreshMaskIfDirty();
-    if(blocked)
-    {
-      _p->write_lock_contended.fetch_add(1, std::memory_order_relaxed);
-      auto previous = _p->write_lock_wait_max_ns.load(std::memory_order_relaxed);
-      while(previous < blocked_wait_ns &&
-            !_p->write_lock_wait_max_ns.compare_exchange_weak(previous, blocked_wait_ns,
-                                                              std::memory_order_relaxed))
-      {
-      }
-    }
-    // The RT path sizes against the slot: it neither throws nor allocates.
-    const auto payload_size =
-        real_time ? _p->payloadSize(snapshot.payload.capacity()) : _p->payloadSize();
-    if(payload_size > snapshot.payload.capacity())
-    {
-      if(real_time)
-      {
-        _p->dropped_oversize.fetch_add(1, std::memory_order_relaxed);
-        return SnapshotResult::oversize;
-      }
-      snapshot.payload.reserve(checkedDouble(payload_size));
-      _p->payload_reallocations.fetch_add(1, std::memory_order_relaxed);
-    }
-    snapshot.payload.resize(payload_size);
-    SerializeMe::SpanBytes payload_buffer(snapshot.payload);
-    for(size_t i = 0; i < _p->series.size(); i++)
-    {
-      if(GetBit(_p->active_mask, i))
-      {
-        _p->series[i].holder.serialize(payload_buffer);
-      }
-    }
-    snapshot.payload.resize(snapshot.payload.size() - payload_buffer.size());
+    snapshot.payload.reserve(checkedDouble(payload_size));
+    _p->payload_reallocations.fetch_add(1, std::memory_order_relaxed);
   }
-
+  snapshot.payload.resize(payload_size);
+  SerializeMe::SpanBytes payload_buffer(snapshot.payload);
+  for(size_t i = 0; i < _p->series.size(); i++)
+  {
+    if(GetBit(_p->active_mask, i))
+    {
+      _p->series[i].holder.serialize(payload_buffer);
+    }
+  }
+  snapshot.payload.resize(snapshot.payload.size() - payload_buffer.size());
   snapshot.active_mask = _p->active_mask;
   snapshot.schema_hash = _p->schema.hash;
   snapshot.timestamp = timestamp;
@@ -872,15 +1142,17 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
       continue;
     }
     ++attached;
-    const bool pushed = i == last ? link->sink->tryPush(*link->queue, std::move(parent)) :
-                                    link->sink->tryPush(*link->queue, parent.clone());
-    if(pushed)
-    {
-      ++accepted;
-    }
-    else
+    const auto push = i == last ? link->sink->tryPush(*link->queue, std::move(parent)) :
+                                  link->sink->tryPush(*link->queue, parent.clone());
+    if(push == SinkWorker::Push::refused)
     {
       link->dropped.fetch_add(1, std::memory_order_relaxed);
+      continue;
+    }
+    ++accepted;
+    if(push == SinkWorker::Push::wake_owed)
+    {
+      wakes.workers[wakes.count++] = link->sink->wakeTarget();
     }
   }
   if(accepted == 0)

@@ -4,8 +4,8 @@
 #include "data_tamer/data_sink.hpp"
 #include "data_tamer/types.hpp"
 
-// See "Building against it" below: do not define MCAP_IMPLEMENTATION.
-// (Internal: mcap_sink.cpp, which does, defines it before including this header.)
+// Do not define MCAP_IMPLEMENTATION (see "Building against it" below).
+// Only mcap_sink.cpp does, before including this header.
 #include <mcap/writer.hpp>
 
 #include <algorithm>
@@ -19,9 +19,9 @@
 #include <vector>
 
 /**
- * The MCAP encoding of docs/wire_format.md (section 4.1), shared by MCAPSink and
- * by any other code that writes data_tamer MCAP files, for example a sink that
- * stores snapshots and writes them later.
+ * The MCAP encoding of docs/wire_format.md (section 4.1), shared by MCAPSink and by
+ * any other code that writes data_tamer MCAP files, such as a sink that stores
+ * snapshots and writes them later:
  *
  *   mcap::McapWriter writer;
  *   if(!writer.open(path, mcap::McapWriterOptions(mcap_encoding::kEncoding)).ok())
@@ -36,20 +36,16 @@
  *   }
  *   writer.close();
  *
- * Sequence numbers are provided by the caller: MCAPSink counts 1, 2, 3, ... per
- * MCAP channel and file, and a writer of stored data should do the same (or
- * keep the numbers it recorded), so that readers can detect gaps.
+ * The caller supplies the sequence numbers. Count 1, 2, 3, ... per MCAP channel and
+ * file, as MCAPSink does, so that readers can detect gaps.
  *
- * Building against it. The functions are inline, but they are not standalone:
- * link data_tamer::data_tamer (AddChannel uses the library's operator<<(Schema)),
- * and use the MCAP headers data_tamer was built with, so that the McapWriter
- * your code sees is the one the library compiled:
- * - Outside ROS 2, data_tamer::data_tamer carries the include path of its MCAP
- *   headers (the bundled copy is installed with it), and libdata_tamer contains
- *   the MCAP implementation. Do NOT define MCAP_IMPLEMENTATION in your code:
- *   the definitions would be duplicated. Do not mix in another MCAP version.
- * - Under ROS 2, MCAP comes from mcap_vendor, which is not compiled into
- *   libdata_tamer: link mcap_vendor::mcap as well.
+ * Building against it: link data_tamer::data_tamer (AddChannel uses the library's
+ * operator<<(Schema)) and use the MCAP headers the library was built with.
+ * - Outside ROS 2, data_tamer::data_tamer provides them and libdata_tamer contains the
+ *   MCAP implementation: do NOT define MCAP_IMPLEMENTATION, and do not mix in another
+ *   MCAP version.
+ * - Under ROS 2, MCAP comes from mcap_vendor and is not part of libdata_tamer: link
+ *   mcap_vendor::mcap as well.
  */
 namespace DataTamer::mcap_encoding
 {
@@ -67,11 +63,9 @@ inline std::string SchemaName(const Schema& schema)
   return schema.channel_name + "::" + std::to_string(schema.hash);
 }
 
-/// Register the MCAP schema and channel records of `schema` and return the
-/// channel id to pass to WriteMessage()/WriteSnapshot(). Call it once per schema
-/// and file (MCAP ids are per file). The schema record holds the line format of
-/// docs/wire_format.md section 2 (operator<< / ToStr), never ToYaml: MCAP files
-/// keep the line format.
+/// Register the MCAP schema and channel records of `schema` and return the channel id
+/// for WriteMessage()/WriteSnapshot(). Call it once per schema and file (ids are per
+/// file). The schema record holds the line format (operator<<), never ToYaml().
 inline mcap::ChannelId AddChannel(mcap::McapWriter& writer, const Schema& schema)
 {
   std::ostringstream ss;
@@ -90,11 +84,10 @@ inline size_t MessageBodySize(size_t mask_size, size_t payload_size)
   return 2 * sizeof(uint32_t) + mask_size + payload_size;
 }
 
-/// Write the message body `u32 mask_len, mask, u32 payload_len, payload`
-/// (lengths little-endian) into `body`, resized to fit. Does not allocate when
-/// `body` already has the capacity. `mask` and `payload` must not point into
-/// `body`: it is resized and overwritten. Throws std::length_error if a length
-/// does not fit in 32 bits.
+/// Write the message body `u32 mask_len, mask, u32 payload_len, payload` (lengths
+/// little-endian) into `body`, resized to fit. It does not allocate if `body` has the
+/// capacity. `mask` and `payload` must not point into `body`. Throws std::length_error
+/// if a length does not fit in 32 bits.
 inline void EncodeMessageBody(ByteSpan mask, ByteSpan payload, std::vector<uint8_t>& body)
 {
   constexpr size_t kMaxLength = std::numeric_limits<uint32_t>::max();
@@ -120,15 +113,27 @@ inline void EncodeMessageBody(ByteSpan mask, ByteSpan payload, std::vector<uint8
   put(payload);
 }
 
-/// Write one message from its parts: `timestamp` (nanoseconds since the epoch)
-/// becomes logTime and publishTime. `scratch` holds the encoded body; reuse it
-/// across calls to avoid allocations (it must not hold `mask` or `payload`).
-/// Returns the writer's status.
+/// Throws std::invalid_argument if `timestamp` is negative: MCAP times are unsigned.
+/// WriteMessage() calls it. A sink that stores snapshots and writes them later calls it
+/// too, to refuse such a snapshot when it arrives.
+inline void CheckTimestamp(std::chrono::nanoseconds timestamp)
+{
+  if(timestamp.count() < 0)
+  {
+    throw std::invalid_argument("data_tamer MCAP message: negative timestamp");
+  }
+}
+
+/// Write one message: `timestamp` (nanoseconds since the epoch) becomes logTime and
+/// publishTime. `scratch` receives the encoded body: reuse it across calls to avoid
+/// allocations, and do not pass it as `mask` or `payload`. Returns the writer's status.
+/// Throws like CheckTimestamp() and EncodeMessageBody().
 inline mcap::Status WriteMessage(mcap::McapWriter& writer, mcap::ChannelId channel_id,
                                  uint32_t sequence, std::chrono::nanoseconds timestamp,
                                  ByteSpan mask, ByteSpan payload,
                                  std::vector<uint8_t>& scratch)
 {
+  CheckTimestamp(timestamp);
   EncodeMessageBody(mask, payload, scratch);
   mcap::Message msg;
   msg.channelId = channel_id;

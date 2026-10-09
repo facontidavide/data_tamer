@@ -81,7 +81,6 @@ struct MCAPSink::Pimpl
   std::chrono::system_clock::time_point start_time;
 
   std::vector<uint8_t> message_body;  // reused, see mcap_encoding::WriteMessage
-  bool forced_stop_recording = false;
   std::recursive_mutex mutex;
 };
 
@@ -97,7 +96,16 @@ MCAPSink::MCAPSink(const std::string& filepath, bool do_compression)
 void DataTamer::MCAPSink::openFile(std::string const& filepath, bool do_compression)
 {
   std::scoped_lock lk(_p->mutex);
-  // Open the new file first: if that fails the current recording stays intact.
+  // Opening the file in use truncates it: close the old writer first, or its footer
+  // lands in the new file. A failed open then leaves the sink stopped.
+  std::error_code ignored;
+  const bool same_file =
+      _p->writer && std::filesystem::equivalent(filepath, _p->filepath, ignored);
+  if(same_file)
+  {
+    _p->writer.reset();
+  }
+  // Any other file is opened first: if that fails the current recording stays intact.
   auto writer = std::make_unique<mcap::McapWriter>();
   mcap::McapWriterOptions options(mcap_encoding::kEncoding);
   options.compression =
@@ -132,7 +140,7 @@ void MCAPSink::onSchema(Schema const& schema)
 void MCAPSink::onSnapshot(const SnapshotRef& ref)
 {
   std::scoped_lock lk(_p->mutex);
-  if(_p->forced_stop_recording)
+  if(!_p->writer)
   {
     return;
   }
@@ -147,10 +155,15 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
 
   // If reset_time is exceeded, continue in a new numbered file (the default), or
   // truncate the current one if create_file_on_reset was disabled (that discards
-  // the data, but bounds the disk usage).
-  if(_p->reset_time != std::chrono::seconds(0) &&
-     std::chrono::system_clock::now() - _p->start_time > _p->reset_time)
+  // the data, but bounds the disk usage). A reset_time of 0 disables resets.
+  if(_p->reset_time == std::chrono::seconds(0))
   {
+    return;
+  }
+  const auto now = std::chrono::system_clock::now();
+  if(now - _p->start_time > _p->reset_time)
+  {
+    _p->start_time = now;  // a failed rollover is tried again after another reset_time
     if(_p->create_file_on_reset)
     {
       openNextNumberedFile();
@@ -177,7 +190,6 @@ void MCAPSink::setCreateNewFileOnReset(bool create_file_on_reset)
 void MCAPSink::stopRecording()
 {
   std::scoped_lock lk(_p->mutex);
-  _p->forced_stop_recording = true;
   if(_p->writer)  // idempotent
   {
     _p->writer->close();
@@ -198,7 +210,6 @@ void MCAPSink::onStart()
     return;  // restartRecording() reopened it already
   }
   openNextNumberedFile();
-  _p->forced_stop_recording = false;
 }
 
 void MCAPSink::openNextNumberedFile()
@@ -238,11 +249,6 @@ void MCAPSink::restartRecordingImpl(const std::string& filepath, bool do_compres
   for(auto const& [hash, schema] : _p->schemas)
   {
     onSchema(schema);
-  }
-
-  if(new_file)
-  {
-    _p->forced_stop_recording = false;
   }
 }
 

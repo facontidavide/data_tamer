@@ -203,6 +203,7 @@ bool TypeField::operator!=(const TypeField& other) const
 std::string ToStr(const Schema& schema)
 {
   std::ostringstream ss;
+  ss.exceptions(std::ios::badbit);   // a failed allocation must not truncate the text
   ss.imbue(std::locale::classic());  // the hash covers this text: never locale-dependent
   ss << schema;
   return ss.str();
@@ -510,7 +511,7 @@ std::string ToYaml(const Schema& schema)
 struct TypesRegistry::Impl
 {
   std::unordered_map<std::string, CustomSerializer::Ptr> types;
-  std::recursive_mutex mutex;
+  std::mutex mutex;
 };
 
 TypesRegistry::TypesRegistry() : _impl(std::make_unique<Impl>()) {}
@@ -540,6 +541,13 @@ CustomSerializer::Ptr TypesRegistry::replace(const std::string& type_name,
   CustomSerializer::Ptr serializer = make(type_name);
   _impl->types[type_name] = serializer;
   return serializer;
+}
+
+CustomSerializer::Ptr TypesRegistry::find(const std::string& type_name) const
+{
+  std::scoped_lock lk(_impl->mutex);
+  const auto it = _impl->types.find(type_name);
+  return it == _impl->types.end() ? nullptr : it->second;
 }
 
 }  // namespace DataTamer
