@@ -925,7 +925,7 @@ copyable.
 | `pool_exhausted` | `pool_exhausted` results (the pool, not a queue, is the bound) |
 | `dropped_oversize` | `oversize` results of `tryTakeSnapshot()` |
 | `payload_reallocations` | Slots `takeSnapshot()` had to grow |
-| `write_lock_contended`, `write_lock_wait_max_ns` | `blocked` results and slow `takeSnapshot()` calls; the longest wait |
+| `write_lock_contended`, `write_lock_wait_max_ns` | `blocked` results, those of a snapshot inside the caller's own `scopedWrite()` or guard included, and slow `takeSnapshot()` calls; the longest wait |
 | `dropped_by_sink` | One `{sink, dropped}` entry per sink attached at the read, in no promised order: publications it refused because its worker is stopped. `sink` is the worker's address, only to tell entries apart (a removed worker's address can be reused by a new one) |
 
 `attempts - accepted` is what the channel did not hand to any sink. The rate that matters

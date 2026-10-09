@@ -263,8 +263,9 @@ public:
    */
   [[nodiscard]] WriteTransaction scopedWrite();
 
-  /// Snapshots delayed by a writer past the spin budget: takeSnapshot() blocked,
-  /// tryTakeSnapshot() returned `blocked`.
+  /// Snapshots delayed by a writer past the spin budget (takeSnapshot() blocked,
+  /// tryTakeSnapshot() returned `blocked`), and snapshots that returned `blocked`
+  /// because the calling thread held the write mutex (scopedWrite() or a guard).
   [[nodiscard]] uint64_t writeLockContended() const;
 
   /// Longest time takeSnapshot() blocked on the write mutex, in nanoseconds.
