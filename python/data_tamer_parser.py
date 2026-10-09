@@ -89,7 +89,8 @@ class Schema:
         (the decoder emits "vec[0]", "points[1]/x", ...). "[]" is a placeholder:
         a field whose own name ends in "[]" would be listed the same way. A field of an opaque
         custom type is listed under its own name; its content is not described
-        by the schema, and parse_snapshot() raises ValueError when it is enabled.
+        by the schema, and parse_snapshot() raises ValueError when it is enabled,
+        unless it is a dynamic vector with no element.
 
         Raises ValueError for an undefined or cyclic custom type, for nesting
         deeper than parse_snapshot() accepts (MAX_SCHEMA_DEPTH), and when the
@@ -490,15 +491,21 @@ def _parse_field(f: Field, schema: Schema, reader: _Reader, prefix: str, out: di
     name = f.field_name if not prefix else f"{prefix}/{f.field_name}"
     if f.is_vector:
         count = f.array_size or reader.number("uint32")  # dynamic vector: count prefix
-        if count:
-            # An element takes at least `least` bytes: a count the payload cannot hold is
-            # rejected. Elements of no byte hold no value, however many there are.
-            least = (_STRUCT[f.type_name].size if f.is_basic
-                     else _min_element_size(f, schema, depth))
-            if least == 0:
-                return
-            if count * least > reader.remaining():
-                raise ValueError("payload truncated")
+        if not count:
+            # Nothing to read: an opaque type has nothing to skip, but a type the schema
+            # does not define at all makes it malformed, whatever the count.
+            if (not f.is_basic and f.type_name not in schema.custom_types
+                    and f.type_name not in schema.custom_schemas):
+                raise _undecodable_error(schema, f.type_name)
+            return
+        # An element takes at least `least` bytes: a count the payload cannot hold is
+        # rejected. Elements of no byte hold no value, however many there are.
+        least = (_STRUCT[f.type_name].size if f.is_basic
+                 else _min_element_size(f, schema, depth))
+        if least == 0:
+            return
+        if count * least > reader.remaining():
+            raise ValueError("payload truncated")
         names = (f"{name}[{i}]" for i in range(count))  # lazy: the count is untrusted
     else:
         names = (name,)

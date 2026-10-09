@@ -289,6 +289,25 @@ class OpaqueSections(unittest.TestCase):
                     ValueError, "unknown type 'Foreign'"):
                 dt.parse_snapshot(schema, mask, payload)
 
+    def test_empty_vector_of_an_opaque_type_decodes_as_empty(self):
+        # a dynamic vector with count 0 holds no element: there is nothing to skip, at the
+        # top level and inside a custom type
+        schema = dt.parse_schema(HEADER + "Foreign[] fs\nHolder h\nint8 after\n" + SEPARATOR
+                                 + "\nMSG: Holder\nForeign[] inner\n" + SEPARATOR
+                                 + "\nMSG: Foreign\nENCODING: proto\nmessage Foreign {}\n")
+        payload = bytes([0, 0, 0, 0, 0, 0, 0, 0, 7])  # two counts of 0, then 7
+        self.assertEqual(dt.parse_snapshot(schema, b"\x07", payload), {"after": 7})
+
+    def test_empty_vector_of_an_undefined_type_is_rejected(self):
+        # a type the schema does not define at all makes it malformed, whatever the count
+        for text in (HEADER + "Foreign[] fs\nint8 after\n",
+                     HEADER + "Holder h\nint8 after\n" + SEPARATOR
+                     + "\nMSG: Holder\nForeign[] inner\n"):
+            schema = dt.parse_schema(text)
+            with self.subTest(text=text), self.assertRaisesRegex(
+                    ValueError, "unknown type 'Foreign'"):
+                dt.parse_snapshot(schema, b"\x03", bytes([0, 0, 0, 0, 7]))
+
     def test_encoding_line_that_does_not_open_a_section_is_rejected(self):
         for text in (HEADER + "ENCODING: proto\n",
                      HEADER + "Pose p\n" + SEPARATOR

@@ -119,7 +119,8 @@ Unreleased
   says, so both reject ``### hash:<tab>7``. Both reject a field name that holds
   whitespace or a control character, in either rendering. Python reads a text whose
   first line starts with ``###`` as the line format, as C++ does, even when YAML
-  follows.
+  follows. An empty vector of a type the schema does not define is an error in C++
+  too, and an empty vector of an opaque type decodes as empty in Python too.
 * **Fixed**: one type name for a ``TypeDefinition`` type and a ``registerCustomValue()``
   serializer of the same channel made the schema describe the serializer's values with
   the type's fields, or hold two sections of that name. The registration that comes

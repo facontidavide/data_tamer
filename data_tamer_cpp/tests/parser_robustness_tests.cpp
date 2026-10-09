@@ -795,3 +795,47 @@ TEST(ParserRobustness, ActiveFieldOfAnUndefinedTypeSaysItIsUnknown)
 {
   expectCannotDecodeForeign("", "unknown type Foreign");
 }
+
+// A dynamic vector with count 0 holds no element: one of an opaque type decodes as
+// empty, there is nothing to skip. A type the schema does not define at all makes the
+// schema malformed, whatever the count. At the top level and inside a custom type.
+TEST(ParserRobustness, EmptyVectorOfAnOpaqueTypeDecodesAsEmpty)
+{
+  const auto schema =
+      BuildSchemaFromText(kHeader + "Foreign[] fs\nHolder h\nint8 after\n" + kSeparator +
+                          "\nMSG: Holder\nForeign[] inner\n" + kSeparator +
+                          "\nMSG: Foreign\nENCODING: proto\nmessage Foreign {}\n");
+  const std::vector<uint8_t> mask = { 7 };
+  const std::vector<uint8_t> payload = { 0, 0, 0, 0, 0, 0, 0, 0, 7 };  // two counts, 7
+  std::vector<std::pair<std::string, VarNumber>> values;
+  EXPECT_TRUE(ParseSnapshot(schema, viewOf(mask, payload),
+                            [&](const std::string& name, const VarNumber& value) {
+                              values.emplace_back(name, value);
+                            }));
+  ASSERT_EQ(values.size(), 1u);
+  EXPECT_EQ(values[0].first, "after");
+  EXPECT_EQ(std::get<int8_t>(values[0].second), 7);
+}
+
+TEST(ParserRobustness, EmptyVectorOfAnUndefinedTypeIsRejected)
+{
+  const std::vector<uint8_t> mask = { 3 };
+  const std::vector<uint8_t> payload = { 0, 0, 0, 0, 7 };  // a count of 0, then 7
+  for(const std::string& text : { kHeader + "Foreign[] fs\nint8 after\n",
+                                  kHeader + "Holder h\nint8 after\n" + kSeparator +
+                                      "\nMSG: Holder\nForeign[] inner\n" })
+  {
+    const auto schema = BuildSchemaFromText(text);
+    try
+    {
+      (void)ParseSnapshot(schema, viewOf(mask, payload),
+                          [](const std::string&, const VarNumber&) {});
+      ADD_FAILURE() << "decoded an empty vector of the undefined type Foreign\n" << text;
+    }
+    catch(const std::runtime_error& e)
+    {
+      EXPECT_NE(std::string(e.what()).find("unknown type Foreign"), std::string::npos)
+          << e.what();
+    }
+  }
+}

@@ -40,7 +40,8 @@ A dynamic vector (`T[]`) has a length known only per message, so its elements ar
 listed once with empty brackets (`vec[]`, `points[]/x`), where the decoder produces
 `vec[0]`, `vec[1]`, ... The `[]` is a placeholder: a field whose own name ends in `[]`
 would look the same. A field of an opaque custom type is listed under its own name, but
-`parse_snapshot()` cannot decode a snapshot where it is enabled. `ValueError` is raised
+`parse_snapshot()` cannot decode a snapshot where it is enabled, unless it is a dynamic
+vector with no element. `ValueError` is raised
 for undefined or cyclic types, nesting deeper than the decoder accepts
 (`MAX_SCHEMA_DEPTH`) and schemas that expand to more than `MAX_FIELD_NAMES`
 (1,000,000) names.

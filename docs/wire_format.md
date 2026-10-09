@@ -292,6 +292,12 @@ no value however large the count, and decoders must not iterate over it. They
 also bound the nesting depth of custom types (the reference
 decoders use 64) so that a malformed or cyclic schema cannot recurse forever.
 
+A present field of a type that the schema does not define (no basic type and no
+`MSG:` section) means the schema is malformed: decoders reject the snapshot, also
+when the field is a dynamic vector with count 0. A present field of an opaque type
+(section 2, item 6) cannot be decoded either, except a dynamic vector with count 0,
+which holds nothing to skip and decodes as empty.
+
 Flattened series names, as produced by the reference decoders and PlotJuggler:
 nested fields join with `/`, container elements append `[i]`:
 `pose/position/x`, `vec[2]`, `points[1]/z`.

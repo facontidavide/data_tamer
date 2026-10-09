@@ -151,7 +151,8 @@ struct SnapshotView
 /// '/' and index container elements: "pose/position/x", "points[1]/z".
 /// Returns false if the hash is not the schema's (nothing is decoded) or if bytes are
 /// left after the last field (the callback has already run). Throws std::runtime_error
-/// on malformed data.
+/// on malformed data, and for an active field of a type the schema does not define or
+/// describes as opaque, but an empty vector of an opaque type decodes as empty.
 template <typename NumberCallback>
 [[nodiscard]] bool ParseSnapshot(const Schema& schema, SnapshotView snapshot,
                                  const NumberCallback& callback_number);
@@ -1342,8 +1343,20 @@ void ParseSnapshotRecursive(const TypeField& field, const Schema& schema,
   {
     vect_size = Deserialize<uint32_t>(buffer);
   }
-  if(field.is_vector && vect_size > 0)
+  if(field.is_vector)
   {
+    if(vect_size == 0)
+    {
+      // Nothing to read: an opaque type has nothing to skip, but a type the schema does
+      // not define at all makes it malformed, whatever the count.
+      if(field.type == BasicType::OTHER &&
+         schema.custom_types.count(field.type_name) == 0 &&
+         schema.custom_schemas.count(field.type_name) == 0)
+      {
+        UndecodableType(schema, field.type_name);
+      }
+      return;
+    }
     // An element takes at least min_size bytes: a count the payload cannot hold is
     // rejected. Elements of no byte hold no value, however many there are.
     const size_t min_size = MinElementSize(field, schema, min_sizes, depth);
