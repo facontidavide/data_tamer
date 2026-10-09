@@ -635,9 +635,9 @@ SinkWorker::Push SinkWorker::tryPush(Attachment& attachment, SnapshotRef&& snaps
   return _p->wake.signal() ? Push::wake_owed : Push::queued;
 }
 
-void SinkWorker::wake() noexcept
+void SinkWorker::wake(Pimpl& target) noexcept
 {
-  _p->wake.release();
+  target.wake.release();
 }
 
 void SinkWorker::addSchema(const Schema& schema)

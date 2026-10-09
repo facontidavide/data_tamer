@@ -108,6 +108,10 @@ Unreleased
 * **Clang**: ``discoverTypes()`` and ``TypesRegistry`` no longer trigger
   ``-Wunused-lambda-capture`` and ``-Wpotentially-evaluated-expression``, which broke
   ``-Werror`` builds of consumers that register a custom type.
+* **Fixed**: a snapshot's deferred wake of a sleeping worker read the ``SinkWorker``
+  after leaving its epoch, freed meanwhile if a ``drain()`` callback had dropped the
+  last reference (a crash, or heap-use-after-free under AddressSanitizer). The wake
+  goes through the worker's state, which lives until the worker thread is joined.
 * **ABI**: one new private exported function, ``LogChannel::registerValueWithTypes``.
 * **Counters in one struct per channel and one per sink**:
   ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and

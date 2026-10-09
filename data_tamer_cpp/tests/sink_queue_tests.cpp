@@ -53,6 +53,15 @@ Attached<QueueSink> queueSink(Delivery delivery = Delivery::Manual)
 {
   return attach<QueueSink>(delivery);
 }
+
+// Busy wait: a sleep lasts far longer than the few microseconds asked for.
+void spinFor(std::chrono::microseconds length)
+{
+  const auto until = std::chrono::steady_clock::now() + length;
+  while(std::chrono::steady_clock::now() < until)
+  {
+  }
+}
 }  // namespace
 
 TEST(SinkQueue, RetainedSnapshotOutlivesChannelAndQueue)
@@ -1115,18 +1124,12 @@ TEST(SinkQueue, WorkerRemovedAndDestroyedBeforeItsWake)
         auto channel = LogChannel::create("owed_wake");
         channel->registerValue("value", &value);
         channel->startLogging();
-        const auto pause = [](std::chrono::microseconds length) {
-          const auto until = std::chrono::steady_clock::now() + length;
-          while(std::chrono::steady_clock::now() < until)
-          {
-          }
-        };
         std::atomic<bool> done{ false };
         std::atomic<uint64_t> accepted{ 0 };
         std::thread producer([&] {
           for(int n = 0; !done; ++n)
           {
-            pause(std::chrono::microseconds(n % 40));
+            spinFor(std::chrono::microseconds(n % 40));
             accepted += channel->tryTakeSnapshot() == SnapshotResult::ok ? 1 : 0;
           }
         });
@@ -1134,12 +1137,70 @@ TEST(SinkQueue, WorkerRemovedAndDestroyedBeforeItsWake)
         {
           auto worker = attach<QueueSink>(Delivery::Threaded);
           channel->addDataSink(worker);
-          pause(std::chrono::microseconds(round % 100));
+          spinFor(std::chrono::microseconds(round % 100));
           channel->removeDataSink(worker);
         }  // the last reference to each worker is dropped here
         done = true;
         producer.join();
         EXPECT_GT(accepted.load(), 0u);
+      },
+      std::chrono::seconds(60));
+}
+
+// WorkerRemovedAndDestroyedBeforeItsWake with the last reference dropped by a drain()
+// callback: ~SinkWorker() leaves the stop to a thread of its own and the SinkWorker is
+// gone at once, while a snapshot can still owe its worker the wake. Seven sleeping
+// workers in the lower slots are woken first, which gives the drain time to win the
+// race. A wake through the dead SinkWorker crashes or shows under the sanitizers, and a
+// lost one hangs.
+TEST(SinkQueue, WorkerReleasedByADrainCallbackBeforeItsWake)
+{
+  DataTamerTest::expectFinishes(
+      [] {
+        uint64_t value = 0;
+        auto channel = LogChannel::create("owed_wake_drain");
+        channel->registerValue("value", &value);
+        channel->startLogging();
+        // addDataSink() takes the highest free slot: keep the last one for the rounds.
+        auto placeholder = queueSink();
+        channel->addDataSink(placeholder);
+        std::vector<Attached<QueueSink>> sleepers;
+        for(size_t i = 1; i < LogChannel::kMaxSinks; ++i)
+        {
+          sleepers.push_back(queueSink(Delivery::Threaded));
+          channel->addDataSink(sleepers.back());
+        }
+        channel->removeDataSink(placeholder);
+        std::atomic<bool> done{ false };
+        std::thread producer([&] {
+          for(int n = 0; !done; ++n)
+          {
+            spinFor(std::chrono::microseconds(25 + n % 40));  // the workers fall asleep
+            (void)channel->tryTakeSnapshot();
+          }
+        });
+        const auto drainer = std::this_thread::get_id();
+        int released_by_callback = 0;
+        for(int round = 0; round < 1000; ++round)
+        {
+          std::shared_ptr<SinkWorker> last =
+              std::make_shared<SinkWorker>(std::make_unique<QueueSink>());
+          SinkWorker* worker = last.get();
+          worker->as<QueueSink>().callback = [&last, drainer](const SnapshotRef&) {
+            if(std::this_thread::get_id() == drainer)
+            {
+              last.reset();
+            }
+          };
+          channel->addDataSink(last);
+          spinFor(std::chrono::microseconds(round % 100));
+          channel->removeDataSink(last);
+          worker->drain();  // a snapshot still queued drops `last`
+          released_by_callback += last ? 0 : 1;
+        }
+        done = true;
+        producer.join();
+        EXPECT_GT(released_by_callback, 0);
       },
       std::chrono::seconds(60));
 }

@@ -318,9 +318,11 @@ struct LogChannel::Pimpl
   // The workers whose sleep a snapshot's pushes took (SinkWorker::Push::wake_owed).
   // Declared before the snapshot's write lock and epoch guard, so destroyed after
   // them: the futex calls are made with the write mutex released, and writers do not
-  // wait for them. Without the epoch a worker can be removed meanwhile, but it sleeps
-  // until its wake and its stop() and destructor join it, so it is not freed before
-  // wake() has let it go (see WorkerWake::release()).
+  // wait for them. Without the epoch a worker can be removed meanwhile, and a callback
+  // that drops its last reference frees the SinkWorker at once (~SinkWorker() leaves
+  // the stop to another thread). So each entry is the worker's Pimpl, taken inside the
+  // epoch: both destructor paths free it only after joining the worker thread, which
+  // sleeps until its wake (see WorkerWake::release()).
   struct OwedWakes
   {
     OwedWakes() = default;
@@ -330,10 +332,10 @@ struct LogChannel::Pimpl
     {
       for(size_t i = 0; i < count; ++i)
       {
-        workers[i]->wake();
+        SinkWorker::wake(*workers[i]);
       }
     }
-    std::array<SinkWorker*, kMaxSinks> workers;
+    std::array<SinkWorker::Pimpl*, kMaxSinks> workers;
     size_t count = 0;
   };
 
@@ -1115,7 +1117,7 @@ SnapshotResult LogChannel::takeSnapshotImpl(std::chrono::nanoseconds timestamp,
     ++accepted;
     if(push == SinkWorker::Push::wake_owed)
     {
-      wakes.workers[wakes.count++] = link->sink.get();
+      wakes.workers[wakes.count++] = link->sink->wakeTarget();
     }
   }
   if(accepted == 0)

@@ -240,13 +240,16 @@ private:
   /// a sleeping worker is left to wake(), so that the caller makes it after releasing
   /// its own locks.
   Push tryPush(Attachment& attachment, SnapshotRef&& snapshot);
-  /// Wakes the worker after a push that returned Push::wake_owed: one futex call. Until
-  /// then the worker sleeps, and its stop() and destructor wait.
-  void wake() noexcept;
   /// Serialized with onSnapshot(); exceptions from onSchema() propagate.
   void addSchema(const Schema& schema);
 
   struct Pimpl;  // holds the sink too: the layout is one pointer
+  /// Wakes the worker after a push that returned Push::wake_owed: one futex call. Takes
+  /// the Pimpl, read with wakeTarget() while this object was alive: a callback can drop
+  /// the last reference before the wake, but the Pimpl lives until the worker thread is
+  /// joined, and that thread sleeps until the wake.
+  static void wake(Pimpl& target) noexcept;
+  [[nodiscard]] Pimpl* wakeTarget() noexcept { return _p.get(); }
   std::unique_ptr<Pimpl> _p;
 };
 
