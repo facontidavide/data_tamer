@@ -850,8 +850,9 @@ inline bool ReadHeaderValue(const std::string& line, const char* prefix,
   return true;
 }
 
-/// The array size of the type spec `spec`, whose '[' is at `open`: 0 for "[]" (a dynamic
-/// vector), N for "[N]". `line` is the field line, for the error messages.
+/// The array size of the type spec `spec`, whose '[' is at `open` and whose ']' ends it:
+/// 0 for "[]" (a dynamic vector), N for "[N]". `line` is the field line, for the error
+/// messages.
 inline uint32_t ParseArraySize(const std::string& spec, size_t open,
                                const std::string& line)
 {
@@ -859,6 +860,10 @@ inline uint32_t ParseArraySize(const std::string& spec, size_t open,
   if(close == std::string::npos)
   {
     throw std::runtime_error("Unterminated array size in: " + line);
+  }
+  if(close + 1 != spec.size())
+  {
+    throw std::runtime_error("Unexpected text after the array size in: " + line);
   }
   if(close == open + 1)
   {
@@ -921,6 +926,10 @@ inline TypeField ParseFieldLine(const std::string& line, bool legacy)
   }
 
   const auto open = type_spec->find_first_of(" [");
+  if(type_spec->empty() || open == 0)
+  {
+    throw std::runtime_error("Empty type name in: " + line);
+  }
   field.type_name = field.type != BasicType::OTHER ?
                         names[static_cast<size_t>(field.type)] :
                         type_spec->substr(0, open);
@@ -1054,6 +1063,10 @@ inline TypeField ParseFieldLine(const std::string& line, bool legacy)
       section_starts = true;
       field_vector = &schema.custom_types[section_name];
       continue;
+    }
+    if(line.rfind("MSG: ", 0) == 0)
+    {
+      throw std::runtime_error("\"MSG: \" not right after a separator, in: " + line);
     }
 
     if(line.rfind("ENCODING: ", 0) == 0)

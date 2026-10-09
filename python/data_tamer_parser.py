@@ -40,6 +40,7 @@ _READABLE_VERSIONS = (4, 5)  # 4 differs only in how its hash was computed
 # the reader accepts _MIN_SEPARATOR_WIDTH or more.
 _SEPARATOR_WIDTH = 59
 _MIN_SEPARATOR_WIDTH = 30
+_TRIM = " \r"  # all a line or a value loses at its ends (spec section 2): a tab stays
 
 # Basic type name -> little-endian struct; the order is the BasicType id order.
 _STRUCT = {
@@ -122,7 +123,7 @@ def _parse_type_spec(spec: str, name: str) -> Field:
 
 def _parse_field_line(line: str) -> Field:
     type_part, _, name = line.partition(" ")
-    name = name.strip()
+    name = name.strip(_TRIM)
     if not name:
         raise ValueError(f"field line without a name: {line!r}")
     return _parse_type_spec(type_part, name)
@@ -166,11 +167,12 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
     seen_line = False
     previous = ""  # the last non-blank line: "separator", "MSG" or "" for any other
     for index, raw in enumerate(lines):
-        line = raw.strip()
+        line = raw.strip(_TRIM)
         if not line:
             continue
         seen_line = True
-        if previous == "separator" and not line.startswith("MSG: "):
+        after_separator = previous == "separator"
+        if after_separator and not line.startswith("MSG: "):
             raise ValueError(f'expected "MSG: <type name>" after a separator, got {line!r}')
         opens_section = previous == "MSG"
         previous = ""
@@ -178,7 +180,7 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             previous = "separator"
             continue
         key, colon, value = line.partition(":")  # a header is "### key: value"
-        value = value.strip()
+        value = value.strip(_TRIM)
         if colon and key == "### version":
             if _parse_uint(value, "version") not in _READABLE_VERSIONS:
                 raise ValueError(f"unsupported schema version in {line!r}")
@@ -187,7 +189,9 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
         elif colon and key == "### channel_name":
             schema.channel_name = value
         elif line.startswith("MSG: "):
-            last_type = line[5:].strip()
+            if not after_separator:
+                raise ValueError(f'"MSG: " not right after a separator, in {line!r}')
+            last_type = line[5:].strip(_TRIM)
             target = schema.custom_types.setdefault(last_type, [])
             previous = "MSG"
         elif line.startswith("ENCODING: "):
@@ -196,7 +200,7 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
             if not opens_section:
                 raise ValueError(f"ENCODING: outside the start of a section, in {line!r}")
             foreign = "\n".join(lines[index + 1:])
-            schema.custom_schemas[last_type] = (line[10:].strip(), foreign.removesuffix("\n"))
+            schema.custom_schemas[last_type] = (line[10:].strip(_TRIM), foreign.removesuffix("\n"))
             del schema.custom_types[last_type]
             break
         else:
@@ -212,7 +216,7 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
 
 def _first_line(text: str) -> str:
     for raw in text.split("\n"):
-        line = raw.strip(" \r")
+        line = raw.strip(_TRIM)
         if line and not line.startswith("#"):
             return line
     return ""

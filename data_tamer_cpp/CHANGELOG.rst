@@ -112,6 +112,11 @@ Unreleased
   after leaving its epoch, freed meanwhile if a ``drain()`` callback had dropped the
   last reference (a crash, or heap-use-after-free under AddressSanitizer). The wake
   goes through the worker's state, which lives until the worker thread is joined.
+* **Parser and Python decoder**: the C++ parser rejects a type spec without a type name
+  (``[3] x``) or with text after its ``]`` (``float64[3]x y``), as Python did. Both
+  reject a ``MSG:`` line that does not follow a separator (C++ read it as a field,
+  Python opened a section). Python trims only spaces and ``\r``, as the specification
+  says, so both reject ``### hash:<tab>7``.
 * **ABI**: one new private exported function, ``LogChannel::registerValueWithTypes``.
 * **Counters in one struct per channel and one per sink**:
   ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and

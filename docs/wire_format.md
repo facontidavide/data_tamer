@@ -81,8 +81,9 @@ recorded.
 ## 2. Schema text
 
 The schema is UTF-8 text, one item per line, `\n` terminated. Decoders must
-trim spaces and `\r` at both ends of a line and skip empty lines. A text without
-any line is not a schema and is rejected.
+trim spaces and `\r` at both ends of a line and skip empty lines. Trimming, here
+and below, removes nothing else: a tab is content. A text without any line is not
+a schema and is rejected.
 
 ```
 ### version: 5
@@ -127,16 +128,18 @@ the colon of `### key:`, trimmed; the space after the colon is optional
    reject them, although names built with `DataTamer::JoinNames()` have none. `type-spec`
    is a basic type name or a custom type name (not empty, no whitespace or control
    character), optionally followed by `[]`
-   (dynamic vector) or `[N]` (fixed array, decimal N, 1 to 65535). Top-level field order is the mask bit order and the payload
+   (dynamic vector) or `[N]` (fixed array, decimal N, 1 to 65535), and nothing
+   follows the `]`. Top-level field order is the mask bit order and the payload
    order.
 5. Zero or more **custom type sections**. Each starts with a line that consists
    only of `=` characters (at least 30; the writer emits 59; a field line that
    merely contains such a run is not a separator), then, after any blank lines,
    `MSG: <TypeName>`,
-   then field lines with the same grammar as above. Sections are emitted sorted
-   by type name; decoders must not depend on that, since a type may reference
-   another type declared later in the text. Nested fields are not individually
-   maskable.
+   then field lines with the same grammar as above. A `MSG:` line anywhere else
+   is malformed, unless an opaque body (item 6) holds it. Sections are emitted
+   sorted by type name; decoders must not depend on that, since a type may
+   reference another type declared later in the text. Nested fields are not
+   individually maskable.
 6. Optionally, **one opaque custom encoding**: a section whose `MSG:` line is
    followed by `ENCODING: <name>` and then the foreign schema text. The writer
    emits it after every ordinary section and it owns the rest of the text,

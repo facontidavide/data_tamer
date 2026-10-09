@@ -136,6 +136,15 @@ class SchemaHeaders(unittest.TestCase):
                 self.assertEqual((schema.hash, schema.channel_name, len(schema.fields)),
                                  (0, "c", 1))
 
+    def test_only_spaces_and_carriage_returns_are_trimmed(self):
+        # a tab or a no-break space is content: the hash is no number, and the line after
+        # the separator does not start with "MSG: "
+        hash_line = "### version: 5\n### hash:"
+        for text in (hash_line + "\t7\n", hash_line + " 7\t\n", hash_line + " \u00a07\n",
+                     HEADER + f"Pose p\n{SEPARATOR}\n\tMSG: Pose\nfloat64 x\n"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                dt.parse_schema(text)
+
 
 class SchemaNumbers(unittest.TestCase):
     TAIL = "### channel_name: c\n\nfloat64 x\n"
@@ -149,6 +158,18 @@ class SchemaNumbers(unittest.TestCase):
                 dt.parse_schema(f"### version: {bad}\n### hash: 1\n" + self.TAIL)
         largest = dt.parse_schema("### version: 5\n### hash: 18446744073709551615\n" + self.TAIL)
         self.assertEqual(largest.hash, 2**64 - 1)
+
+
+class FieldLines(unittest.TestCase):
+    def test_type_spec_without_a_type_name_is_rejected(self):
+        for line in ("[3] x", "[] x"):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                dt.parse_schema(HEADER + line + "\n")
+
+    def test_type_spec_with_text_after_its_closing_bracket_is_rejected(self):
+        for line in ("float64[3]x y", "float64[3][4] y", "Pose[]] p"):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                dt.parse_schema(HEADER + line + "\n")
 
 
 class CustomTypeSections(unittest.TestCase):
@@ -179,6 +200,14 @@ class CustomTypeSections(unittest.TestCase):
         for after in ("float64 x\n", "MSG:\n", ""):
             with self.subTest(after=after), self.assertRaises(ValueError):
                 dt.parse_schema(HEADER + f"Pose p\n{SEPARATOR}\n{after}")
+
+    def test_type_name_line_without_a_separator_is_rejected(self):
+        # "MSG: " opens a section only right after a separator, and is no field line
+        section = f"{SEPARATOR}\nMSG: Pose\nfloat64 x\n"
+        for text in (HEADER + "Pose p\nMSG: Pose\nfloat64 x\n",
+                     HEADER + "Pose p\n" + section + "MSG: Point\nint8 y\n"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                dt.parse_schema(text)
 
 
 class OpaqueSections(unittest.TestCase):

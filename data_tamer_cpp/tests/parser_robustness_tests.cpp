@@ -387,6 +387,38 @@ TEST(ParserRobustness, VersionAndHashMustBeUnsignedDecimals)
   EXPECT_EQ(largest.hash, UINT64_MAX);
 }
 
+TEST(ParserRobustness, OnlySpacesAndCarriageReturnsAreTrimmed)
+{
+  // a tab or a no-break space is content: the hash is no number, and the line after
+  // the separator does not start with "MSG: "
+  const std::string hash = "### version: 5\n### hash:";
+  const std::string no_break_space = "\xc2\xa0";
+  for(const std::string& text :
+      { hash + "\t7\n", hash + " 7\t\n", hash + " " + no_break_space + "7\n",
+        kHeader + "Pose p\n" + kSeparator + "\n\tMSG: Pose\nfloat64 x\n" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << text;
+  }
+}
+
+// Schema text: field lines
+
+TEST(ParserRobustness, TypeSpecWithoutATypeNameIsRejected)
+{
+  for(const char* line : { "[3] x", "[] x" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(kHeader + line + "\n"), std::runtime_error) << line;
+  }
+}
+
+TEST(ParserRobustness, TypeSpecWithTextAfterItsClosingBracketIsRejected)
+{
+  for(const char* line : { "float64[3]x y", "float64[3][4] y", "Pose[]] p" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(kHeader + line + "\n"), std::runtime_error) << line;
+  }
+}
+
 // Schema text: custom type sections
 
 TEST(ParserRobustness, SeparatorIsALineOfAtLeast30EqualSigns)
@@ -437,6 +469,18 @@ TEST(ParserRobustness, SeparatorNotFollowedByATypeNameIsRejected)
     EXPECT_THROW(BuildSchemaFromText(kHeader + "Pose p\n" + kSeparator + "\n" + after),
                  std::runtime_error)
         << "[" << after << "]";
+  }
+}
+
+TEST(ParserRobustness, TypeNameLineWithoutASeparatorIsRejected)
+{
+  // "MSG: " opens a section only right after a separator, and is no field line
+  const std::string section = kSeparator + "\nMSG: Pose\nfloat64 x\n";
+  for(const std::string& text :
+      { kHeader + "Pose p\nMSG: Pose\nfloat64 x\n",
+        kHeader + "Pose p\n" + section + "MSG: Point\nint8 y\n" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << text;
   }
 }
 
