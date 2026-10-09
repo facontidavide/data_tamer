@@ -175,6 +175,10 @@ Where `takeSnapshot()` would wait for a writer or grow a slot, `tryTakeSnapshot(
 and returns `blocked` or `oversize`. It reports every failure as a `SnapshotResult` and
 doesn't throw. Several threads may take snapshots of one channel: they take turns on its
 write mutex, and `tryTakeSnapshot()` returns `blocked` while another snapshot holds it.
+If data_tamer is loaded with `dlopen()`, in a plugin for example, open one
+`scopedWrite()` on each real-time thread before its loop: a snapshot that finds the
+write mutex held reads thread-local state, whose first access on a thread can then
+allocate.
 
 The pool has 64 slots by default, which is 64 ms at 1 kHz. If a sink stalls longer than
 that (a disk flush can take 200 ms), new snapshots are dropped with `pool_exhausted`.

@@ -125,7 +125,11 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   priority-inheriting mutex is then a `FUTEX_UNLOCK_PI` call), or a sink's worker
   sleeps: that wake comes after the write mutex is released
   (`SinkWorker::Push::wake_owed`). `WriteMutex::try_lock()`, `unlock()` and
-  `tryLockWithSpin()` are `noexcept`.
+  `tryLockWithSpin()` are `noexcept`. When the library is loaded with `dlopen()`, the
+  thread-local that a snapshot reads after a failed `try_lock()`
+  (`inTransactionOnThisThread()`) is dynamic TLS, whose first access on a thread can
+  allocate: the manuals tell users to open one `scopedWrite()` on each real-time
+  thread during setup.
 - `onSchema()`/`onSnapshot()`/`onStop()`/`onStart()` are serialized by the SinkWorker,
   and control operations (registration, sinks, `startLogging()`) wait for them. Never call a
   control operation from a sink callback or a serializer; inside `scopedWrite()` they are
