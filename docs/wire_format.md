@@ -187,9 +187,11 @@ types:
     stamp: uint32
 ```
 
-Decoders tell the renderings apart by their first non-empty line: the line
-format starts with `### version:`, YAML with `version:` (a YAML text may be
-preceded by `#` comment lines that do not start with `###`).
+Decoders tell the renderings apart by the first non-empty line that is not a
+`#` comment, a comment being a line that starts with `#` but not with `###`: the
+text is YAML if that line starts with `version:`, and the line format otherwise.
+The line format starts with `### version:`, and a text whose first such line
+starts with `###` is the line format, whatever follows it.
 
 Content:
 

@@ -149,6 +149,16 @@ class SchemaHeaders(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 dt.parse_schema(text)
 
+    def test_text_whose_first_line_starts_with_three_hashes_is_the_line_format(self):
+        # only "#" comment lines that do not start with "###" may come before "version:"
+        yaml = "version: 6\nhash: 1\nchannel_name: c\nfields:\n  x: int8\n"
+        self.assertEqual(dt.parse_schema("# comment\n" + yaml).fields,
+                         [dt.Field("x", "int8")])
+        # as the line format, "fields:" is no field line
+        for head in ("### note\n", "### version: 6\n", "\n  ### note\n"):
+            with self.subTest(head=head), self.assertRaises(ValueError):
+                dt.parse_schema(head + yaml)
+
 
 class SchemaNumbers(unittest.TestCase):
     TAIL = "### channel_name: c\n\nfloat64 x\n"

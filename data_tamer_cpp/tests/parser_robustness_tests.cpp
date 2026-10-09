@@ -365,6 +365,18 @@ TEST(ParserRobustness, LineThatOnlyLooksLikeAHeaderIsAFieldLine)
   }
 }
 
+TEST(ParserRobustness, TextWhoseFirstLineStartsWithThreeHashesIsTheLineFormat)
+{
+  // only "#" comment lines that do not start with "###" may come before "version:"
+  const std::string yaml = "version: 6\nhash: 1\nchannel_name: c\nfields:\n  x: int8\n";
+  EXPECT_EQ(BuildSchemaFromText("# comment\n" + yaml).fields.size(), 1u);
+  // as the line format, "fields:" is no field line
+  for(const char* head : { "### note\n", "### version: 6\n", "\n  ### note\n" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(head + yaml), std::runtime_error) << head;
+  }
+}
+
 TEST(ParserRobustness, LegacyTextWithoutAnyHeaderIsStillRead)
 {
   const auto schema = BuildSchemaFromText("float64 x\nint8[3] y\n");

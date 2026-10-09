@@ -223,9 +223,11 @@ def parse_schema(text: str, verify_hash: bool = False) -> Schema:
 
 
 def _first_line(text: str) -> str:
+    """The first line that is not blank or a YAML comment. A line that starts with "###"
+    is a header of the line format, not a comment (spec section 2.1)."""
     for raw in text.split("\n"):
         line = raw.strip(_TRIM)
-        if line and not line.startswith("#"):
+        if line and (not line.startswith("#") or line.startswith("###")):
             return line
     return ""
 

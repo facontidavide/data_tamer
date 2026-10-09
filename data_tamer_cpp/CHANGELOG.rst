@@ -117,7 +117,9 @@ Unreleased
   reject a ``MSG:`` line that does not follow a separator (C++ read it as a field,
   Python opened a section). Python trims only spaces and ``\r``, as the specification
   says, so both reject ``### hash:<tab>7``. Both reject a field name that holds
-  whitespace or a control character, in either rendering.
+  whitespace or a control character, in either rendering. Python reads a text whose
+  first line starts with ``###`` as the line format, as C++ does, even when YAML
+  follows.
 * **Fixed**: one type name for a ``TypeDefinition`` type and a ``registerCustomValue()``
   serializer of the same channel made the schema describe the serializer's values with
   the type's fields, or hold two sections of that name. The registration that comes
