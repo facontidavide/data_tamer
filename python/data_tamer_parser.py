@@ -121,11 +121,19 @@ def _parse_type_spec(spec: str, name: str) -> Field:
     return Field(name, type_name, True, int(inner) if inner else 0)
 
 
+def _valid_name(name: str) -> bool:
+    """A field name is not empty and holds no character up to the space and no DEL
+    (spec section 2); characters above 0x7f are fine."""
+    return bool(name) and all(c > " " and c != "\x7f" for c in name)
+
+
 def _parse_field_line(line: str) -> Field:
     type_part, _, name = line.partition(" ")
     name = name.strip(_TRIM)
     if not name:
         raise ValueError(f"field line without a name: {line!r}")
+    if not _valid_name(name):
+        raise ValueError(f"invalid field name in {line!r}")
     return _parse_type_spec(type_part, name)
 
 
@@ -360,7 +368,10 @@ def _parse_yaml_tree(text: str) -> list:
 def _flatten(nodes: list, prefix: str, out: list[Field]) -> None:
     for key, value, children in nodes:
         if children is None:
-            out.append(_parse_type_spec(value, prefix + key))
+            name = prefix + key
+            if not _valid_name(name):
+                raise ValueError(f"YAML schema: invalid field name {name!r}")
+            out.append(_parse_type_spec(value, name))
         else:
             _flatten(children, prefix + key + "/", out)
 

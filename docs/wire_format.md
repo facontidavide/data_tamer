@@ -123,7 +123,9 @@ the colon of `### key:`, trimmed; the space after the colon is optional
    character.
 4. Zero or more **field lines**: `<type-spec> <name>`. Exactly one space
    separates the two; the name is everything after it (trimmed). A name is not
-   empty and contains no whitespace or control character. It may have empty
+   empty and contains no whitespace or control character: no byte up to 0x20,
+   the space included, and no 0x7F (bytes above 0x7F, as in UTF-8, are fine).
+   Decoders reject a text with any other name. It may have empty
    `/`-separated components (leading, trailing or repeated `/`): writers do not
    reject them, although names built with `DataTamer::JoinNames()` have none. `type-spec`
    is a basic type name or a custom type name (not empty, no whitespace or control
@@ -206,7 +208,9 @@ An entry `key: <type-spec>` is a field; `type-spec` is as in section 2. An entry
 `key:` followed by more-indented entries is a group: the name of every field
 inside is `key/` + its name in the group, recursively, so a field's name is the
 path of keys from `fields` (or from its type) joined with `/`. A key may itself
-contain `/`. An empty mapping is written `{}`.
+contain `/`. Names follow section 2, so a key that puts whitespace or a control
+character into a name (`"a b"`, `"a\tb"`) is malformed. An empty mapping is
+written `{}`.
 
 The writer nests a run of **two or more consecutive** fields whose names share
 the first path segment, unless that segment is already a key of the same

@@ -347,15 +347,21 @@ TEST(ParserRobustness, HeaderValueMayFollowTheColonDirectly)
 
 TEST(ParserRobustness, LineThatOnlyLooksLikeAHeaderIsAFieldLine)
 {
-  // the key must match exactly and the colon must follow it directly
+  // the key must match exactly and the colon must follow it directly: a near miss is a
+  // field line, and a malformed one when its name holds a space
   for(const char* near_miss :
-      { "### hash 7", "### hashes: 7", "###hash: 7", "### Hash: 7", "### hash : 7",
-        "### channel_name", "### version" })
+      { "###hash: 7", "### hashes:7", "### Hash:7", "### channel_name", "### version" })
   {
     const auto schema = BuildSchemaFromText(kHeader + near_miss + "\n");
     EXPECT_EQ(schema.hash, 1u) << near_miss;
     EXPECT_EQ(schema.channel_name, "c") << near_miss;
     EXPECT_EQ(schema.fields.size(), 1u) << near_miss;
+  }
+  for(const char* near_miss :
+      { "### hash 7", "### hashes: 7", "### Hash: 7", "### hash : 7" })
+  {
+    EXPECT_THROW(BuildSchemaFromText(kHeader + near_miss + "\n"), std::runtime_error)
+        << near_miss;
   }
 }
 
@@ -417,6 +423,31 @@ TEST(ParserRobustness, TypeSpecWithTextAfterItsClosingBracketIsRejected)
   {
     EXPECT_THROW(BuildSchemaFromText(kHeader + line + "\n"), std::runtime_error) << line;
   }
+}
+
+TEST(ParserRobustness, FieldNameWithWhitespaceOrAControlCharacterIsRejected)
+{
+  // No byte up to the space and no 0x7f, in both renderings and in a type section. YAML
+  // writes them as escapes in a quoted key, of a field or of a group. Octal escapes:
+  // \001 is 0x01, \177 is 0x7f.
+  const std::string yaml = "version: 6\nhash: 1\nchannel_name: c\nfields:\n  \"";
+  const std::vector<std::pair<std::string, std::string>> names = {
+    { "a b", "a b" },        { "a\tb", "a\\tb" },     { "a\rb", "a\\rb" },
+    { "a\001b", "a\\x01b" }, { "a\177b", "a\\x7fb" },
+  };
+  for(const auto& [name, escaped] : names)
+  {
+    for(const std::string& text :
+        { kHeader + "float64 " + name + "\n",
+          kHeader + "Pose p\n" + kSeparator + "\nMSG: Pose\nfloat64 " + name + "\n",
+          yaml + escaped + "\": float64\n", yaml + escaped + "\":\n    x: float64\n" })
+    {
+      EXPECT_THROW(BuildSchemaFromText(text), std::runtime_error) << escaped;
+    }
+  }
+  // Bytes above 0x7f, as in UTF-8, are fine.
+  const auto schema = BuildSchemaFromText(kHeader + "float64 temp\xc3\xa9rature\n");
+  EXPECT_EQ(schema.fields.at(0).field_name, "temp\xc3\xa9rature");
 }
 
 // Schema text: custom type sections

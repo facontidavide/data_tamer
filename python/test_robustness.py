@@ -128,13 +128,17 @@ class SchemaHeaders(unittest.TestCase):
 
 
     def test_line_that_only_looks_like_a_header_is_a_field_line(self):
-        # the key must match exactly and the colon must follow it directly
-        for near_miss in ("### hash 7", "### hashes: 7", "###hash: 7", "### Hash: 7",
-                          "### hash : 7", "### channel_name", "### version"):
+        # the key must match exactly and the colon must follow it directly: a near miss is
+        # a field line, and a malformed one when its name holds a space
+        for near_miss in ("###hash: 7", "### hashes:7", "### Hash:7", "### channel_name",
+                          "### version"):
             with self.subTest(near_miss=near_miss):
                 schema = dt.parse_schema(HEADER + near_miss + "\n")
                 self.assertEqual((schema.hash, schema.channel_name, len(schema.fields)),
                                  (0, "c", 1))
+        for near_miss in ("### hash 7", "### hashes: 7", "### Hash: 7", "### hash : 7"):
+            with self.subTest(near_miss=near_miss), self.assertRaises(ValueError):
+                dt.parse_schema(HEADER + near_miss + "\n")
 
     def test_only_spaces_and_carriage_returns_are_trimmed(self):
         # a tab or a no-break space is content: the hash is no number, and the line after
@@ -170,6 +174,22 @@ class FieldLines(unittest.TestCase):
         for line in ("float64[3]x y", "float64[3][4] y", "Pose[]] p"):
             with self.subTest(line=line), self.assertRaises(ValueError):
                 dt.parse_schema(HEADER + line + "\n")
+
+    def test_field_name_with_whitespace_or_a_control_character_is_rejected(self):
+        # No character up to the space and no DEL, in both renderings and in a type
+        # section. YAML writes them as escapes in a quoted key, of a field or of a group.
+        yaml = 'version: 6\nhash: 1\nchannel_name: c\nfields:\n  "'
+        for name, escaped in (("a b", "a b"), ("a\tb", "a\\tb"), ("a\rb", "a\\rb"),
+                              ("a\x01b", "a\\x01b"), ("a\x7fb", "a\\x7fb")):
+            for text in (HEADER + f"float64 {name}\n",
+                         HEADER + f"Pose p\n{SEPARATOR}\nMSG: Pose\nfloat64 {name}\n",
+                         yaml + escaped + '": float64\n',
+                         yaml + escaped + '":\n    x: float64\n'):
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    dt.parse_schema(text)
+        # Characters above 0x7f are fine.
+        schema = dt.parse_schema(HEADER + "float64 temp\u00e9rature\n")
+        self.assertEqual(schema.fields[0].field_name, "temp\u00e9rature")
 
 
 class CustomTypeSections(unittest.TestCase):

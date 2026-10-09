@@ -735,6 +735,16 @@ inline TypeField ParseYamlTypeSpec(const std::string& spec)
   return field;
 }
 
+/// True if `name` can name a field (docs/wire_format.md section 2): not empty, and no
+/// byte up to the space or 0x7f. Bytes above 0x7f, as in UTF-8, are fine.
+inline bool IsValidFieldName(std::string_view name)
+{
+  return !name.empty() && std::none_of(name.begin(), name.end(), [](char c) {
+    const auto byte = static_cast<unsigned char>(c);
+    return byte <= 0x20 || byte == 0x7f;
+  });
+}
+
 inline void FlattenYamlFields(const std::vector<YamlNode>& nodes,
                               const std::string& prefix, FieldsVector& out)
 {
@@ -744,6 +754,11 @@ inline void FlattenYamlFields(const std::vector<YamlNode>& nodes,
     {
       TypeField field = ParseYamlTypeSpec(*node.scalar);
       field.field_name = prefix + node.key;
+      if(!IsValidFieldName(field.field_name))
+      {
+        throw std::runtime_error("DataTamerParser: YAML schema: invalid field name " +
+                                 field.field_name);
+      }
       out.push_back(std::move(field));
     }
     else
@@ -937,6 +952,10 @@ inline TypeField ParseFieldLine(const std::string& line, bool legacy)
   {
     field.is_vector = true;
     field.array_size = ParseArraySize(*type_spec, open, line);
+  }
+  if(!IsValidFieldName(*name))
+  {
+    throw std::runtime_error("Invalid field name in: " + line);
   }
   field.field_name = std::move(*name);
   return field;

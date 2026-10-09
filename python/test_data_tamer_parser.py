@@ -161,11 +161,11 @@ class YamlSchema(unittest.TestCase):
 
     def test_quoted_scalars_and_opaque_types(self):
         text = ('version: 6\nhash: 0\nchannel_name: "a \\"b\\""\nfields:\n'
-                '  "x y":\n    "1": "Blob[2]"\n'
+                '  "x+y":\n    "1": "Blob[2]"\n'
                 'opaque_types:\n  Blob:\n    encoding: proto\n    schema: "l1\\n\\tl2\\x01\\u00e9"\n')
         schema = dt.parse_schema(text)
         self.assertEqual(schema.channel_name, 'a "b"')
-        self.assertEqual(schema.fields, [dt.Field("x y/1", "Blob", True, 2)])
+        self.assertEqual(schema.fields, [dt.Field("x+y/1", "Blob", True, 2)])
         self.assertEqual(schema.custom_schemas, {"Blob": ("proto", "l1\n\tl2\x01\u00e9")})
 
     def test_rejects_malformed_yaml(self):
