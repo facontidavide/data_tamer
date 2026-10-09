@@ -121,7 +121,9 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
   block and grow a slot; keep the two variants distinct. The real-time path makes no
   futex call unless a control operation or a `stop()` registered as waiting
   (`details::WaiterCount` in `src/waiter_count.hpp`, `tests/rt_syscall_tests.cpp`),
-  or a sink's worker sleeps: that wake comes after the write mutex is released
+  a writer is blocked on the write mutex in `scopedWrite()` or a guard (releasing the
+  priority-inheriting mutex is then a `FUTEX_UNLOCK_PI` call), or a sink's worker
+  sleeps: that wake comes after the write mutex is released
   (`SinkWorker::Push::wake_owed`). `WriteMutex::try_lock()`, `unlock()` and
   `tryLockWithSpin()` are `noexcept`.
 - `onSchema()`/`onSnapshot()`/`onStop()`/`onStart()` are serialized by the SinkWorker,

@@ -236,9 +236,10 @@ private:
     queued,    ///< the worker runs or polls, and finds the snapshot
     wake_owed  ///< queued, and the worker sleeps: the caller must call wake() once
   };
-  /// Real-time path: no allocation, no lock, no system call. The futex call that wakes
-  /// a sleeping worker is left to wake(), so that the caller makes it after releasing
-  /// its own locks.
+  /// Real-time path: no allocation, no lock, and no system call unless a stop() waits.
+  /// The futex call that wakes a sleeping worker is left to wake(), so that the caller
+  /// makes it after releasing its own locks. That release is a futex call too while a
+  /// writer is blocked on the channel's write mutex (FUTEX_UNLOCK_PI).
   Push tryPush(Attachment& attachment, SnapshotRef&& snapshot);
   /// Serialized with onSnapshot(); exceptions from onSchema() propagate.
   void addSchema(const Schema& schema);

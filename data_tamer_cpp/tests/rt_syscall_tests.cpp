@@ -81,7 +81,8 @@ bool trapFutexOnThisThread()
 
 // Threads blocked in std::atomic::wait() elsewhere in the process (a std::latch,
 // another library) must not turn tryTakeSnapshot() into a system call: with no
-// controller waiting for the snapshot and no stop() waiting for the push, the
+// controller waiting for the snapshot, no stop() waiting for the push and no writer
+// blocked on the write mutex (its release is then a FUTEX_UNLOCK_PI call), the
 // snapshot path makes no futex call, whether the worker runs or is stopped.
 TEST(RealTimeSyscalls, TryTakeSnapshotMakesNoFutexCallWhileOtherThreadsWait)
 {
