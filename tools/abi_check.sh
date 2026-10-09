@@ -163,7 +163,8 @@ nm -D --defined-only "$lib_old" | awk '$2 !~ /^[WwVvu]$/ { print $3 }' | sort -u
 # changed layout, e.g. a field added to an options struct that is passed by value,
 # comes out as "Changed" with status 4, which also stands for harmless additions. The
 # policy freezes layouts too, so this counts the functions and variables abidiff
-# reports as changed and, for the library, the removed ones that were strong
+# reports as changed (except the weak std:: copies, see abi_suppressions.ini) and,
+# for the library, the removed ones that were strong
 # symbols of the baseline (including vtable and typeinfo symbols that have no debug
 # info, listed as "[D] _ZTV...").
 broken=0
@@ -172,6 +173,7 @@ compare() {  # $1: label, $2: old file, $3: new file, $4: also count removed sym
   echo "---- abidiff: $1"
   set +e
   abidiff --drop-private-types --fail-no-debug-info --ignore-soname \
+    --suppressions "$here/abi_suppressions.ini" \
     --headers-dir1 "$work/headers_baseline" --headers-dir2 "$work/headers_current" \
     "$2" "$3" | tee "$out"
   rc=${PIPESTATUS[0]}

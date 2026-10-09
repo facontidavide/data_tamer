@@ -277,7 +277,9 @@ tools/abi_check.sh --baseline-dir /path/to/exported/tree
 The script builds both sides (plain CMake, shared, Debug, no ROS) in a temporary
 directory and prints the abidiff report. A removed function counts only if the baseline
 library defined it strongly: the weak copies of `std::` and other inline functions
-that the library exports are not API. A change to `tools/abi_probe.cpp` that uses new
+that the library exports are not API. Changes of the `std::` and `__gnu_cxx::` copies
+(a Pimpl built with `make_shared` that grew) are suppressed by
+`tools/abi_suppressions.ini`. A change to `tools/abi_probe.cpp` that uses new
 API still gets its consumer-side comparison, with the baseline's own probe. The ROS 2
 sink is not covered: its ABI also follows the rclcpp release, and its pins are in
 `abi_tests.cpp`. Before 2.0.0, a layout change that the PR owns is accepted with
