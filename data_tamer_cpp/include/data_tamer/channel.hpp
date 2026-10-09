@@ -146,7 +146,9 @@ public:
    * the result: prefer TypeDefinitionTrait<T> (or TypeDefinition()) when you can.
    *
    * The name, the pointer and `type_info->typeName()` follow the rules of
-   * registerValue(). Throws std::invalid_argument if `type_info` is null.
+   * registerValue(). Throws std::invalid_argument if `type_info` is null, and
+   * std::runtime_error if `type_info->typeName()` names a TypeDefinition type of the
+   * channel (registerValue() of such a type throws in the reverse order).
    */
   template <typename T>
   RegistrationID registerCustomValue(const std::string& name, const T* value,
@@ -474,7 +476,8 @@ inline void LogChannel::discoverTypes(PendingTypes& types)
                                "': can't add custom type '" + type_name +
                                "' after recording started");
     }
-    // Throws if another C++ type uses this name.
+    // Throws if another C++ type uses this name. The entry stays if the registration
+    // fails later, so another C++ type of this name is refused all the same.
     (void)typeRegistry().getSerializer<T>();
     if(schemaFrozen() || hasCustomType(type_name))
     {

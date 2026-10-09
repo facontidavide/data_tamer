@@ -117,7 +117,12 @@ Unreleased
   reject a ``MSG:`` line that does not follow a separator (C++ read it as a field,
   Python opened a section). Python trims only spaces and ``\r``, as the specification
   says, so both reject ``### hash:<tab>7``.
-* **ABI**: one new private exported function, ``LogChannel::registerValueWithTypes``.
+* **Fixed**: one type name for a ``TypeDefinition`` type and a ``registerCustomValue()``
+  serializer of the same channel made the schema describe the serializer's values with
+  the type's fields, or hold two sections of that name. The registration that comes
+  second throws ``std::runtime_error`` and leaves the channel unchanged.
+* **ABI**: new private exported functions, ``LogChannel::registerValueWithTypes`` and
+  ``TypesRegistry::find``.
 * **Counters in one struct per channel and one per sink**:
   ``LogChannel::Stats`` gains ``attempts`` (every ``takeSnapshot()`` and
   ``tryTakeSnapshot()`` call), ``accepted`` (the calls whose snapshot at least

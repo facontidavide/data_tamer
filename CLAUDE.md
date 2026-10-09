@@ -142,7 +142,10 @@ DATA_TAMER_UPDATE_GOLDEN=1 \
 - A registration changes the channel in one step, in `registerValueWithTypes()`:
   everything that can throw runs first and `addSeries()` is the last change; the
   templates only collect custom types (`discoverTypes()`, which also checks that a
-  type name belongs to one C++ type). `registration_fault_tests.cpp` fails each
+  type name belongs to one C++ type). `registerValueWithTypes()` refuses a type name
+  that a TypeDefinition type and a `registerCustomValue()` serializer would share: a
+  TypeDefinition registration passes the serializer that `TypesRegistry::find()`
+  returns for the name. `registration_fault_tests.cpp` fails each
   allocation in turn (`AllocCounter::FailNth`). `poolExhausted()` relies on the pool being created before
   `logging_started` and never replaced.
 - A change to the schema text, the payload encoding, the schema hash or the MCAP and ROS

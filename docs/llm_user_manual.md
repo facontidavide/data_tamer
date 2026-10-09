@@ -423,6 +423,10 @@ Rules:
 - The channel keys custom types by the returned name: give each C++ type its own name. A
   second C++ type that returns a name the channel already holds makes `registerValue()`
   throw `std::runtime_error`.
+- The `typeName()` of a `registerCustomValue()` serializer cannot be the name of a
+  custom type of the same channel: decoders would read the serializer's bytes with the
+  type's fields. Whichever of the two is registered second throws `std::runtime_error`
+  and leaves the channel unchanged.
 - A class template with two or more type parameters (`Pair<A, B>`) can have a trait or a
   `TypeDefinition()`: it is then a custom type, not a container.
 

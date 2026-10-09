@@ -108,6 +108,17 @@ void CheckSchemaName(const std::string& channel_name, const char* what,
   }
   throw std::runtime_error(message + ": " + problem);
 }
+
+// A type name that a TypeDefinition type and a registerCustomValue() serializer of one
+// channel would share.
+std::runtime_error SharedTypeName(const std::string& channel_name,
+                                  const std::string& type_name)
+{
+  return std::runtime_error(ChannelPrefix(channel_name) + "custom type name '" +
+                            type_name +
+                            "' would belong to a TypeDefinition type and to a "
+                            "registerCustomValue() serializer: give each its own name");
+}
 }  // namespace
 
 struct LogChannel::Pimpl
@@ -144,6 +155,17 @@ struct LogChannel::Pimpl
   void invalidateAnnouncements()
   {
     forEachLink([](SinkLink& link) { link.schema_registered = false; });
+  }
+
+  // True if a registerCustomValue() serializer named a type `name`: a field has that
+  // type and no field section describes it. Caller holds control_mutex.
+  [[nodiscard]] bool customSerializerUses(const std::string& name) const
+  {
+    return !schema.custom_types.contains(name) &&
+           std::any_of(schema.fields.begin(), schema.fields.end(),
+                       [&](const TypeField& field) {
+                         return field.type == BasicType::OTHER && field.type_name == name;
+                       });
   }
 
   void rebuildMask()
@@ -383,14 +405,27 @@ RegistrationID LogChannel::registerValueWithTypes(const std::string& name,
     // such as typeSchema() included), then spare capacity for what is appended.
     const auto type = value_ptr.type();
     const std::string type_name = type_info ? type_info->typeName() : ToStr(type);
-    // The type and field names this registration writes into the schema text.
+    // The type and field names this registration writes into the schema text. A type
+    // name has a field section (a TypeDefinition) or belongs to registerCustomValue()
+    // serializers, never both: decoders would read the serializer's values with the
+    // section's fields, or find two sections. Only a TypeDefinition registration
+    // passes the registry's serializer of its type.
     if(type_info)
     {
       CheckSchemaName(_p->channel_name, "custom type name", type_name);
+      if(_p->schema.custom_types.contains(type_name) &&
+         _p->type_registry.find(type_name) != type_info)
+      {
+        throw SharedTypeName(_p->channel_name, type_name);
+      }
     }
     for(const auto& [pending_name, pending_fields] : types)
     {
       CheckSchemaName(_p->channel_name, "custom type name", pending_name);
+      if(_p->customSerializerUses(pending_name))
+      {
+        throw SharedTypeName(_p->channel_name, pending_name);
+      }
       for(const auto& pending_field : pending_fields)
       {
         CheckSchemaName(_p->channel_name, "field name", pending_field.field_name,

@@ -97,6 +97,7 @@ public:
   [[nodiscard]] CustomSerializer::Ptr getSerializer();
 
 private:
+  friend class LogChannel;  // find() tells a TypeDefinition serializer from another
   using MakeSerializer = CustomSerializer::Ptr (*)(const std::string& type_name);
 
   template <typename T>
@@ -110,6 +111,8 @@ private:
   CustomSerializer::Ptr findOrCreate(const std::string& type_name, MakeSerializer make);
   CustomSerializer::Ptr replace(const std::string& type_name, MakeSerializer make,
                                 bool skip_if_present);
+  /// The serializer stored under `type_name`, null if none. Locks the registry.
+  [[nodiscard]] CustomSerializer::Ptr find(const std::string& type_name) const;
 
   struct Impl;
   std::unique_ptr<Impl> _impl;

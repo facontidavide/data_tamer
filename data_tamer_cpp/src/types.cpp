@@ -543,4 +543,11 @@ CustomSerializer::Ptr TypesRegistry::replace(const std::string& type_name,
   return serializer;
 }
 
+CustomSerializer::Ptr TypesRegistry::find(const std::string& type_name) const
+{
+  std::scoped_lock lk(_impl->mutex);
+  const auto it = _impl->types.find(type_name);
+  return it == _impl->types.end() ? nullptr : it->second;
+}
+
 }  // namespace DataTamer

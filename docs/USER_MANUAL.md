@@ -120,7 +120,9 @@ struct DataTamer::TypeDefinitionTrait<Eigen::Vector3d>
 
 The specialization must be visible wherever the type is registered. If a type has both a
 trait and a `TypeDefinition()`, the trait wins. Give each type its own name: two types
-with one name in a channel make `registerValue()` throw.
+with one name in a channel make `registerValue()` throw, and so does a type named like
+the `typeName()` of a `registerCustomValue()` serializer of the channel (and the
+reverse).
 
 ## Writing values from other threads
 
