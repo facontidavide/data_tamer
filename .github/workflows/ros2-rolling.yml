@@ -13,11 +13,11 @@ jobs:
       - uses: ros-industrial/industrial_ci@125164b9f1883cdf1858897a7146d1bebf2be5c6
         env:
           ROS_DISTRO: rolling
-          ROS_REPO: main
+          # Rolling is built for Ubuntu 26.04 (resolute) only, industrial_ci's default
+          # here; its noble packages stopped updating in April 2026. ros2-testing is the
+          # set the build farm builds against, a sync ahead of main.
+          ROS_REPO: testing
           TARGET_CMAKE_ARGS: "-DDATA_TAMER_WERROR=ON"
-          # industrial_ci defaults rolling to Ubuntu 26.04 (resolute), for which
-          # packages.ros.org publishes no ros-rolling-* binaries yet; pin to noble.
-          OS_CODE_NAME: noble
           # After the build and the tests: tools/check_ros_install.sh builds the
           # find_package(data_tamer 2) consumer against the install space and checks that
           # the install shares no file with the released data_tamer_cpp 1.x.

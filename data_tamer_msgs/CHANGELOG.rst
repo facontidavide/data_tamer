@@ -2,8 +2,8 @@
 Changelog for package data_tamer_msgs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Unreleased
-----------
+2.0.0 (2026-10-24)
+------------------
 * New ``SnapshotBatch`` message: several ``Snapshot`` plus, optionally, the
   ``Schema`` of each, to publish fewer, self-contained messages.
 * The package version is 2.0.0, like ``data_tamer_v2``, the ROS 2 package of
@@ -11,6 +11,7 @@ Unreleased
 
 1.0.4 (2026-07-26)
 ------------------
+* No changes
 
 1.0.3 (2025-05-23)
 -----------

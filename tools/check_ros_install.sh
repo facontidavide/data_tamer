@@ -44,6 +44,11 @@ cmake --build "$tmp/consumer"
 "$tmp/consumer/test_package"
 
 echo "== files shared with the released data_tamer_cpp 1.x package"
+# Rolling no longer releases 1.x: nothing can collide there.
+if ! apt-cache show "ros-$distro-data-tamer-cpp" >/dev/null 2>&1; then
+  echo "ros-$distro-data-tamer-cpp is not in the apt sources: nothing to compare"
+  exit 0
+fi
 (cd "$tmp" && apt-get download "ros-$distro-data-tamer-cpp")
 deb=$(ls "$tmp"/ros-*.deb)
 # The package lists /opt/ros/<distro>/...: keep the files and symlinks under the prefix.
