@@ -136,8 +136,10 @@ The ROS 2 CI jobs then run `tools/check_ros_install.sh` through industrial_ci's
 It builds and runs `test_package/` (`find_package(data_tamer 2)`) against the install,
 and fails when `data_tamer_v2` or `data_tamer_msgs` install a file that the released
 `ros-$ROS_DISTRO-data-tamer-cpp` binary package (downloaded with `apt-get download`, not
-installed) also has: bloom puts both in `/opt/ros/$ROS_DISTRO`. To run it, source the
-workspace (`source install/setup.bash`) and call the script.
+installed) also has: bloom puts both in `/opt/ros/$ROS_DISTRO`. A distribution that does
+not release 1.x (Rolling) has no such package, and the comparison is skipped. To run it,
+source the workspace (`source install/setup.bash`) and call the script. The Rolling job
+builds on Ubuntu resolute against `ros2-testing`, as the build farm does.
 
 Under ROS the whole gtest binary is one ctest entry. Run a subset directly:
 
@@ -378,15 +380,16 @@ decoders and Foxglove extension (2.0.0 until the 2.0.0 tag). It lives in:
 - `python/data_tamer_parser.py`, `__version__`;
 - `data_tamer_foxglove/package.json`, `version` (keep `package-lock.json` consistent);
 - `data_tamer_foxglove/extension/package.json`, `version` (2.0.0; keep its lockfile consistent);
-- `data_tamer_cpp/CHANGELOG.rst`: the head section is "Unreleased" until the release
-  commit renames it to `x.y.z (date)`.
+- `data_tamer_cpp/CHANGELOG.rst` and `data_tamer_msgs/CHANGELOG.rst`: the head section
+  of both is "Unreleased" until the release commit renames it to `x.y.z (date)` (bloom
+  makes each package's `debian/changelog` from its own; "* No changes" when empty).
 
 `tools/check_versions.py` compares them and runs as the ctest case `version_consistency`.
 Change them together.
 
 To cut a release:
 
-1. In one commit on `main`, rename the CHANGELOG head section "Unreleased" to
+1. In one commit on `main`, rename the head section "Unreleased" of both CHANGELOGs to
    `x.y.z (date)` and set the version in every file above (a first 2.0.0 release keeps
    them, since the tree already says 2.0.0). `python3 tools/check_versions.py` must pass.
 2. Tag that commit `x.y.z` (no `v` prefix) and push the tag.

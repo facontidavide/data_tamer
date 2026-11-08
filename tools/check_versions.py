@@ -11,8 +11,9 @@ agree, 1 otherwise. The version lives in:
 - python/data_tamer_parser.py  __version__;
 - data_tamer_foxglove/package.json  version;
 - data_tamer_foxglove/extension/package.json  version;
-- data_tamer_cpp/CHANGELOG.rst  the first section is "Unreleased" (the release
-  commit renames it) or carries the same number.
+- data_tamer_cpp/CHANGELOG.rst and data_tamer_msgs/CHANGELOG.rst  the first
+  section of both is "Unreleased" (the release commit renames both: bloom makes
+  each package's debian/changelog from its own) or carries the same number.
 """
 import json
 import pathlib
@@ -55,13 +56,14 @@ def main():
             print(f"{name}: {version}, expected {expected}")
             ok = False
 
-    changelog = first_match(
-        "data_tamer_cpp/CHANGELOG.rst",
-        r"^\^+\n.*\n\^+\n\n(.+)\n-+\n", re.M)
-    head = changelog.split()[0]
-    if head != "Unreleased" and head != expected:
-        print(f"data_tamer_cpp/CHANGELOG.rst: head section is {head!r}, "
-              f"expected 'Unreleased' or {expected}")
+    heads = {
+        name: first_match(name, r"^\^+\n.*\n\^+\n\n(.+)\n-+\n", re.M).split()[0]
+        for name in ("data_tamer_cpp/CHANGELOG.rst", "data_tamer_msgs/CHANGELOG.rst")
+    }
+    if len(set(heads.values())) != 1 or set(heads.values()) - {"Unreleased", expected}:
+        for name, head in heads.items():
+            print(f"{name}: head section is {head!r}")
+        print(f"expected 'Unreleased' or {expected}, the same in both")
         ok = False
 
     if ok:
