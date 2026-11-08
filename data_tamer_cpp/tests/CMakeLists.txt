@@ -235,10 +235,18 @@ endif()
 # The check covers the core headers only. The ROS 2 sink header is excluded on
 # purpose: it includes rclcpp, whose exported compile features already require
 # C++20 on recent distributions, so it cannot promise C++17 regardless of us.
+# The MCAP headers alone, for the targets built as strict C++17: linking
+# ${DATA_TAMER_MCAP_TARGET} also brings its compile features, and Rolling's
+# mcap_vendor::mcap has cxx_std_20 (ament_ros_defaults), which overrides CXX_STANDARD 17.
+# Imported: local to this directory, and its include directories are SYSTEM.
+add_library(data_tamer_test_mcap_headers INTERFACE IMPORTED)
+set_target_properties(data_tamer_test_mcap_headers PROPERTIES INTERFACE_INCLUDE_DIRECTORIES
+    "$<TARGET_PROPERTY:${DATA_TAMER_MCAP_TARGET},INTERFACE_INCLUDE_DIRECTORIES>")
+
 add_library(public_headers_cxx17 OBJECT public_headers_cxx17.cpp)
 target_include_directories(public_headers_cxx17 PRIVATE ${PROJECT_SOURCE_DIR}/include)
 # sinks/mcap_encoding.hpp includes the MCAP headers.
-target_link_libraries(public_headers_cxx17 PRIVATE ${DATA_TAMER_MCAP_TARGET})
+target_link_libraries(public_headers_cxx17 PRIVATE data_tamer_test_mcap_headers)
 data_tamer_strict_cxx17(public_headers_cxx17)
 
 # include/data_tamer_v2/fwd.hpp must declare the types exactly as the full headers
@@ -253,7 +261,7 @@ foreach(variant FWD_ONLY FWD_FIRST FWD_LAST)
     add_library(${target} OBJECT fwd_header_tests.cpp)
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
     target_compile_definitions(${target} PRIVATE ${variant})
-    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    target_link_libraries(${target} PRIVATE data_tamer_test_mcap_headers)
     data_tamer_strict_cxx17(${target} WARNINGS)
     target_compile_options(${target} PRIVATE
         $<$<BOOL:${DATA_TAMER_HAS_WMISMATCHED_TAGS}>:-Wmismatched-tags>)
@@ -263,7 +271,7 @@ endforeach()
 function(data_tamer_add_probe target source)
     add_library(${target} OBJECT ${ARGN} compile_fail/${source})
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include)
-    target_link_libraries(${target} PRIVATE ${DATA_TAMER_MCAP_TARGET})
+    target_link_libraries(${target} PRIVATE data_tamer_test_mcap_headers)
     data_tamer_strict_cxx17(${target} WARNINGS)
 endfunction()
 
