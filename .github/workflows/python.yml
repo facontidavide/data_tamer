@@ -18,7 +18,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # actions/setup-python has no Python 3.9 for Ubuntu 26.04 (ubuntu-latest since
+    # November 2026); 3.9 is the oldest version the package supports.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python: ['3.9', '3.12']
