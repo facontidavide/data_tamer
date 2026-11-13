@@ -2,6 +2,10 @@
 Changelog for package data_tamer_msgs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Unreleased
+----------
+* No changes
+
 2.0.0 (2026-10-24)
 ------------------
 * New ``SnapshotBatch`` message: several ``Snapshot`` plus, optionally, the

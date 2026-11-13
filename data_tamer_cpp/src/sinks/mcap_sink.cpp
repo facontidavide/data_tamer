@@ -15,6 +15,8 @@
 #include "data_tamer_v2/sinks/mcap_encoding.hpp"
 #include <mcap/reader.hpp>  // its implementation is compiled here, as before
 
+#include "fd_writable.hpp"
+
 namespace DataTamer2
 {
 
@@ -62,7 +64,13 @@ struct MCAPSink::Pimpl
 {
   std::string filepath;
   bool compression = false;
+  // Declared before `writer`, which is destroyed first: its close() writes the footer
+  // into `file`.
+  std::unique_ptr<details::FdWritable> file;
   std::unique_ptr<mcap::McapWriter> writer;
+  // Error of the last file closed by a rollover or restartRecording(), thrown by
+  // throwIfCloseFailed() once the new file is in place.
+  std::string close_error;
 
   struct ChannelInfo
   {
@@ -82,6 +90,31 @@ struct MCAPSink::Pimpl
 
   std::vector<uint8_t> message_body;  // reused, see mcap_encoding::WriteMessage
   std::recursive_mutex mutex;
+
+  // Closes the current file, if any: footer, fsync(), close(). Returns the first error
+  // of its writes, empty if there was none.
+  std::string closeFile()
+  {
+    if(!writer)
+    {
+      return {};
+    }
+    writer->close();
+    writer.reset();
+    std::string error = file->errorMessage();
+    file.reset();
+    return error;
+  }
+
+  void throwIfCloseFailed()
+  {
+    if(!close_error.empty())
+    {
+      const std::string error = std::move(close_error);
+      close_error.clear();
+      throw std::runtime_error("MCAP write failed: " + error);
+    }
+  }
 };
 
 MCAPSink::MCAPSink(const std::string& filepath, bool do_compression)
@@ -103,19 +136,36 @@ void DataTamer2::MCAPSink::openFile(std::string const& filepath, bool do_compres
       _p->writer && std::filesystem::equivalent(filepath, _p->filepath, ignored);
   if(same_file)
   {
-    _p->writer.reset();
+    _p->close_error = _p->closeFile();
   }
   // Any other file is opened first: if that fails the current recording stays intact.
+  std::unique_ptr<details::FdWritable> file;
+  try
+  {
+    file = details::FdWritable::open(filepath);
+  }
+  catch(const std::runtime_error& e)
+  {
+    std::string message =
+        std::string("Failed to open MCAP file for writing: ") + e.what();
+    if(!_p->close_error.empty())
+    {
+      message += "; and before, MCAP write failed: " + _p->close_error;
+      _p->close_error.clear();
+    }
+    throw std::runtime_error(message);
+  }
   auto writer = std::make_unique<mcap::McapWriter>();
   mcap::McapWriterOptions options(mcap_encoding::kEncoding);
   options.compression =
       do_compression ? mcap::Compression::Zstd : mcap::Compression::None;
-  const auto status = writer->open(filepath, options);
-  if(!status.ok())
+  writer->open(*file, options);
+  if(!same_file)
   {
-    throw std::runtime_error("Failed to open MCAP file for writing: " + status.message);
+    _p->close_error = _p->closeFile();
   }
-  _p->writer = std::move(writer);  // closes the previous file
+  _p->file = std::move(file);
+  _p->writer = std::move(writer);
   _p->filepath = filepath;
   _p->compression = do_compression;
   _p->start_time = std::chrono::system_clock::now();
@@ -152,6 +202,12 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
   {
     throw std::runtime_error("MCAP write failed: " + status.message);
   }
+  // The writer flushes whole chunks: a failed write() shows up here, at the snapshot
+  // that completed the chunk, and at every later one until the file changes.
+  if(_p->file->error() != 0)
+  {
+    throw std::runtime_error("MCAP write failed: " + _p->file->errorMessage());
+  }
 
   // If reset_time is exceeded, continue in a new numbered file (the default), or
   // truncate the current one if create_file_on_reset was disabled (that discards
@@ -172,6 +228,7 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
     {
       restartRecordingImpl(_p->filepath, _p->compression, false);
     }
+    _p->throwIfCloseFailed();
   }
 }
 
@@ -190,10 +247,10 @@ void MCAPSink::setCreateNewFileOnReset(bool create_file_on_reset)
 void MCAPSink::stopRecording()
 {
   std::scoped_lock lk(_p->mutex);
-  if(_p->writer)  // idempotent
+  const std::string error = _p->closeFile();  // idempotent
+  if(!error.empty())
   {
-    _p->writer->close();
-    _p->writer.reset();
+    throw std::runtime_error("MCAP write failed: " + error);
   }
 }
 
@@ -230,7 +287,9 @@ void MCAPSink::openNextNumberedFile()
 
 void MCAPSink::restartRecording(const std::string& filepath, bool do_compression)
 {
+  std::scoped_lock lk(_p->mutex);
   restartRecordingImpl(filepath, do_compression, true);
+  _p->throwIfCloseFailed();
 }
 
 void MCAPSink::restartRecordingImpl(const std::string& filepath, bool do_compression,

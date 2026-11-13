@@ -2,6 +2,7 @@
 #include "data_tamer_v2/details/snapshot_pool.hpp"
 #include "realtime_sanitizer.hpp"
 #include "spin_pause.hpp"
+#include "thread_name.hpp"
 #include "waiter_count.hpp"
 
 #include <atomic>
@@ -445,6 +446,7 @@ struct SinkWorker::Pimpl
   void startThread()
   {
     thread = std::jthread([this](std::stop_token stop) {
+      details::setCurrentThreadName("dt_sink_worker");
       while(!stop.stop_requested())
       {
         Pass pass;

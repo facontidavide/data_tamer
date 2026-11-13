@@ -3,14 +3,14 @@
 // The MCAP implementation is compiled in mcap_sink.cpp.
 #include "data_tamer_v2/sinks/mcap_encoding.hpp"
 #include "data_tamer_v2/sinks/mcap_sink.hpp"  // details::NumberedPath
+#include "../thread_name.hpp"
+#include "fd_writable.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <cerrno>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -394,19 +394,14 @@ void MCAPRingSink::Pimpl::writeDump(MCAPRingDump& dump)
       dump.path = details::NumberedPath(options.filepath, ++dump_counter);
     } while(std::filesystem::exists(dump.path, ec));
 
-    // mcap::FileWriter ignores fwrite() and fclose() failures (disk full, I/O
-    // errors); a stream reports them.
-    std::ofstream file(dump.path, std::ios::binary | std::ios::trunc);
-    if(!file)
-    {
-      throw std::runtime_error("cannot open file: " + std::string(std::strerror(errno)));
-    }
-    mcap::StreamWriter stream(file);
+    // FdWritable reports write(), fsync() and close() failures (disk full, I/O
+    // errors), and keeps the page cache this dump uses bounded.
+    const auto file = details::FdWritable::open(dump.path);
     mcap::McapWriter writer;
     mcap::McapWriterOptions writer_options(mcap_encoding::kEncoding);
     writer_options.compression =
         options.compression ? mcap::Compression::Zstd : mcap::Compression::None;
-    writer.open(stream, writer_options);
+    writer.open(*file, writer_options);
 
     struct Channel
     {
@@ -454,12 +449,11 @@ void MCAPRingSink::Pimpl::writeDump(MCAPRingDump& dump)
           (dump.messages == 0) ? timestamp : std::max(dump.last_message, timestamp);
       ++dump.messages;
     }
-    writer.close();  // flushes the stream
-    file.close();
-    if(!file)
+    writer.close();  // footer, fsync(), close()
+    if(file->error() != 0)
     {
       // The partial file is kept: `mcap recover` can salvage what it holds.
-      throw std::runtime_error("write failed: " + std::string(std::strerror(errno)));
+      throw std::runtime_error("write failed: " + file->errorMessage());
     }
     dump.ok = true;
   }
@@ -487,7 +481,10 @@ MCAPRingSink::MCAPRingSink(MCAPRingOptions options)
     throw std::invalid_argument("MCAPRingSink: window must not be negative");
   }
   _p = std::make_shared<Pimpl>(std::move(options));
-  _p->writer_thread = std::thread([p = _p] { p->writerLoop(); });
+  _p->writer_thread = std::thread([p = _p] {
+    details::setCurrentThreadName("dt_ring_writer");
+    p->writerLoop();
+  });
 }
 
 MCAPRingSink::~MCAPRingSink()

@@ -722,7 +722,22 @@ existing file at that path is overwritten.
   it): that one is closed first, because opening it truncates it, so a failed open
   leaves the sink stopped. `start()` after `stop()` records into the next numbered file
   (as a reset does), unless `restartRecording()` opened a file meanwhile.
-- A failed write throws from `onSnapshot()` and shows in `worker->errors()`.
+- A failed write throws from `onSnapshot()` and shows in `worker->errors()`. MCAP
+  flushes whole chunks, so the snapshot that completes a chunk reports it, and every
+  later snapshot of the same file throws again. Data written when a file closes (the
+  last chunk, the summary) and the closing `fsync()` and `close()` report their
+  failure from `stopRecording()` (`stop()` counts it through `onStop()`), and from the
+  `onSnapshot()` or `restartRecording()` that closed the file for a rollover or a
+  restart.
+- Files are written with `write()`, closed with `fsync()` then `close()`, so `stop()`
+  and a rollover wait until the file is on disk. On Linux the page cache a file uses is
+  bounded: every 8 MiB the sink starts the writeback of the new 8 MiB
+  (`sync_file_range()`), waits for the previous 8 MiB and drops it from the cache
+  (`posix_fadvise(POSIX_FADV_DONTNEED)`), so at most about 24 MiB of a file is cached
+  and the writer runs no further ahead of the disk. Files that do not support it
+  (overlayfs, tmpfs, `EINVAL`/`ENOSYS`/`EOPNOTSUPP`/`ESPIPE`) or a kernel short of
+  memory (`ENOMEM`) turn it off for that file; the closing `fsync()` still reports a
+  failed write. `MCAPRingSink` writes its dumps the same way.
 
 `data_tamer_v2/sinks/mcap_encoding.hpp` exposes the same encoding (`AddChannel()`,
 `WriteSnapshot()`) for a custom sink that writes MCAP files itself.
@@ -792,7 +807,8 @@ recorder->stop();
   queued are not in the ring yet. It returns true if a request was active.
 - `SinkWorker::stop()` calls `flushPendingDump()` after the last delivery, so a request
   made just before shutdown is written by `stop()`, or by destroying the worker.
-- `MCAPRingDump::ok` is false on an I/O error (full disk), with `error` set.
+- `MCAPRingDump::ok` is false on an I/O error (full disk), with `error` set, also when
+  only the closing `fsync()` or `close()` failed.
   `stats()` returns `dumps_written`, `dumps_failed`, `writer_busy_retries`,
   `evicted_by_capacity`, `dropped_oversize` (snapshots larger than the whole ring),
   `stored_snapshots`, `stored_bytes`, and `oldest_timestamp` and `newest_timestamp`,
@@ -1119,10 +1135,12 @@ scalars and rejects the other types. Mark the user's real-time function
 Threads involved:
 
 - your snapshot threads: serialize values and push references, one at a time per channel;
-- one worker thread per `SinkWorker`: runs `onSnapshot()` (MCAP writes, ROS publishes);
+- one worker thread per `SinkWorker`, named `dt_sink_worker` on Linux: runs
+  `onSnapshot()` (MCAP writes, ROS publishes);
 - the thread calling `startLogging()`, `addDataSink()` or the first snapshot that starts
   logging: runs `onSchema()`;
-- the `MCAPRingSink` writer thread: writes dump files and runs the dump callback.
+- the `MCAPRingSink` writer thread, named `dt_ring_writer` on Linux: writes dump files
+  and runs the dump callback.
 
 ## Reading the data
 
