@@ -2,8 +2,8 @@
 Changelog for package data_tamer
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Unreleased
-----------
+2.1.0 (2026-11-13)
+------------------
 * ``MCAPSink`` and ``MCAPRingSink`` keep the page cache of the files they write bounded
   on Linux: every 32 MiB they start the writeback of the new data, wait for the previous
   32 MiB to reach the disk and drop it from the cache, so about 96 MiB of a file is

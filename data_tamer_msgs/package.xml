@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>data_tamer_msgs</name>
-  <version>2.0.0</version>
+  <version>2.1.0</version>
   <description>Messages published by data_tamer's ROS 2 sink: schemas, snapshots and snapshot batches.</description>
   <maintainer email="davide.faconti@gmail.com">Davide Faconti</maintainer>
   <maintainer email="henrygerardmoore@gmail.com">Henry Moore</maintainer>

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 
 # The ROS 2 package of 2.x is data_tamer_v2: it installs side by side with the released
 # data_tamer_cpp 1.x. Plain CMake and conan installs are the package data_tamer.
-project(data_tamer_v2 VERSION 2.0.0 LANGUAGES CXX)
+project(data_tamer_v2 VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)

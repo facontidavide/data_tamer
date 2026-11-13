@@ -44,7 +44,7 @@ iter_mcap(path) reads a whole MCAP file (needs the optional `mcap` package):
 """
 from __future__ import annotations
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 import struct
 from bisect import bisect_right

@@ -1,6 +1,6 @@
 {
   "name": "@data-tamer/parser",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description":
       "Decoder of data_tamer snapshots for JavaScript and TypeScript (Foxglove extension)",
   "license": "MIT",

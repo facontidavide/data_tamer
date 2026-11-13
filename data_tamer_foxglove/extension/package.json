@@ -5,7 +5,7 @@
       "Decodes data_tamer snapshots (data_tamer_msgs) so that Foxglove panels can plot them",
   "publisher": "data_tamer",
   "homepage": "https://github.com/facontidavide/data_tamer",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "license": "MIT",
   "main": "./dist/extension.js",
   "keywords": [
