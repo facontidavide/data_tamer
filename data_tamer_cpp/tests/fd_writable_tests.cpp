@@ -108,6 +108,11 @@ struct ScriptedOps
   }
 };
 
+/// MCAP 2.x has IWritable::flush(); the mcap_vendor of ROS 2 Humble and Jazzy has not.
+/// A concept, so that the check is false there instead of a compile error.
+template <typename Writable>
+concept HasFlush = requires(Writable& w) { w.flush(); };
+
 /// Every write() reaches the injected calls at once, as the tests of them expect.
 std::unique_ptr<FdWritable> openUnbuffered(FileOps ops)
 {
@@ -475,7 +480,7 @@ TEST(FdWritable, ARealFifoIsWrittenWithoutError)
 // buffer here, as compressed chunks often are.
 TEST(FdWritable, EveryChunkReachesTheFileWhenMcapFlushesIt)
 {
-  if constexpr(!requires(mcap::IWritable& w) { w.flush(); })
+  if constexpr(!HasFlush<mcap::IWritable>)
   {
     GTEST_SKIP() << "this MCAP release has no IWritable::flush()";
   }
