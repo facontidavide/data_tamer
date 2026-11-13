@@ -279,8 +279,8 @@ overwritten. `worker->start()` after `stop()` continues in the next numbered fil
 
 A failed write (full disk, I/O error) throws from the sink and shows in
 `worker->errors()` and `lastError()`. Closing a file runs `fsync()`, so `stop()` returns
-once the file is on disk. On Linux both MCAP sinks keep only about 24 MiB of each file
-in the page cache: every 8 MiB they wait for the previous 8 MiB to reach the disk and
+once the file is on disk. On Linux both MCAP sinks keep only about 96 MiB of each file
+in the page cache: every 32 MiB they wait for the previous 32 MiB to reach the disk and
 drop it from the cache. A large file then doesn't leave gigabytes of dirty pages for the
 kernel to flush at once, which stalls other processes on the same disk. The bound
 doesn't hold on overlayfs or tmpfs.

@@ -61,9 +61,11 @@ std::string errnoText(int code);
 class FdWritable final : public mcap::IWritable
 {
 public:
-  /// Bytes between two range flushes: long sequential writes for the disk, and three
-  /// of them are small next to the sinks' own buffers.
-  static constexpr uint64_t kFlushWindowBytes = uint64_t(8) << 20;
+  /// Bytes between two range flushes. About three windows of a file are cached and the
+  /// writer runs up to two ahead of the disk (96 and 64 MiB): enough slack that a short
+  /// disk stall rarely blocks the writer, and still small next to the gigabytes an
+  /// unbounded file leaves dirty.
+  static constexpr uint64_t kFlushWindowBytes = uint64_t(32) << 20;
 
   /// Flushed ranges end on a multiple of this, the page size on x86_64 and arm64 with
   /// 4 KiB pages. A larger page only leaves one partial page per window in the cache.

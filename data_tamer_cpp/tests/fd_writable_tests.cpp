@@ -516,7 +516,7 @@ TEST(FdWritable, ARealFileOfSeveralWindowsKeepsItsBytes)
 {
   ScratchDir dir("fd_writable_big");
   const auto path = dir.file("big.bin");
-  const uint64_t total = 3 * kWindow + 12345;
+  const uint64_t total = 2 * kWindow + 12345;  // one wait and one drop
   std::string pattern(total, '\0');
   for(uint64_t i = 0; i < total; ++i)
   {

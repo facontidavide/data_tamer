@@ -5,8 +5,8 @@ Changelog for package data_tamer
 Unreleased
 ----------
 * ``MCAPSink`` and ``MCAPRingSink`` keep the page cache of the files they write bounded
-  on Linux: every 8 MiB they start the writeback of the new data, wait for the previous
-  8 MiB to reach the disk and drop it from the cache, so about 24 MiB of a file is
+  on Linux: every 32 MiB they start the writeback of the new data, wait for the previous
+  32 MiB to reach the disk and drop it from the cache, so about 96 MiB of a file is
   cached at most. A 2 GiB dump no longer leaves 2 GiB of dirty pages for the kernel to
   flush at once, which flooded the disk queue and stalled other processes on page
   faults. Closing a file now runs ``fsync()``: ``stop()``, ``stopRecording()`` and a

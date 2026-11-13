@@ -731,9 +731,9 @@ existing file at that path is overwritten.
   restart.
 - Files are written with `write()`, closed with `fsync()` then `close()`, so `stop()`
   and a rollover wait until the file is on disk. On Linux the page cache a file uses is
-  bounded: every 8 MiB the sink starts the writeback of the new 8 MiB
-  (`sync_file_range()`), waits for the previous 8 MiB and drops it from the cache
-  (`posix_fadvise(POSIX_FADV_DONTNEED)`), so at most about 24 MiB of a file is cached
+  bounded: every 32 MiB the sink starts the writeback of the new 32 MiB
+  (`sync_file_range()`), waits for the previous 32 MiB and drops it from the cache
+  (`posix_fadvise(POSIX_FADV_DONTNEED)`), so at most about 96 MiB of a file is cached
   and the writer runs no further ahead of the disk. Files that do not support it
   (overlayfs, tmpfs, `EINVAL`/`ENOSYS`/`EOPNOTSUPP`/`ESPIPE`) or a kernel short of
   memory (`ENOMEM`) turn it off for that file; the closing `fsync()` still reports a
