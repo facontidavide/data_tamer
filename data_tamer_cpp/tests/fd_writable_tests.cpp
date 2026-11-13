@@ -8,11 +8,15 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <sys/stat.h>
 
 using DataTamer2::details::defaultFileOps;
 using DataTamer2::details::FdWritable;
@@ -432,6 +436,79 @@ TEST(FdWritable, AFailedWriteOfTheBufferIsLatchedByEnd)
   file->end();
   EXPECT_EQ(file->error(), ENOSPC);
   EXPECT_EQ(scripted.close_calls, 1);
+}
+
+// fsync() fails with EINVAL (or EROFS) on a file that cannot be synchronized, a FIFO
+// or /dev/null: the data was written, so the file is not reported as failed.
+TEST(FdWritable, AFileThatCannotBeSyncedIsNotAFailure)
+{
+  for(const int code : { EINVAL, EROFS })
+  {
+    SCOPED_TRACE(code);
+    ScriptedOps scripted;
+    scripted.fsync_errno = code;
+    auto file = openUnbuffered(scripted.ops());
+    writeString(*file, "abc");
+    file->end();
+    EXPECT_EQ(file->error(), 0) << file->errorMessage();
+    EXPECT_EQ(scripted.close_calls, 1);
+  }
+}
+
+TEST(FdWritable, ARealFifoIsWrittenWithoutError)
+{
+  ScratchDir dir("fd_writable_fifo");
+  const auto path = dir.file("pipe");
+  ASSERT_EQ(::mkfifo(path.c_str(), 0600), 0);
+  std::string received;
+  std::thread reader([&] { received = readFile(path); });
+  auto file = FdWritable::open(path);
+  writeString(*file, "through a pipe");
+  file->end();
+  reader.join();
+  EXPECT_EQ(file->error(), 0) << file->errorMessage();
+  EXPECT_EQ(received, "through a pipe");
+}
+
+// McapWriter calls IWritable::flush() after every chunk: the chunk then reaches the
+// file, so a crash loses only the chunk being filled. Chunks are smaller than the
+// buffer here, as compressed chunks often are.
+TEST(FdWritable, EveryChunkReachesTheFileWhenMcapFlushesIt)
+{
+  if constexpr(!requires(mcap::IWritable& w) { w.flush(); })
+  {
+    GTEST_SKIP() << "this MCAP release has no IWritable::flush()";
+  }
+  else
+  {
+    ScratchDir dir("fd_writable_chunks");
+    const auto path = dir.file("chunks.mcap");
+    auto file = FdWritable::open(path);
+    mcap::McapWriter writer;
+    mcap::McapWriterOptions options("test");
+    options.compression = mcap::Compression::None;
+    options.chunkSize = 1024;
+    writer.open(*file, options);
+    mcap::Schema schema("s", "jsonschema", "{}");
+    writer.addSchema(schema);
+    mcap::Channel channel("t", "json", schema.id);
+    writer.addChannel(channel);
+    const std::string payload(100, 'x');
+    for(uint32_t i = 0; i < 50; ++i)  // 5000 bytes: several chunks
+    {
+      mcap::Message message;
+      message.channelId = channel.id;
+      message.sequence = i;
+      message.logTime = i;
+      message.publishTime = i;
+      message.data = reinterpret_cast<const std::byte*>(payload.data());
+      message.dataSize = payload.size();
+      ASSERT_TRUE(writer.write(message).ok());
+    }
+    EXPECT_GT(std::filesystem::file_size(path), 4000u);  // before close
+    writer.close();
+    EXPECT_EQ(file->error(), 0) << file->errorMessage();
+  }
 }
 
 // Window boundaries fall inside uneven writes, on the real system calls.

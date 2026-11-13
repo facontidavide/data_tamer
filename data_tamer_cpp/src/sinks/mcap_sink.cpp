@@ -205,26 +205,24 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
   auto& channel = _p->hash_to_channel.at(snapshot.schema_hash);
   const auto status = mcap_encoding::WriteSnapshot(
       *_p->writer, channel.id, channel.next_sequence++, snapshot, _p->message_body);
+  // The writer flushes whole chunks: a failed write() shows up at the snapshot that
+  // completed the chunk, and at every later one until the file changes. It is thrown
+  // after the reset below, which replaces the failed file like any other.
+  std::string error;
   if(!status.ok())
   {
-    throwWriteFailed(status.message);
+    error = status.message;
   }
-  // The writer flushes whole chunks: a failed write() shows up here, at the snapshot
-  // that completed the chunk, and at every later one until the file changes.
-  if(_p->file->error() != 0)
+  else if(_p->file->error() != 0)
   {
-    throwWriteFailed(_p->file->errorMessage());
+    error = _p->file->errorMessage();
   }
 
   // If reset_time is exceeded, continue in a new numbered file (the default), or
   // truncate the current one if create_file_on_reset was disabled (that discards
   // the data, but bounds the disk usage). A reset_time of 0 disables resets.
-  if(_p->reset_time == std::chrono::seconds(0))
-  {
-    return;
-  }
   const auto now = std::chrono::system_clock::now();
-  if(now - _p->start_time > _p->reset_time)
+  if(_p->reset_time != std::chrono::seconds(0) && now - _p->start_time > _p->reset_time)
   {
     _p->start_time = now;  // a failed rollover is tried again after another reset_time
     if(_p->create_file_on_reset)
@@ -235,8 +233,16 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
     {
       restartRecordingImpl(_p->filepath, _p->compression, false);
     }
-    _p->throwIfCloseFailed();
+    if(!error.empty())
+    {
+      _p->close_error.clear();  // the failure of the closed file, reported below
+    }
   }
+  if(!error.empty())
+  {
+    throwWriteFailed(error);
+  }
+  _p->throwIfCloseFailed();
 }
 
 void MCAPSink::setMaxTimeBeforeReset(std::chrono::seconds reset_time)

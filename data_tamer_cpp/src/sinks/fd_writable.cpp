@@ -141,7 +141,7 @@ void FdWritable::handleWrite(const std::byte* data, uint64_t size)
   // to the file.
   if(buffer_.size() + size > buffer_capacity_)
   {
-    flushBuffer();
+    flush();
     if(error_ != 0)
     {
       return;
@@ -157,7 +157,7 @@ void FdWritable::handleWrite(const std::byte* data, uint64_t size)
   }
 }
 
-void FdWritable::flushBuffer()
+void FdWritable::flush()
 {
   if(!buffer_.empty() && error_ == 0 && fd_ >= 0)
   {
@@ -265,11 +265,14 @@ void FdWritable::end()
   {
     return;
   }
-  flushBuffer();
+  flush();
   errno = 0;
   if(ops_.fsync(fd_) != 0)
   {
-    latch(errno, "fsync");
+    if(errno != EINVAL && errno != EROFS)  // EINVAL, EROFS: nothing to synchronize
+    {
+      latch(errno, "fsync");
+    }
   }
   else
   {

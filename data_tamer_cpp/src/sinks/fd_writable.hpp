@@ -69,8 +69,10 @@ public:
   /// 4 KiB pages. A larger page only leaves one partial page per window in the cache.
   static constexpr uint64_t kPageBytes = 4096;
 
-  /// Writes smaller than this are collected and written together.
-  static constexpr size_t kBufferBytes = size_t(64) << 10;
+  /// Writes smaller than this are collected and written together. As large as the
+  /// stdio buffer of the mcap::FileWriter it replaces, so that with an MCAP release
+  /// without IWritable::flush() no more data waits in memory than before.
+  static constexpr size_t kBufferBytes = size_t(8) << 10;
 
   /// The sync_file_range() flags, with the Linux values.
   static constexpr unsigned kSyncWaitBefore = 1;
@@ -89,7 +91,22 @@ public:
   ~FdWritable() override;
 
   /// Writes the buffer, then fsync() and close(), latching the first error. Idempotent.
+  /// A file that cannot be synchronized (fsync() fails with EINVAL or EROFS: a FIFO,
+  /// /dev/null) is not an error: the data was written.
   void end() override;
+
+  // Writes the buffer to the file. MCAP 2.x calls IWritable::flush() after every chunk,
+  // so a completed chunk reaches the file even when it is smaller than the buffer.
+  // Older releases (the mcap_vendor of ROS 2 Humble and Jazzy) have no flush(): no
+  // `override`, so that this compiles against both.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winconsistent-missing-override"
+#endif
+  void flush();
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
   /// Bytes handed to this object so far, buffered ones included.
   uint64_t size() const override { return written_ + buffer_.size(); }
@@ -105,10 +122,6 @@ protected:
 
 private:
   FdWritable(int fd, std::string path, FileOps ops, size_t buffer_bytes);
-
-  /// Writes the buffer to the file. Not mcap::IWritable::flush(), which older MCAP
-  /// releases (ROS 2 Humble's mcap_vendor) lack.
-  void flushBuffer();
 
   /// write() until all of it is written, then flushWindow().
   void writeToFile(const std::byte* data, uint64_t size);
