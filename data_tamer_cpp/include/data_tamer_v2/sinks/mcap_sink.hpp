@@ -82,7 +82,9 @@ public:
    * schemas are written into the new file, and the rollover numbering restarts from
    * `filepath`. If the file cannot be opened it throws std::runtime_error and keeps the
    * current recording, except when `filepath` is the file in use: that one is closed
-   * first, so a failed open stops the sink.
+   * first, so a failed open stops the sink. If the new file is open but the previous
+   * one failed to close (its last writes, fsync() or close()), it throws
+   * std::runtime_error ("MCAP write failed") after the switch: the new file records.
    */
   void restartRecording(std::string const& filepath, bool do_compression = false);
 

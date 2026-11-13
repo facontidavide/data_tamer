@@ -42,6 +42,9 @@ set(DATATAMER_TEST_SOURCES
     mcap_ring_sink_tests.cpp
     mcap_sink_reopen_tests.cpp
     mcap_sink_rollover_failure_tests.cpp
+    mcap_sink_write_failure_tests.cpp
+    fd_writable_tests.cpp
+    thread_name_tests.cpp
     mcap_ring_sink_time_jump_tests.cpp
     mcap_ring_sink_callback_tests.cpp
     mcap_negative_timestamp_tests.cpp

@@ -2,6 +2,24 @@
 Changelog for package data_tamer
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+Unreleased
+----------
+* ``MCAPSink`` and ``MCAPRingSink`` keep the page cache of the files they write bounded
+  on Linux: every 32 MiB they start the writeback of the new data, wait for the previous
+  32 MiB to reach the disk and drop it from the cache, so about 96 MiB of a file is
+  cached at most. A 2 GiB dump no longer leaves 2 GiB of dirty pages for the kernel to
+  flush at once, which flooded the disk queue and stalled other processes on page
+  faults. Closing a file now runs ``fsync()``: ``stop()``, ``stopRecording()`` and a
+  rollover return once the file is on disk.
+* ``MCAPSink`` reports failed writes. It used ``mcap::FileWriter``, whose ``fwrite()``
+  check is an ``assert``, so a full disk produced a truncated file with no error. Now a
+  failed write throws from ``onSnapshot()`` (counted in ``SinkWorker::errors()``), and
+  a failure while closing the file throws from ``stopRecording()``, or from the
+  ``onSnapshot()`` or ``restartRecording()`` that closed it. ``MCAPRingDump`` reports a
+  failed ``fsync()`` or ``close()`` too.
+* The sink worker threads are named ``dt_sink_worker`` and the ``MCAPRingSink`` writer
+  thread ``dt_ring_writer`` (Linux, macOS), for ``top -H``, perf and debuggers.
+
 2.0.0 (2026-10-24)
 ------------------
 First release of the 2.x series, relative to 1.0.4. It breaks source and binary

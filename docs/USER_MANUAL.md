@@ -277,6 +277,14 @@ counted once in `worker->errors()` and the current file keeps recording. A numbe
 that exists already is skipped, but the file at the path you pass to `create()` is
 overwritten. `worker->start()` after `stop()` continues in the next numbered file.
 
+A failed write (full disk, I/O error) throws from the sink and shows in
+`worker->errors()` and `lastError()`. Closing a file runs `fsync()`, so `stop()` returns
+once the file is on disk. On Linux both MCAP sinks keep only about 96 MiB of each file
+in the page cache: every 32 MiB they wait for the previous 32 MiB to reach the disk and
+drop it from the cache. A large file then doesn't leave gigabytes of dirty pages for the
+kernel to flush at once, which stalls other processes on the same disk. The bound
+doesn't hold on overlayfs or tmpfs.
+
 ### Flight recorder
 
 `MCAPRingSink` keeps the last `window` of every attached channel in RAM and writes an MCAP
@@ -299,7 +307,9 @@ channel->addDataSink(recorder);
 The dump covers `[trigger - window, trigger + post_trigger]` in snapshot time, so it
 behaves the same in simulation, in a replay and on the robot. `requestDump()` returns false
 while an earlier dump is still in progress (the result is `[[nodiscard]]`). `setDumpCallback()` reports every file written
-or failed. [T06_flight_recorder.cpp](../data_tamer_cpp/examples/T06_flight_recorder.cpp)
+or failed (the dump is written as described in
+[Recording to MCAP files](#recording-to-mcap-files), with `fsync()` and the bounded page
+cache). [T06_flight_recorder.cpp](../data_tamer_cpp/examples/T06_flight_recorder.cpp)
 is a complete example.
 
 ### Publishing on ROS 2

@@ -23,11 +23,9 @@
 #include <variant>
 #include <vector>
 
-#include <csignal>
 #include <fstream>
 #include <iterator>
 
-#include <sys/resource.h>
 #include <unistd.h>
 
 using namespace DataTamer2;
@@ -1083,29 +1081,13 @@ TEST(MCAPRingSink, ReportsWriteFailure)
     source.take(ts);
     sink.drain();
   }
-  rlimit original{};
-  ASSERT_EQ(::getrlimit(RLIMIT_FSIZE, &original), 0);
-  if(original.rlim_max != RLIM_INFINITY && original.rlim_max < 4096)
-  {
-    GTEST_SKIP() << "file size limit already below the test size";
-  }
   bool flushed = false;
   {
-    // Restores the limit and the handler on every path, ASSERTs included, so
-    // that later tests in this process can write files.
-    struct Restore
+    DataTamerTest::FileSizeLimit limit(4096);
+    if(!limit.ok())
     {
-      rlimit limit;
-      void (*handler)(int);
-      ~Restore()
-      {
-        ::setrlimit(RLIMIT_FSIZE, &limit);
-        std::signal(SIGXFSZ, handler);
-      }
-    } restore{ original, std::signal(SIGXFSZ, SIG_IGN) };
-    rlimit limited = original;
-    limited.rlim_cur = 4096;
-    ASSERT_EQ(::setrlimit(RLIMIT_FSIZE, &limited), 0);
+      GTEST_SKIP() << "cannot lower the file size limit";
+    }
     ASSERT_TRUE(sink->requestDump());
     flushed = sink->flushPendingDump();
   }
