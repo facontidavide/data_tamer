@@ -6,9 +6,11 @@
 #include <mcap/reader.hpp>
 
 #include <gtest/gtest.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -36,6 +38,45 @@ inline std::string tempPath(const std::string& tag)
 {
   return detail::uniqueName(tag).string() + ".mcap";
 }
+
+/// Limits the size of the files this process writes to `bytes` and ignores SIGXFSZ,
+/// restoring both on destruction, so that later tests can write files.
+class FileSizeLimit
+{
+public:
+  explicit FileSizeLimit(rlim_t bytes)
+  {
+    ok_ = ::getrlimit(RLIMIT_FSIZE, &original_) == 0 &&
+          (original_.rlim_max == RLIM_INFINITY || original_.rlim_max >= bytes);
+    if(!ok_)
+    {
+      return;
+    }
+    handler_ = std::signal(SIGXFSZ, SIG_IGN);
+    active_ = true;
+    rlimit limited = original_;
+    limited.rlim_cur = bytes;
+    ok_ = ::setrlimit(RLIMIT_FSIZE, &limited) == 0;
+  }
+  ~FileSizeLimit()
+  {
+    if(active_)  // handler_ may be SIG_DFL, a null pointer
+    {
+      ::setrlimit(RLIMIT_FSIZE, &original_);
+      std::signal(SIGXFSZ, handler_);
+    }
+  }
+  FileSizeLimit(const FileSizeLimit&) = delete;
+  FileSizeLimit& operator=(const FileSizeLimit&) = delete;
+
+  bool ok() const { return ok_; }
+
+private:
+  rlimit original_{};
+  void (*handler_)(int) = nullptr;
+  bool active_ = false;
+  bool ok_ = false;
+};
 
 /// A new directory in the temporary directory, removed with its content on destruction.
 class ScratchDir

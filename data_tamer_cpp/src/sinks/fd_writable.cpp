@@ -91,7 +91,8 @@ FileOps defaultFileOps()
   return ops;
 }
 
-std::unique_ptr<FdWritable> FdWritable::open(const std::string& path, FileOps ops)
+std::unique_ptr<FdWritable> FdWritable::open(const std::string& path, FileOps ops,
+                                             size_t buffer_bytes)
 {
   errno = 0;
   const int fd = ops.open(path.c_str());
@@ -100,12 +101,15 @@ std::unique_ptr<FdWritable> FdWritable::open(const std::string& path, FileOps op
     const int code = errno;
     throw std::runtime_error("cannot open " + path + ": " + errnoText(code));
   }
-  return std::unique_ptr<FdWritable>(new FdWritable(fd, path, std::move(ops)));
+  return std::unique_ptr<FdWritable>(
+      new FdWritable(fd, path, std::move(ops), buffer_bytes));
 }
 
-FdWritable::FdWritable(int fd, std::string path, FileOps ops)
-  : fd_(fd), path_(std::move(path)), ops_(std::move(ops))
-{}
+FdWritable::FdWritable(int fd, std::string path, FileOps ops, size_t buffer_bytes)
+  : fd_(fd), path_(std::move(path)), ops_(std::move(ops)), buffer_capacity_(buffer_bytes)
+{
+  buffer_.reserve(buffer_capacity_);
+}
 
 FdWritable::~FdWritable()
 {
@@ -132,6 +136,38 @@ void FdWritable::handleWrite(const std::byte* data, uint64_t size)
   {
     return;
   }
+  // McapWriter writes every field of a record separately, two 8-byte writes per
+  // message in a message index: those go through the buffer, a chunk goes straight
+  // to the file.
+  if(buffer_.size() + size > buffer_capacity_)
+  {
+    flushBuffer();
+    if(error_ != 0)
+    {
+      return;
+    }
+  }
+  if(size >= buffer_capacity_)
+  {
+    writeToFile(data, size);
+  }
+  else
+  {
+    buffer_.insert(buffer_.end(), data, data + size);
+  }
+}
+
+void FdWritable::flushBuffer()
+{
+  if(!buffer_.empty() && error_ == 0 && fd_ >= 0)
+  {
+    writeToFile(buffer_.data(), buffer_.size());
+  }
+  buffer_.clear();
+}
+
+void FdWritable::writeToFile(const std::byte* data, uint64_t size)
+{
   const auto* cursor = reinterpret_cast<const char*>(data);
   uint64_t remaining = size;
   while(remaining > 0)
@@ -154,7 +190,7 @@ void FdWritable::handleWrite(const std::byte* data, uint64_t size)
     }
     cursor += written;
     remaining -= static_cast<uint64_t>(written);
-    size_ += static_cast<uint64_t>(written);
+    written_ += static_cast<uint64_t>(written);
   }
   flushWindow();
 }
@@ -163,7 +199,7 @@ void FdWritable::flushWindow()
 {
   // Ranges end on a page boundary: the partial last page would be written twice, and
   // POSIX_FADV_DONTNEED keeps partial pages in the cache.
-  const uint64_t end = size_ & ~(kPageBytes - 1);
+  const uint64_t end = written_ & ~(kPageBytes - 1);
   if(!range_flush_ || !ops_.sync_range || end - writeback_started_ < kFlushWindowBytes)
   {
     return;
@@ -184,7 +220,7 @@ void FdWritable::flushWindow()
   {
     return;
   }
-  dropCache(dropped_, previous_end);
+  dropCache(dropped_, previous_end - dropped_);
   dropped_ = previous_end;
 }
 
@@ -215,12 +251,11 @@ bool FdWritable::syncRange(uint64_t from, uint64_t to, unsigned flags)
   return false;
 }
 
-void FdWritable::dropCache(uint64_t from, uint64_t to) const
+void FdWritable::dropCache(uint64_t offset, uint64_t len) const
 {
   if(ops_.drop_cache)
   {
-    const int64_t len = (to == 0) ? 0 : static_cast<int64_t>(to - from);
-    ops_.drop_cache(fd_, static_cast<int64_t>(from), len);
+    ops_.drop_cache(fd_, static_cast<int64_t>(offset), static_cast<int64_t>(len));
   }
 }
 
@@ -230,6 +265,7 @@ void FdWritable::end()
   {
     return;
   }
+  flushBuffer();
   errno = 0;
   if(ops_.fsync(fd_) != 0)
   {
@@ -237,7 +273,7 @@ void FdWritable::end()
   }
   else
   {
-    dropCache(0, 0);  // all of it is on disk: the whole file's cache is clean
+    dropCache(0, 0);  // all of it is on disk; a length of 0 means to the end of the file
   }
   errno = 0;
   if(ops_.close(fd_) != 0)

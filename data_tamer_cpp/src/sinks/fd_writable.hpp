@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <mcap/writer.hpp>
 
@@ -68,25 +69,30 @@ public:
   /// 4 KiB pages. A larger page only leaves one partial page per window in the cache.
   static constexpr uint64_t kPageBytes = 4096;
 
+  /// Writes smaller than this are collected and written together.
+  static constexpr size_t kBufferBytes = size_t(64) << 10;
+
   /// The sync_file_range() flags, with the Linux values.
   static constexpr unsigned kSyncWaitBefore = 1;
   static constexpr unsigned kSyncWrite = 2;
   static constexpr unsigned kSyncWaitAfter = 4;
 
   /// Creates or truncates `path`. Throws std::runtime_error, with the path and the
-  /// reason, if it cannot be opened.
+  /// reason, if it cannot be opened. `buffer_bytes` 0 sends every write() to the
+  /// file at once (the tests of the system calls use it).
   static std::unique_ptr<FdWritable> open(const std::string& path,
-                                          FileOps ops = defaultFileOps());
+                                          FileOps ops = defaultFileOps(),
+                                          size_t buffer_bytes = kBufferBytes);
 
   FdWritable(const FdWritable&) = delete;
   FdWritable& operator=(const FdWritable&) = delete;
   ~FdWritable() override;
 
-  /// fsync() then close(), latching the first error of either. Idempotent.
+  /// Writes the buffer, then fsync() and close(), latching the first error. Idempotent.
   void end() override;
 
-  /// Bytes handed to the descriptor so far.
-  uint64_t size() const override { return size_; }
+  /// Bytes handed to this object so far, buffered ones included.
+  uint64_t size() const override { return written_ + buffer_.size(); }
 
   /// The latched errno, 0 if no call failed.
   int error() const { return error_; }
@@ -98,7 +104,14 @@ protected:
   void handleWrite(const std::byte* data, uint64_t size) override;
 
 private:
-  FdWritable(int fd, std::string path, FileOps ops);
+  FdWritable(int fd, std::string path, FileOps ops, size_t buffer_bytes);
+
+  /// Writes the buffer to the file. Not mcap::IWritable::flush(), which older MCAP
+  /// releases (ROS 2 Humble's mcap_vendor) lack.
+  void flushBuffer();
+
+  /// write() until all of it is written, then flushWindow().
+  void writeToFile(const std::byte* data, uint64_t size);
 
   void latch(int code, const char* call);
 
@@ -112,14 +125,16 @@ private:
   /// whether the data is on disk. Any other error is latched like a write() error.
   bool syncRange(uint64_t from, uint64_t to, unsigned flags);
 
-  /// Drops [from, to) from the page cache, `to == 0` meaning the end of the file.
-  /// Advisory: a failure is ignored.
-  void dropCache(uint64_t from, uint64_t to) const;
+  /// posix_fadvise(POSIX_FADV_DONTNEED) on `len` bytes from `offset`, 0 meaning to the
+  /// end of the file. Advisory: a failure is ignored.
+  void dropCache(uint64_t offset, uint64_t len) const;
 
   int fd_ = -1;
   std::string path_;
   FileOps ops_;
-  uint64_t size_ = 0;
+  size_t buffer_capacity_;
+  std::vector<std::byte> buffer_;
+  uint64_t written_ = 0;  // bytes the descriptor accepted
   int error_ = 0;
   const char* error_call_ = "";
   bool range_flush_ = true;

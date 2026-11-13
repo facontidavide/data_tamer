@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -103,6 +104,12 @@ struct ScriptedOps
   }
 };
 
+/// Every write() reaches the injected calls at once, as the tests of them expect.
+std::unique_ptr<FdWritable> openUnbuffered(FileOps ops)
+{
+  return FdWritable::open("/ignored", std::move(ops), 0);
+}
+
 void writeString(FdWritable& file, const std::string& text)
 {
   file.write(reinterpret_cast<const std::byte*>(text.data()), text.size());
@@ -171,7 +178,7 @@ TEST(FdWritable, PartialWritesAreLoopedToCompletion)
 {
   ScriptedOps scripted;
   scripted.script = { 4, 3 };
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeString(*file, "0123456789");
   EXPECT_EQ(scripted.written, "0123456789");
   EXPECT_EQ(file->size(), 10u);
@@ -183,7 +190,7 @@ TEST(FdWritable, EintrIsRetriedNotLatched)
 {
   ScriptedOps scripted;
   scripted.script = { -EINTR, 2, -EINTR };
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeString(*file, "abcdef");
   EXPECT_EQ(scripted.written, "abcdef");
   EXPECT_EQ(file->error(), 0);
@@ -193,7 +200,7 @@ TEST(FdWritable, TheFirstErrnoIsLatchedAndWritingStops)
 {
   ScriptedOps scripted;
   scripted.script = { 5, -ENOSPC };
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeString(*file, "0123456789");
   EXPECT_EQ(file->error(), ENOSPC);
   EXPECT_EQ(file->size(), 5u);
@@ -211,7 +218,7 @@ TEST(FdWritable, AWriteOfZeroBytesIsAnError)
 {
   ScriptedOps scripted;
   scripted.script = { 0 };
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeString(*file, "abc");
   EXPECT_EQ(file->error(), EIO);
 }
@@ -220,7 +227,7 @@ TEST(FdWritable, EndLatchesAFailedFsyncAndStillCloses)
 {
   ScriptedOps scripted;
   scripted.fsync_errno = EIO;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeMiBPieces(*file, 1u << 20);
   file->end();
   EXPECT_EQ(file->error(), EIO);
@@ -237,7 +244,7 @@ TEST(FdWritable, EndLatchesAFailedClose)
 {
   ScriptedOps scripted;
   scripted.close_errno = EIO;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   file->end();
   EXPECT_EQ(file->error(), EIO);
   EXPECT_NE(file->errorMessage().find("close"), std::string::npos);
@@ -246,7 +253,7 @@ TEST(FdWritable, EndLatchesAFailedClose)
 TEST(FdWritable, TheDestructorClosesAFileNotEnded)
 {
   ScriptedOps scripted;
-  FdWritable::open("/ignored", scripted.ops()).reset();
+  openUnbuffered(scripted.ops()).reset();
   EXPECT_EQ(scripted.close_calls, 1);
   EXPECT_EQ(scripted.fsync_calls, 0);
 }
@@ -254,7 +261,7 @@ TEST(FdWritable, TheDestructorClosesAFileNotEnded)
 TEST(FdWritable, FlushesEachWindowAndDropsThePreviousOne)
 {
   ScriptedOps scripted;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeMiBPieces(*file, 3 * kWindow);
   const std::vector<RangeCall> expected{
     sync(0, kWindow, kKick),            //
@@ -276,7 +283,7 @@ TEST(FdWritable, FlushesEachWindowAndDropsThePreviousOne)
 TEST(FdWritable, AFileSmallerThanAWindowIsOnlyDroppedAtTheEnd)
 {
   ScriptedOps scripted;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeMiBPieces(*file, kWindow - (1u << 20));
   EXPECT_TRUE(scripted.range_calls.empty());
   file->end();
@@ -289,7 +296,7 @@ TEST(FdWritable, WithoutRangeCallsOnlyTheFsyncRuns)
   FileOps ops = scripted.ops();
   ops.sync_range = nullptr;  // a platform without sync_file_range()
   ops.drop_cache = nullptr;
-  auto file = FdWritable::open("/ignored", ops);
+  auto file = openUnbuffered(ops);
   writeMiBPieces(*file, 3 * kWindow);
   file->end();
   EXPECT_EQ(file->error(), 0);
@@ -301,7 +308,7 @@ TEST(FdWritable, ASyncRangeDataErrorIsLatched)
 {
   ScriptedOps scripted;
   scripted.sync_range_errno = EIO;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeMiBPieces(*file, 2 * kWindow);
   EXPECT_EQ(file->error(), EIO);
   EXPECT_NE(file->errorMessage().find("sync_file_range"), std::string::npos);
@@ -315,7 +322,7 @@ TEST(FdWritable, AnUnexpectedSyncRangeErrorIsLatchedToo)
 {
   ScriptedOps scripted;
   scripted.sync_range_errno = ENODATA;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   writeMiBPieces(*file, 2 * kWindow);
   EXPECT_EQ(file->error(), ENODATA);
 }
@@ -330,7 +337,7 @@ TEST(FdWritable, AnUnsupportedOrOutOfMemorySyncRangeLeavesTheVerdictToFsync)
     SCOPED_TRACE(code);
     ScriptedOps scripted;
     scripted.sync_range_errno = code;
-    auto file = FdWritable::open("/ignored", scripted.ops());
+    auto file = openUnbuffered(scripted.ops());
     writeMiBPieces(*file, 3 * kWindow);
     EXPECT_EQ(file->error(), 0);
     EXPECT_EQ(file->size(), 3 * kWindow);
@@ -354,7 +361,7 @@ TEST(FdWritable, AFailedWaitSkipsTheDrop)
     }
     return 0;
   };
-  auto file = FdWritable::open("/ignored", ops);
+  auto file = openUnbuffered(ops);
   writeMiBPieces(*file, 2 * kWindow);
   const std::vector<RangeCall> expected{
     sync(0, kWindow, kKick),
@@ -368,7 +375,7 @@ TEST(FdWritable, AFailedWaitSkipsTheDrop)
 TEST(FdWritable, UnalignedWritesFlushWholePagesWithoutGaps)
 {
   ScriptedOps scripted;
-  auto file = FdWritable::open("/ignored", scripted.ops());
+  auto file = openUnbuffered(scripted.ops());
   const std::string piece(777777, 'x');
   while(file->size() < 2 * kWindow + piece.size())
   {
@@ -389,6 +396,44 @@ TEST(FdWritable, UnalignedWritesFlushWholePagesWithoutGaps)
   EXPECT_GE(next, int64_t(2 * kWindow));
 }
 
+TEST(FdWritable, SmallWritesAreCollectedIntoOneWrite)
+{
+  ScriptedOps scripted;
+  auto file = FdWritable::open("/ignored", scripted.ops());
+  writeString(*file, "abc");
+  writeString(*file, "defg");
+  EXPECT_EQ(scripted.calls, 0u);
+  EXPECT_EQ(file->size(), 7u);  // buffered bytes count, as McapWriter needs
+  file->end();
+  EXPECT_EQ(scripted.calls, 1u);
+  EXPECT_EQ(scripted.written, "abcdefg");
+}
+
+TEST(FdWritable, ALargeWriteGoesAfterTheBufferedBytes)
+{
+  ScriptedOps scripted;
+  auto file = FdWritable::open("/ignored", scripted.ops());
+  const std::string large(FdWritable::kBufferBytes, 'L');
+  writeString(*file, "small");
+  writeString(*file, large);
+  EXPECT_EQ(scripted.calls, 2u);
+  EXPECT_EQ(scripted.written, "small" + large);
+  file->end();
+  EXPECT_EQ(scripted.calls, 2u);  // nothing left in the buffer
+}
+
+TEST(FdWritable, AFailedWriteOfTheBufferIsLatchedByEnd)
+{
+  ScriptedOps scripted;
+  scripted.script = { -ENOSPC };
+  auto file = FdWritable::open("/ignored", scripted.ops());
+  writeString(*file, "abc");
+  EXPECT_EQ(file->error(), 0);
+  file->end();
+  EXPECT_EQ(file->error(), ENOSPC);
+  EXPECT_EQ(scripted.close_calls, 1);
+}
+
 // Window boundaries fall inside uneven writes, on the real system calls.
 TEST(FdWritable, ARealFileOfSeveralWindowsKeepsItsBytes)
 {
@@ -401,11 +446,14 @@ TEST(FdWritable, ARealFileOfSeveralWindowsKeepsItsBytes)
     pattern[i] = static_cast<char>(i * 31u);
   }
   auto file = FdWritable::open(path);
-  constexpr uint64_t kPiece = 777777;
-  for(uint64_t done = 0; done < total; done += kPiece)
+  // Large writes that go straight to the file, mixed with small ones that are buffered.
+  const uint64_t pieces[] = { 777777, 13, 70000, 1000, 8 };
+  uint64_t done = 0;
+  for(size_t i = 0; done < total; ++i)
   {
-    file->write(reinterpret_cast<const std::byte*>(pattern.data() + done),
-                std::min(kPiece, total - done));
+    const uint64_t n = std::min(pieces[i % std::size(pieces)], total - done);
+    file->write(reinterpret_cast<const std::byte*>(pattern.data() + done), n);
+    done += n;
   }
   file->end();
   ASSERT_EQ(file->error(), 0) << file->errorMessage();

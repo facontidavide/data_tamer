@@ -19,6 +19,13 @@
 
 namespace DataTamer2
 {
+namespace
+{
+[[noreturn]] void throwWriteFailed(const std::string& reason)
+{
+  throw std::runtime_error("MCAP write failed: " + reason);
+}
+}  // namespace
 
 namespace details
 {
@@ -112,7 +119,7 @@ struct MCAPSink::Pimpl
     {
       const std::string error = std::move(close_error);
       close_error.clear();
-      throw std::runtime_error("MCAP write failed: " + error);
+      throwWriteFailed(error);
     }
   }
 };
@@ -200,13 +207,13 @@ void MCAPSink::onSnapshot(const SnapshotRef& ref)
       *_p->writer, channel.id, channel.next_sequence++, snapshot, _p->message_body);
   if(!status.ok())
   {
-    throw std::runtime_error("MCAP write failed: " + status.message);
+    throwWriteFailed(status.message);
   }
   // The writer flushes whole chunks: a failed write() shows up here, at the snapshot
   // that completed the chunk, and at every later one until the file changes.
   if(_p->file->error() != 0)
   {
-    throw std::runtime_error("MCAP write failed: " + _p->file->errorMessage());
+    throwWriteFailed(_p->file->errorMessage());
   }
 
   // If reset_time is exceeded, continue in a new numbered file (the default), or
@@ -250,7 +257,7 @@ void MCAPSink::stopRecording()
   const std::string error = _p->closeFile();  // idempotent
   if(!error.empty())
   {
-    throw std::runtime_error("MCAP write failed: " + error);
+    throwWriteFailed(error);
   }
 }
 
